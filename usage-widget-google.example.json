@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy this to ~/.claude/usage-widget-google.json and fill in your own Google OAuth Desktop-app credentials. See README → 'Google Calendar setup'. This file is optional; Calendar sync stays off until it's present.",
+  "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+  "client_secret": "YOUR_CLIENT_SECRET"
+}

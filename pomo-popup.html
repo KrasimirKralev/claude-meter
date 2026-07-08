@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';">
+<title>Pomodoro</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    /* karchx defaults — overridden by theme-update IPC on load */
+    --bg: #ece4d6;
+    --surface: #f3ecde;
+    --border: #d4c8b3;
+    --text: #1f1c18;
+    --text-dim: #6b5f54;
+    --green: #4a7a4a;
+    --accent: #3b2a3a;
+    --blue: #3e5577;
+  }
+  body {
+    font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    user-select: none;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .popup {
+    text-align: center;
+    padding: 24px;
+    width: 100%;
+    animation: popIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+  }
+  @keyframes popIn {
+    0% { opacity: 0; transform: scale(0.9) translateY(10px); }
+    100% { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  /* Ring gauge */
+  .ring-wrap {
+    position: relative;
+    width: 100px;
+    height: 100px;
+    margin: 0 auto 16px;
+  }
+  .ring-svg {
+    width: 100px;
+    height: 100px;
+    transform: rotate(-90deg);
+  }
+  .ring-bg { fill: none; stroke: var(--border); stroke-width: 4; }
+  .ring-fill {
+    fill: none;
+    stroke-width: 5;
+    stroke-linecap: round;
+    stroke-dasharray: 251.3;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 0.5s ease;
+  }
+  .ring-fill.work { stroke: var(--green); filter: drop-shadow(0 0 8px rgba(52, 211, 153, 0.4)); }
+  .ring-fill.break { stroke: var(--blue); filter: drop-shadow(0 0 8px rgba(96, 165, 250, 0.4)); }
+  .ring-icon {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 32px;
+    line-height: 1;
+  }
+
+  .title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    letter-spacing: -0.3px;
+  }
+  .title.work { color: var(--green); }
+  .title.break { color: var(--blue); }
+
+  .subtitle {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 20px;
+    line-height: 1.4;
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+  }
+  .btn {
+    padding: 8px 20px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  .btn:active { transform: scale(0.95); }
+  .btn-primary {
+    color: #fff;
+  }
+  .btn-primary.work {
+    background: linear-gradient(135deg, #22c55e, #16a34a);
+    box-shadow: 0 2px 12px rgba(34, 197, 94, 0.3);
+  }
+  .btn-primary.break {
+    background: linear-gradient(135deg, #3b82f6, #2563eb);
+    box-shadow: 0 2px 12px rgba(59, 130, 246, 0.3);
+  }
+  .btn-primary:hover { transform: translateY(-1px); }
+  .btn-secondary {
+    background: var(--surface);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { color: var(--text); border-color: var(--text-dim); }
+
+  /* Confetti */
+  .confetti-container {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: -1;
+  }
+  .confetti {
+    position: absolute;
+    width: 6px; height: 6px;
+    top: -10px;
+    animation: confettiFall 2.5s ease-in forwards;
+  }
+  @keyframes confettiFall {
+    0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+    80% { opacity: 1; }
+    100% { transform: translateY(350px) rotate(720deg); opacity: 0; }
+  }
+
+  /* Countdown text */
+  .countdown {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 12px;
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    opacity: 0.5;
+  }
+
+  /* Auto-dismiss progress bar */
+  .progress-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    height: 2px;
+    border-radius: 0 1px 0 0;
+    animation: progressShrink 15s linear forwards;
+  }
+  .progress-bar.work { background: var(--green); }
+  .progress-bar.break { background: var(--blue); }
+  @keyframes progressShrink {
+    0% { width: 100%; }
+    100% { width: 0%; }
+  }
+</style>
+
+<style>
+  /* ===== POP BRUTALIST OVERRIDES ===== */
+  :root {
+    --bg: #f0ede4; --surface: #ffffff; --border: #111111; --ink: #111111;
+    --text: #111111; --text-dim: #6f6a5e;
+    --accent: #ff90e8; --accent-glow: rgba(17,17,17,0);
+    --accent-grad-start: #ff90e8; --accent-grad-end: #ff90e8;
+    --green: #23a094; --red: #e5484d; --yellow: #ffc900;
+    --pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  body { background: var(--bg) !important; padding: 4px 9px 9px 4px !important; }
+  .popup {
+    background: var(--surface) !important;
+    border: 3px solid var(--ink) !important;
+    border-radius: 14px !important;
+    box-shadow: 5px 5px 0 var(--ink) !important;
+  }
+  .title { font-weight: 900 !important; color: var(--ink) !important; text-transform: uppercase; letter-spacing: 0.4px; }
+  .title.critical { color: var(--red) !important; }
+  .event-name { font-weight: 800 !important; color: var(--ink) !important; }
+  .subtitle { color: var(--text-dim) !important; font-weight: 600 !important; }
+  .ring-bg { stroke: #e8e2d4 !important; stroke-width: 7 !important; }
+  .ring-fill { stroke: var(--ink) !important; stroke-width: 7 !important; }
+  .ring-fill.work { stroke: var(--green) !important; }
+  .ring-fill.critical, .progress-bar.critical { stroke: var(--red) !important; }
+  .btn {
+    border: 2.5px solid var(--ink) !important;
+    border-radius: 9px !important;
+    box-shadow: 3px 3px 0 var(--ink) !important;
+    font-weight: 900 !important;
+    text-transform: uppercase; letter-spacing: 0.8px;
+    color: var(--ink) !important;
+    background: var(--surface) !important;
+    transition: all 0.13s var(--pop) !important;
+  }
+  .btn:hover { transform: translate(-1px,-1px) !important; box-shadow: 4px 4px 0 var(--ink) !important; }
+  .btn:active { transform: translate(2px,2px) !important; box-shadow: 0.5px 0.5px 0 var(--ink) !important; }
+  .btn-primary { background: var(--accent) !important; }
+  .btn-primary.work { background: var(--green) !important; color: #fff !important; }
+  .countdown { color: var(--text-dim) !important; font-weight: 700 !important; }
+  .progress-bar { background: var(--ink) !important; opacity: 0.25; }
+</style>
+</head>
+<body>
+<div class="confetti-container" id="confetti"></div>
+<div class="popup" id="popup">
+  <div class="ring-wrap">
+    <svg class="ring-svg" viewBox="0 0 88 88">
+      <circle class="ring-bg" cx="44" cy="44" r="40"/>
+      <circle class="ring-fill work" id="ringFill" cx="44" cy="44" r="40"/>
+    </svg>
+    <div class="ring-icon" id="ringIcon"></div>
+  </div>
+  <div class="title work" id="title">Focus session complete!</div>
+  <div class="subtitle" id="subtitle">Great work! Time for a 5 minute break.</div>
+  <div class="btn-row">
+    <button class="btn btn-primary work" id="primaryBtn">Start Break</button>
+    <button class="btn btn-secondary" id="dismissBtn">Dismiss</button>
+  </div>
+  <div class="countdown" id="countdown">Auto-dismiss in 15s</div>
+  <div class="progress-bar work" id="progressBar"></div>
+</div>
+<script src="pomo-popup-renderer.js"></script>
+</body>
+</html>

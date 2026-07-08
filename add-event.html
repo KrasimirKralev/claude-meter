@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self';">
+<title>New Event</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    /* karchx defaults — overridden by theme-update IPC on load */
+    --bg: #ece4d6;
+    --surface: #f3ecde;
+    --surface2: #ebe2cf;
+    --border: #d4c8b3;
+    --text: #1f1c18;
+    --text-dim: #6b5f54;
+    --accent: #3b2a3a;
+    --green: #4a7a4a;
+    --red: #a83b3b;
+  }
+  body {
+    font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    user-select: none;
+    -webkit-app-region: drag;
+  }
+  .window {
+    padding: 16px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+  .title { font-size: 15px; font-weight: 700; color: var(--accent); }
+  .close-btn {
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--red); border: none; cursor: pointer;
+    -webkit-app-region: no-drag;
+  }
+
+  /* Smart input */
+  .smart-input-wrap {
+    position: relative;
+    margin-bottom: 12px;
+    -webkit-app-region: no-drag;
+  }
+  .smart-input {
+    width: 100%;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    font-size: 14px;
+    color: var(--text);
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .smart-input:focus { border-color: var(--accent); }
+  .smart-input::placeholder { color: var(--text-dim); }
+  .smart-hint {
+    font-size: 9px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    letter-spacing: 0.3px;
+  }
+  .smart-preview {
+    display: none;
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 11px;
+  }
+  .smart-preview.visible { display: block; }
+  .preview-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 3px;
+  }
+  .preview-label { color: var(--text-dim); width: 50px; font-size: 10px; }
+  .preview-value { color: var(--text); font-weight: 600; }
+  .preview-value.accent { color: var(--accent); }
+
+  /* Divider */
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0;
+    color: var(--text-dim);
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .divider::before, .divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* Manual fields */
+  .fields {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    -webkit-app-region: no-drag;
+  }
+  .field-row { display: flex; gap: 8px; align-items: center; }
+  .field-label { font-size: 10px; color: var(--text-dim); width: 55px; flex-shrink: 0; }
+  .field-input {
+    flex: 1;
+    padding: 7px 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text);
+    font-family: inherit;
+    outline: none;
+  }
+  .field-input:focus { border-color: var(--accent); }
+  select.field-input { cursor: pointer; }
+
+  /* Color picker */
+  .color-picker { display: flex; gap: 6px; }
+  .color-dot {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: all 0.12s;
+  }
+  .color-dot:hover { transform: scale(1.15); }
+  .color-dot.active { border-color: #fff; }
+
+  /* Action buttons */
+  .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+    padding-top: 12px;
+    -webkit-app-region: no-drag;
+  }
+  .btn {
+    flex: 1;
+    padding: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.12s;
+    text-align: center;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), #c06a3a);
+    color: #fff;
+  }
+  .btn-primary:hover { opacity: 0.9; transform: scale(1.02); }
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { border-color: var(--text-dim); }
+
+  .feedback {
+    text-align: center;
+    font-size: 11px;
+    color: var(--green);
+    margin-top: 6px;
+    min-height: 16px;
+  }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+
+<style>
+  /* ===== POP BRUTALIST OVERRIDES ===== */
+  :root {
+    --bg: #f0ede4; --surface: #ffffff; --surface2: #f7f3ea;
+    --border: #111111; --ink: #111111;
+    --text: #111111; --text-dim: #6f6a5e;
+    --accent: #ff90e8; --green: #23a094; --red: #e5484d; --yellow: #ffc900;
+    --bar-bg: #f7f3ea;
+    --pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  body { background: var(--bg) !important; color: var(--ink) !important; }
+  button {
+    font-weight: 800 !important;
+    transition: all 0.13s var(--pop) !important;
+  }
+  input, textarea, select {
+    border: 2px solid var(--ink) !important;
+    border-radius: 8px !important;
+    background: var(--surface) !important;
+    color: var(--ink) !important;
+    font-weight: 600 !important;
+  }
+  input:focus, textarea:focus, select:focus {
+    outline: none !important;
+    box-shadow: 2.5px 2.5px 0 var(--ink) !important;
+  }
+  ::-webkit-scrollbar-thumb { background: var(--ink) !important; }
+
+  .form-title, h1, h2 { font-weight: 900 !important; text-transform: uppercase; letter-spacing: 0.5px; }
+  .color-swatch, .color-dot { border: 2px solid var(--ink) !important; }
+  .btn-save, .save-btn, button[type="submit"] {
+    background: var(--green) !important;
+    color: #fff !important;
+    border: 2.5px solid var(--ink) !important;
+    border-radius: 9px !important;
+    box-shadow: 3px 3px 0 var(--ink) !important;
+    text-transform: uppercase;
+  }
+  .btn-save:hover, .save-btn:hover { transform: translate(-1px,-1px); box-shadow: 4px 4px 0 var(--ink) !important; }
+
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="header">
+    <span class="title">New Event</span>
+    <button class="close-btn" id="closeBtn"></button>
+  </div>
+
+  <div class="smart-input-wrap">
+    <input class="smart-input" id="smartInput" placeholder="Среща утре в 15:00 1h" autofocus>
+    <div class="smart-hint">Type naturally — date, time & duration are auto-detected</div>
+    <div class="smart-preview" id="preview">
+      <div class="preview-row"><span class="preview-label">Title</span><span class="preview-value" id="prevTitle"></span></div>
+      <div class="preview-row"><span class="preview-label">Date</span><span class="preview-value accent" id="prevDate"></span></div>
+      <div class="preview-row"><span class="preview-label">Time</span><span class="preview-value accent" id="prevTime"></span></div>
+      <div class="preview-row"><span class="preview-label">Duration</span><span class="preview-value" id="prevDur"></span></div>
+    </div>
+  </div>
+
+  <div class="divider">or set manually</div>
+
+  <div class="fields">
+    <div class="field-row">
+      <span class="field-label">Date</span>
+      <input type="date" class="field-input" id="dateField">
+    </div>
+    <div class="field-row">
+      <span class="field-label">Time</span>
+      <input type="time" class="field-input" id="timeField">
+    </div>
+    <div class="field-row">
+      <span class="field-label">Duration</span>
+      <select class="field-input" id="durField">
+        <option value="">None</option>
+        <option value="15">15 min</option>
+        <option value="30">30 min</option>
+        <option value="60">1 hour</option>
+        <option value="90">1.5 hours</option>
+        <option value="120">2 hours</option>
+        <option value="180">3 hours</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <span class="field-label">Reminder</span>
+      <select class="field-input" id="remField">
+        <option value="15">15 min before</option>
+        <option value="5">5 min before</option>
+        <option value="0">At time</option>
+        <option value="30">30 min before</option>
+        <option value="60">1 hour before</option>
+        <option value="">None</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <span class="field-label">Color</span>
+      <div class="color-picker" id="colorPicker">
+        <div class="color-dot active" data-color="blue" style="background:#60a5fa;"></div>
+        <div class="color-dot" data-color="green" style="background:#4ade80;"></div>
+        <div class="color-dot" data-color="orange" style="background:#fb923c;"></div>
+        <div class="color-dot" data-color="red" style="background:#f87171;"></div>
+        <div class="color-dot" data-color="purple" style="background:#c084fc;"></div>
+      </div>
+    </div>
+    <div class="field-row">
+      <span class="field-label">Repeat</span>
+      <select class="field-input" id="recField">
+        <option value="">None</option>
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+        <option value="biweekly">Every 2 weeks</option>
+        <option value="monthly">Monthly</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="feedback" id="feedback"></div>
+  <div class="actions">
+    <button class="btn btn-secondary" id="cancelBtn">Cancel</button>
+    <button class="btn btn-primary" id="createBtn">Create Event</button>
+  </div>
+</div>
+<script src="add-event-renderer.js"></script>
+</body>
+</html>

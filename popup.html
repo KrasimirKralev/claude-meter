@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';">
+<title>Claude Meter Alert</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #f0ede4;
+    --surface: #ffffff;
+    --border: #111111;
+    --ink: #111111;
+    --text: #111111;
+    --text-dim: #6f6a5e;
+    --bar-bg: #f7f3ea;
+    --accent-color: #ff90e8;
+    --accent-rgb: 255,144,232;
+    --bw: 3px;
+    --pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  }
+  html, body { height: 100%; }
+  body {
+    font-family: Inter, system-ui, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+    padding: 6px 8px 8px 6px;
+  }
+  .popup {
+    position: relative;
+    overflow: hidden;
+    animation: pop-in 0.35s var(--pop);
+    background: var(--surface);
+    border: var(--bw) solid var(--ink);
+    border-radius: 14px;
+    box-shadow: 5px 5px 0 var(--ink);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  @keyframes pop-in {
+    0% { opacity: 0; transform: translateY(18px) rotate(-1deg) scale(0.93); }
+    100% { opacity: 1; transform: translateY(0) rotate(0) scale(1); }
+  }
+
+  .accent-stripe {
+    height: 8px;
+    border-bottom: var(--bw) solid var(--ink);
+    background: var(--accent-color);
+    flex-shrink: 0;
+  }
+
+  .popup-body { padding: 13px 15px 12px; flex: 1; display: flex; flex-direction: column; }
+
+  .popup-top {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    margin-bottom: 10px;
+  }
+  .popup-icon {
+    width: 42px; height: 42px;
+    border: 2.5px solid var(--ink);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    background: var(--accent-color);
+    box-shadow: 2.5px 2.5px 0 var(--ink);
+    color: var(--ink);
+  }
+  .popup-icon.urgent { animation: icon-shake 1.6s ease-in-out infinite; }
+  @keyframes icon-shake {
+    0%, 84%, 100% { transform: rotate(0); }
+    88% { transform: rotate(-8deg); }
+    92% { transform: rotate(8deg); }
+    96% { transform: rotate(-4deg); }
+  }
+  /* Sprite system: all icons live in the DOM, data-icon picks one */
+  .popup-icon svg { width: 24px; height: 24px; display: none; }
+  .popup-icon[data-icon="alarm"] .spr-alarm { display: block; }
+  .popup-icon[data-icon="bolt"]  .spr-bolt  { display: block; }
+  .popup-icon[data-icon="cal"]   .spr-cal   { display: block; }
+  .popup-icon[data-icon="sun"]   .spr-sun   { display: block; }
+  .popup-icon[data-icon="moon"]  .spr-moon  { display: block; }
+  .popup-icon[data-icon="clip"]  .spr-clip  { display: block; }
+  .popup-icon[data-icon="warn"]  .spr-warn  { display: block; }
+  .popup-icon[data-icon="zap"]   .spr-zap   { display: block; }
+
+  .popup-info { flex: 1; min-width: 0; }
+  .popup-label {
+    display: inline-block;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    color: #fff;
+    background: var(--ink);
+    padding: 2.5px 7px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+  }
+  .popup-title {
+    font-size: 15px;
+    font-weight: 900;
+    color: var(--ink);
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: -0.2px;
+  }
+  .popup-subtitle {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-weight: 700;
+    margin-top: 3px;
+    white-space: pre-line;
+  }
+  .popup-digest {
+    display: none;
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: var(--ink);
+    font-weight: 600;
+    white-space: pre-line;
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  .popup-digest.visible { display: block; }
+
+  .popup-rail {
+    height: 12px;
+    background: var(--bar-bg);
+    border: 2px solid var(--ink);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 12px;
+    flex-shrink: 0;
+  }
+  .popup-rail-fill {
+    height: 100%;
+    background: var(--accent-color);
+    width: 0%;
+    transition: width 0.8s var(--pop);
+    border-right: 2px solid var(--ink);
+  }
+
+  .popup-timer {
+    text-align: center;
+    margin-bottom: 12px;
+    display: none;
+  }
+  .popup-timer.visible { display: block; }
+  .popup-timer-value {
+    font-size: 34px;
+    font-weight: 900;
+    font-family: var(--mono);
+    color: var(--ink);
+    letter-spacing: 0;
+    line-height: 1;
+  }
+  .popup-timer-label {
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  .popup-dismiss {
+    display: block;
+    width: 100%;
+    margin-top: auto;
+    padding: 10px;
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--ink);
+    background: var(--surface);
+    border: 2.5px solid var(--ink);
+    border-radius: 9px;
+    box-shadow: 3px 3px 0 var(--ink);
+    cursor: pointer;
+    transition: all 0.13s var(--pop);
+    text-align: center;
+    font-family: inherit;
+    flex-shrink: 0;
+  }
+  .popup-dismiss:hover { transform: translate(-1px,-1px); box-shadow: 4px 4px 0 var(--ink); }
+  .popup-dismiss:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
+  .popup-dismiss.urgent { background: var(--accent-color); }
+
+  .popup-countdown {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 4px;
+  }
+  .popup-countdown-fill {
+    height: 100%;
+    width: 100%;
+    background: var(--ink);
+    opacity: 0.25;
+  }
+  @keyframes cd { from { width: 100%; } to { width: 0%; } }
+</style>
+</head>
+<body>
+<div class="popup" id="popup">
+  <div class="accent-stripe" id="accentStripe"></div>
+  <div class="popup-body">
+    <div class="popup-top">
+      <div class="popup-icon" id="popupIcon" data-icon="cal">
+        <svg class="spr-alarm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.8 2.2"/><path d="M4.5 4.5L2.5 6.8M19.5 4.5l2 2.3"/></svg>
+        <svg class="spr-bolt" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M13.5 2L5 13.5h5.5L9.5 22 19 10h-6z"/></svg>
+        <svg class="spr-cal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><line x1="16" y1="2.8" x2="16" y2="7"/><line x1="8" y1="2.8" x2="8" y2="7"/><line x1="3.5" y1="10.5" x2="20.5" y2="10.5"/><rect x="7" y="13.5" width="4" height="3.5" rx="1" fill="currentColor" stroke="none"/></svg>
+        <svg class="spr-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5 5l1.9 1.9M17.1 17.1L19 19M19 5l-1.9 1.9M6.9 17.1L5 19"/></svg>
+        <svg class="spr-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/></svg>
+        <svg class="spr-clip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"><rect x="4.5" y="4" width="15" height="17.5" rx="2.5"/><rect x="8.5" y="2" width="7" height="4.5" rx="1.5" fill="currentColor"/><path d="M8.5 11h7M8.5 15h7M8.5 18.5h4"/></svg>
+        <svg class="spr-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"><path d="M12 3L1.8 20.5h20.4z"/><line x1="12" y1="10" x2="12" y2="14.5" stroke-linecap="square"/><rect x="10.9" y="16.5" width="2.2" height="2.2" rx="0.5" fill="currentColor" stroke="none"/></svg>
+        <svg class="spr-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square"><path d="M12 3v8M12 21a8 8 0 1 1 0-16" fill="none"/><path d="M12 11l4-4" /></svg>
+      </div>
+      <div class="popup-info">
+        <div class="popup-label" id="popupLabel"></div>
+        <div class="popup-title" id="popupTitle"></div>
+        <div class="popup-subtitle" id="popupSubtitle"></div>
+      </div>
+    </div>
+    <div class="popup-digest" id="popupDigest"></div>
+    <div class="popup-timer" id="popupTimer">
+      <div class="popup-timer-value" id="popupTimerValue">5:00</div>
+      <div class="popup-timer-label">until event</div>
+    </div>
+    <div class="popup-rail">
+      <div class="popup-rail-fill" id="popupRailFill"></div>
+    </div>
+    <button class="popup-dismiss" id="popupDismiss">Dismiss</button>
+  </div>
+  <div class="popup-countdown">
+    <div class="popup-countdown-fill" id="popupCountdownFill"></div>
+  </div>
+</div>
+<script src="popup-renderer.js"></script>
+</body>
+</html>

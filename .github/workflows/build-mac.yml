@@ -1,0 +1,66 @@
+name: Build macOS DMG
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Read app version
+        id: v
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned DMG (Apple Silicon + Intel)
+        run: npm run build:mac
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: List artifacts
+        run: ls -lh dist/*.dmg
+
+      - name: Upload DMGs as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-meter-macos
+          path: dist/*.dmg
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: Claude Meter for macOS v${{ steps.v.outputs.version }}
+          make_latest: true
+          files: dist/*.dmg
+          body: |
+            **Claude Meter — macOS build (unsigned)**
+
+            Two downloads:
+            - `*-arm64.dmg` → Apple Silicon (M1 / M2 / M3 / M4)
+            - `*-x64.dmg` → Intel Macs
+
+            ### First launch (one time, because the build is unsigned)
+            macOS Gatekeeper blocks apps that aren't signed by an Apple Developer ID. To open it the first time:
+
+            1. Open the `.dmg` and drag **Claude Meter** into **Applications**.
+            2. In **Applications**, **right-click** the app → **Open** → **Open** again in the dialog.
+
+            If macOS still refuses ("app is damaged / can't be opened"), open **Terminal** and run:
+            ```
+            xattr -cr "/Applications/Claude Meter.app"
+            ```
+            then open it normally. After the first open it launches like any other app.

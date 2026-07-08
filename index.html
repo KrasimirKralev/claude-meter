@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self';">
+<title>Claude Meter</title>
+<style>
+  /* ============================================================
+     CLAUDE METER — POP BRUTALIST
+     Hard ink borders, offset shadows, candy chips, block meters.
+     ============================================================ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #f0ede4;
+    --surface: #ffffff;
+    --surface2: #f7f3ea;
+    --border: #111111;
+    --ink: #111111;
+    --text: #111111;
+    --text-dim: #6f6a5e;
+    --accent: #ff90e8;   /* candy pink */
+    --green: #23a094;    /* teal */
+    --yellow: #ffc900;   /* taxi yellow */
+    --red: #e5484d;
+    --bar-bg: #ffffff;
+
+    --bw: 2.5px;                    /* border weight */
+    --shadow: 4px 4px 0 var(--ink);
+    --shadow-sm: 2.5px 2.5px 0 var(--ink);
+    --r: 12px;
+    --r-sm: 8px;
+    --mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    --pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  body {
+    font-family: Inter, system-ui, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+  .widget {
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    gap: 8px;
+  }
+  .widget.tight { gap: 7px; padding: 9px 11px; }
+  .widget.very-tight { gap: 5px; padding: 8px 10px; }
+
+  /* ---------- Card base ---------- */
+  .brut-card {
+    background: var(--surface);
+    border: var(--bw) solid var(--ink);
+    border-radius: var(--r);
+    box-shadow: var(--shadow);
+  }
+
+  /* ---------- Header: ink bar ---------- */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex-shrink: 0;
+    background: var(--ink);
+    color: #fff;
+    border-radius: var(--r);
+    padding: 9px 12px;
+  }
+  .header-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .header-icons { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+  .title {
+    font-size: 12px; font-weight: 900; letter-spacing: 0.6px;
+    color: #fff; text-transform: uppercase;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; border: 1.5px solid #fff; }
+  .dot.live { background: var(--green); animation: pulse 2.5s ease-in-out infinite; }
+  .dot.syncing { background: var(--yellow); animation: pulse 0.6s ease-in-out infinite; }
+  .dot.stale { background: #555; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+  .sync-status {
+    font-size: 7px; font-weight: 900;
+    letter-spacing: 1.4px; text-transform: uppercase;
+    display: flex; align-items: center; gap: 3px;
+    padding: 2px 6px; border-radius: 4px;
+  }
+  .sync-status.live { background: var(--green); color: #fff; }
+  .sync-status.syncing { background: var(--yellow); color: var(--ink); }
+  .sync-status .mini-dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: pulse 1.5s ease-in-out infinite; }
+  .streak-badge {
+    display: inline-flex; align-items: center; gap: 2px;
+    font-size: 9px; font-weight: 900;
+    color: var(--ink);
+    background: var(--yellow);
+    border-radius: 4px;
+    padding: 2px 6px;
+    cursor: pointer;
+  }
+  .streak-badge .streak-fire { font-size: 10px; }
+  .window-controls { display: flex; gap: 5px; margin-left: 8px; flex-shrink: 0; }
+  .win-btn {
+    width: 11px; height: 11px; border-radius: 3px;
+    border: 1.5px solid #fff; cursor: pointer; opacity: 0.7;
+    transition: all 0.12s; background: transparent;
+  }
+  .win-btn:hover { opacity: 1; transform: scale(1.15); }
+  .win-btn.minimize { background: var(--yellow); }
+  .win-btn.close { background: var(--red); }
+  .dash-btn {
+    width: 24px; height: 24px; border: none; border-radius: 6px;
+    background: transparent; color: rgba(255,255,255,0.75);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0; flex-shrink: 0;
+    transition: all 0.14s var(--pop);
+    position: relative;
+  }
+  .dash-btn:hover { background: #fff; color: var(--ink); transform: rotate(-6deg) scale(1.1); }
+  .dash-btn:active { transform: scale(0.9); }
+  .dash-btn svg { width: 14px; height: 14px; pointer-events: none; }
+  .icon-badge {
+    position: absolute;
+    top: -4px; right: -4px;
+    min-width: 13px; height: 13px;
+    border-radius: 4px;
+    background: var(--yellow);
+    border: 1.5px solid var(--ink);
+    color: var(--ink);
+    font-size: 7px; font-weight: 900;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0 2px;
+    pointer-events: none;
+    animation: badgePop 0.3s var(--pop);
+  }
+  .icon-badge:empty, .icon-badge.hidden { display: none; }
+  @keyframes badgePop { 0% { transform: scale(0); } 100% { transform: scale(1); } }
+
+  /* ---------- Pomodoro ring ---------- */
+  .pomo-ring-wrap {
+    position: relative;
+    width: 22px; height: 22px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .pomo-ring-svg { width: 22px; height: 22px; transform: rotate(-90deg); pointer-events: none; }
+  .pomo-ring-bg { fill: none; stroke: rgba(255,255,255,0.25); stroke-width: 3; }
+  .pomo-ring-fill { fill: none; stroke: var(--green); stroke-width: 3.5; stroke-linecap: butt; transition: stroke-dashoffset 1s linear; }
+  .pomo-ring-fill.break { stroke: var(--yellow); }
+  .pomo-ring-fill.idle { stroke: rgba(255,255,255,0.4); stroke-width: 2.5; }
+  .pomo-ring-fill.running { stroke: var(--green); }
+  .pomo-ring-text {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 7px; font-weight: 900; color: rgba(255,255,255,0.8);
+    font-family: var(--mono);
+    pointer-events: none;
+  }
+  .pomo-ring-text.active { color: #fff; }
+  .pomo-ring-text.break { color: var(--yellow); }
+  .pomo-tooltip {
+    display: none;
+    position: absolute;
+    top: 32px; left: 50%; transform: translateX(-50%);
+    background: var(--surface);
+    border: var(--bw) solid var(--ink);
+    border-radius: var(--r-sm);
+    box-shadow: var(--shadow);
+    padding: 10px 12px;
+    white-space: nowrap;
+    z-index: 100;
+    min-width: 134px;
+    color: var(--ink);
+  }
+  .pomo-tooltip.open { display: block; animation: tooltipIn 0.18s var(--pop); }
+  @keyframes tooltipIn {
+    0% { opacity: 0; transform: translateX(-50%) translateY(-6px) scale(0.9); }
+    100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  }
+  .pomo-tooltip-time { font-size: 22px; font-weight: 900; text-align: center; font-family: var(--mono); color: var(--ink); letter-spacing: 0; }
+  .pomo-tooltip-time.active { color: var(--green); }
+  .pomo-tooltip-time.break { color: #c78d00; }
+  .pomo-tooltip-label { font-size: 8px; font-weight: 900; text-align: center; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1.4px; margin-top: 2px; margin-bottom: 8px; }
+  .pomo-tooltip-btns { display: flex; gap: 6px; }
+  .pomo-tooltip-btn {
+    flex: 1; padding: 6px 0; font-size: 9px; font-weight: 900;
+    border: 2px solid var(--ink); border-radius: 6px;
+    background: var(--surface); color: var(--ink);
+    cursor: pointer; font-family: inherit; text-align: center;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.12s var(--pop);
+    text-transform: uppercase; letter-spacing: 0.6px;
+  }
+  .pomo-tooltip-btn.primary { background: var(--green); color: #fff; }
+  .pomo-tooltip-btn:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .pomo-tooltip-btn:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
+
+  /* ---------- Pomodoro celebration ---------- */
+  .pomo-celebration {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    padding: 12px 14px;
+    background: var(--green);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 900;
+    text-align: center;
+    z-index: 200;
+    border-bottom: var(--bw) solid var(--ink);
+    overflow: hidden;
+  }
+  .pomo-celebration.visible { display: block; animation: celebSlide 0.4s var(--pop); }
+  @keyframes celebSlide { 0% { transform: translateY(-100%); } 100% { transform: translateY(0); } }
+  .pomo-celebration .celeb-text { position: relative; z-index: 2; text-transform: uppercase; letter-spacing: 0.5px; }
+  .pomo-celebration .celeb-sub { font-size: 9px; font-weight: 700; opacity: 0.9; margin-top: 2px; }
+  .confetti-container { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; overflow: hidden; }
+  .confetti { position: absolute; width: 6px; height: 6px; border: 1.5px solid var(--ink); top: -10px; animation: confettiFall 2s ease-in forwards; }
+  @keyframes confettiFall {
+    0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+    100% { transform: translateY(120px) rotate(720deg); opacity: 0; }
+  }
+  .bar-pulse { animation: barPulse 0.5s ease-out; }
+  @keyframes barPulse { 0% { filter: brightness(1.35); } 100% { filter: brightness(1); } }
+
+  /* ---------- Habits: pink sticker card ---------- */
+  .widget-habits {
+    background: var(--accent);
+    border: var(--bw) solid var(--ink);
+    border-radius: var(--r);
+    box-shadow: var(--shadow);
+    padding: 8px 12px;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: all 0.14s var(--pop);
+  }
+  .widget-habits:hover { transform: translate(-1px,-1px); box-shadow: 5.5px 5.5px 0 var(--ink); }
+  .widget-habits:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
+  .widget-habits-row { display: flex; align-items: center; gap: 8px; }
+  .widget-habits-row + .widget-habits-row { margin-top: 8px; }
+  .widget-habits-label {
+    font-size: 9px; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 1.6px;
+    color: var(--ink);
+  }
+  .widget-habits-today { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  .widget-habits-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px;
+    border: 2px solid var(--ink);
+    border-radius: var(--r-sm);
+    font-size: 10px; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 0.4px;
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.12s var(--pop);
+    line-height: 1;
+  }
+  .widget-habits-badge:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .widget-habits-badge:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
+  .widget-habits-badge.on { background: var(--yellow); }
+  .widget-habits-checkbox {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 13px; height: 13px;
+    border-radius: 3px;
+    border: 2px solid var(--ink);
+    font-size: 10px; font-weight: 900;
+    line-height: 1;
+    background: var(--surface);
+  }
+  .widget-habits-badge.on .widget-habits-checkbox { background: var(--ink); color: var(--yellow); }
+  .widget-habits-todayhint {
+    font-size: 8px; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 1.2px;
+    color: var(--ink); opacity: 0.55;
+    margin-left: auto;
+  }
+
+  /* ---------- Usage rows: white cards + block meters ---------- */
+  .usage-rows {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .widget.tight .usage-rows { gap: 7px; }
+  .usage-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .widget.tight .usage-section { gap: 7px; }
+  /* Natural-height cards — never squeeze content into clipping */
+  .usage-row {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 8px 12px;
+    background: var(--surface);
+    border: var(--bw) solid var(--ink);
+    border-radius: var(--r);
+    box-shadow: var(--shadow);
+    transition: all 0.14s var(--pop);
+    overflow: hidden;
+  }
+  .usage-row:hover { transform: translate(-1px,-1px); box-shadow: 5.5px 5.5px 0 var(--ink); }
+  .usage-row:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
+  .usage-row.state-warning { background: #fff8e0; }
+  .usage-row.state-danger { background: #ffecec; }
+  .usage-label {
+    font-size: 10px; font-weight: 900;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    line-height: 1.1;
+  }
+  .usage-label-text {
+    color: var(--ink);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 9px;
+  }
+  .bar-pct {
+    font-size: 16px; font-weight: 900;
+    font-family: var(--mono);
+    min-width: 34px; text-align: right;
+    color: var(--ink) !important;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.5px;
+  }
+  .bar-container { display: flex; align-items: center; }
+  /* Legacy track/fill kept as fallback (renderer now builds .segs) */
+  .bar-track { flex: 1; height: 12px; background: var(--surface2); border: 2px solid var(--ink); border-radius: 5px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--green); min-width: 2px; transition: width 0.6s var(--pop); }
+  .bar-fill.warning { background: var(--yellow); }
+  .bar-fill.danger { background: var(--red); }
+  /* Block segments */
+  .segs { display: flex; gap: 4px; flex: 1; }
+  .seg {
+    flex: 1; height: 12px;
+    border: 2px solid var(--ink);
+    border-radius: 4px;
+    background: var(--surface2);
+    transition: background 0.25s ease;
+  }
+  .seg.f { background: var(--green); }
+  .seg.fy { background: var(--yellow); }
+  .seg.fr { background: var(--red); }
+  .reset-info {
+    font-size: 8.5px; color: var(--text-dim);
+    margin-top: 5px;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .widget.tight .reset-info { display: none; }
+  .widget.tight .usage-row { padding: 7px 11px; }
+  .widget.tight .usage-label { margin-bottom: 5px; }
+  .widget.tight .seg { height: 10px; }
+  .widget.very-tight .usage-row { padding: 5px 10px; box-shadow: var(--shadow-sm); }
+  .widget.very-tight .seg { height: 8px; border-width: 1.5px; }
+  .widget.very-tight .bar-pct { font-size: 13px; }
+  .extra-section { flex-shrink: 0; }
+  /* Extra usage — inline strip (spend this month) */
+  .extra-strip {
+    display: flex; align-items: center; gap: 9px;
+    background: var(--surface); border: 2px solid var(--ink);
+    border-radius: 9px; box-shadow: var(--shadow-sm);
+    padding: 6px 11px; cursor: pointer;
+    transition: transform 0.12s var(--pop), box-shadow 0.12s var(--pop);
+  }
+  .extra-strip:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .extra-strip:active { transform: translate(1px,1px); box-shadow: 1px 1px 0 var(--ink); }
+  .extra-strip .es-ic { font-size: 13px; line-height: 1; flex-shrink: 0; }
+  .extra-strip .es-lbl { font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); flex-shrink: 0; }
+  .extra-strip .es-amt { font-family: var(--mono); font-weight: 900; font-size: 13px; color: var(--ink); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .extra-strip .es-track { flex: 1; min-width: 26px; height: 8px; border: 2px solid var(--ink); border-radius: 999px; background: var(--bar-bg); overflow: hidden; }
+  .extra-strip .es-fill { height: 100%; width: 0%; background: var(--teal); border-right: 2px solid var(--ink); transition: width 0.7s var(--pop); }
+  .extra-strip .es-fill.warn { background: var(--yellow); }
+  .extra-strip .es-fill.crit { background: var(--red); }
+  .extra-strip .es-pct { font-family: var(--mono); font-weight: 900; font-size: 11px; color: var(--ink); flex-shrink: 0; min-width: 30px; text-align: right; }
+  .widget.tight .extra-strip { padding: 5px 9px; }
+  .widget.very-tight .extra-strip .es-lbl { display: none; }
+
+  /* ---------- Calendar card ---------- */
+  .widget-calendar {
+    display: none;
+    padding: 10px 13px;
+    background: var(--surface);
+    border: var(--bw) solid var(--ink);
+    border-radius: var(--r);
+    box-shadow: var(--shadow);
+    /* Flexible region: absorbs leftover height, scrolls its events if short */
+    flex: 1 1 auto;
+    min-height: 56px;
+    overflow-y: auto;
+  }
+  .widget-calendar.visible { display: block; }
+  .widget.very-tight .widget-calendar { display: none; }
+  .widget-calendar-header {
+    display: inline-block;
+    font-size: 8px; font-weight: 900; letter-spacing: 1.6px;
+    text-transform: uppercase;
+    color: #fff; background: var(--ink);
+    padding: 3px 8px; border-radius: 4px;
+    margin-bottom: 6px;
+  }
+  .widget-cal-event {
+    display: flex; align-items: center; gap: 8px;
+    padding: 3px 2px; font-size: 11px; color: var(--ink);
+    font-weight: 600;
+    border-radius: 6px;
+    transition: background 0.12s ease;
+  }
+  .widget-cal-event:hover { background: var(--surface2); }
+  .widget-cal-dot { width: 7px; height: 7px; border-radius: 2px; border: 1.5px solid var(--ink); flex-shrink: 0; }
+  .widget-cal-time {
+    font-size: 8.5px; color: var(--ink); min-width: 38px; flex-shrink: 0;
+    font-family: var(--mono); font-weight: 900;
+    text-transform: uppercase;
+  }
+  .widget-cal-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ---------- Banners ---------- */
+  .overdue-banner {
+    display: none;
+    padding: 8px 12px;
+    background: var(--red);
+    border: var(--bw) solid var(--ink);
+    border-radius: var(--r-sm);
+    box-shadow: var(--shadow-sm);
+    flex-shrink: 0;
+    cursor: pointer;
+    color: #fff;
+    transition: all 0.14s var(--pop);
+  }
+  .overdue-banner:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .overdue-banner.visible { display: flex; align-items: center; gap: 8px; animation: bannerIn 0.3s var(--pop); }
+  @keyframes bannerIn { 0% { opacity: 0; transform: translateY(-8px) scale(0.96); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+  .overdue-banner-icon { font-size: 13px; flex-shrink: 0; }
+  .overdue-banner-text { flex: 1; font-size: 10px; font-weight: 900; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .overdue-banner-time { font-size: 9px; color: rgba(255,255,255,0.8); font-family: var(--mono); font-weight: 700; flex-shrink: 0; }
+  .overdue-banner-close {
+    font-size: 10px; color: #fff; background: none; border: none;
+    cursor: pointer; padding: 2px 4px; border-radius: 3px; flex-shrink: 0;
+    font-weight: 900;
+  }
+  .overdue-banner-close:hover { background: rgba(0,0,0,0.25); }
+
+  .claude-status-banner {
+    display: none; flex-direction: column; gap: 3px;
+    padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer;
+    border: var(--bw) solid var(--ink);
+    box-shadow: var(--shadow-sm);
+    background: var(--surface);
+    transition: all 0.14s var(--pop);
+    flex-shrink: 0;
+  }
+  .claude-status-banner:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .claude-status-banner.minor { background: #fff8e0; }
+  .claude-status-banner.major, .claude-status-banner.critical { background: #ffecec; }
+  .claude-status-banner.visible { display: flex; animation: bannerIn 0.3s var(--pop); }
+  .claude-status-banner-row1 { display: flex; align-items: center; gap: 6px; }
+  .claude-status-banner-dot { width: 7px; height: 7px; border-radius: 2px; border: 1.5px solid var(--ink); flex-shrink: 0; animation: pulse 2s infinite; }
+  .claude-status-banner.minor .claude-status-banner-dot { background: var(--yellow); }
+  .claude-status-banner.major .claude-status-banner-dot,
+  .claude-status-banner.critical .claude-status-banner-dot { background: var(--red); }
+  .claude-status-banner-name { font-size: 11px; font-weight: 900; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+  .claude-status-banner-row2 { font-size: 9.5px; color: var(--text-dim); padding-left: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+
+  /* ---------- Setup overlay ---------- */
+  .setup-overlay {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    flex: 1;
+    min-height: 0;
+  }
+  .setup-overlay.visible { display: flex; }
+  .setup-overlay .setup-icon { font-size: 34px; margin-bottom: 12px; }
+  .setup-overlay .setup-title { font-size: 15px; font-weight: 900; margin-bottom: 6px; color: var(--ink); text-transform: uppercase; letter-spacing: 0.5px; }
+  .setup-overlay .setup-desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.6; margin-bottom: 16px; font-weight: 600; }
+  .setup-overlay .setup-steps { text-align: left; font-size: 10px; color: var(--text-dim); line-height: 2; margin-bottom: 14px; }
+  .setup-overlay .setup-steps .step-num {
+    display: inline-block; width: 17px; height: 17px; border-radius: 5px;
+    background: var(--yellow); border: 2px solid var(--ink); color: var(--ink);
+    font-size: 9px; font-weight: 900; text-align: center; line-height: 14px; margin-right: 5px;
+  }
+  .setup-overlay .setup-btn {
+    padding: 10px 28px; font-size: 12px; font-weight: 900; border-radius: var(--r-sm);
+    border: var(--bw) solid var(--ink);
+    background: var(--green); color: #fff; cursor: pointer;
+    box-shadow: var(--shadow);
+    transition: all 0.14s var(--pop);
+    margin-bottom: 12px;
+    text-transform: uppercase; letter-spacing: 1px;
+    font-family: inherit;
+  }
+  .setup-overlay .setup-btn:hover { transform: translate(-1px,-1px); box-shadow: 5.5px 5.5px 0 var(--ink); }
+  .setup-overlay .setup-btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
+  .setup-overlay .setup-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: var(--shadow); }
+  .setup-overlay .setup-install-link {
+    font-size: 9.5px; color: var(--ink); text-decoration: underline; cursor: pointer;
+    font-weight: 800; background: none; border: none; font-family: inherit;
+  }
+  .setup-overlay .setup-install-link:hover { color: var(--green); }
+  .setup-overlay .setup-waiting { font-size: 9.5px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; font-weight: 700; }
+  .setup-overlay .setup-waiting .dot { width: 6px; height: 6px; border-radius: 2px; border: 1.5px solid var(--ink); background: var(--yellow); animation: pulse 1.5s infinite; }
+
+  /* ---------- Footer ---------- */
+  .footer {
+    margin-top: auto;
+    display: flex; justify-content: space-between; align-items: center;
+    flex-shrink: 0;
+    padding: 2px 2px 0;
+  }
+  .footer-left { display: flex; align-items: center; gap: 7px; }
+  .footer-hint {
+    font-size: 8.5px; color: var(--text-dim);
+    font-family: var(--mono);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .footer-hint.syncing { opacity: 0.85; }
+  .footer-hint.stale { color: #a07800; opacity: 1; }
+  .footer-hint.error { color: var(--red); opacity: 1; }
+  .refresh-btn {
+    width: 22px; height: 22px;
+    border: 2px solid var(--ink); border-radius: 6px;
+    background: var(--surface); color: var(--ink);
+    cursor: pointer;
+    font-size: 12px; font-weight: 900;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.12s var(--pop);
+    padding: 0;
+  }
+  .refresh-btn:hover { transform: translate(-1px,-1px) rotate(45deg); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .refresh-btn:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
+  .refresh-btn.spinning { animation: spin 0.8s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .footer-update-btn {
+    display: none;
+    padding: 5px 12px;
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: 0.6px;
+    border: 2px solid var(--ink);
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--ink);
+    cursor: pointer;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.14s var(--pop);
+    font-family: inherit;
+    text-transform: uppercase;
+  }
+  .footer-update-btn:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .footer-update-btn:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
+  .footer-update-btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+  .footer-update-btn.visible { display: inline-block; }
+  .footer-update-btn.downloading {
+    background: linear-gradient(90deg, var(--green), var(--green)) no-repeat left, var(--surface);
+    background-size: 0% 100%, 100% 100%;
+    transition: background-size 0.4s ease;
+    color: var(--ink);
+  }
+
+  /* ---------- Effects ---------- */
+  .snap-glow { animation: snapGlow 0.4s ease-out; }
+  @keyframes snapGlow {
+    0% { box-shadow: 0 0 0 3px var(--yellow); }
+    100% { box-shadow: none; }
+  }
+  .widget.fade-in { animation: widgetIn 0.22s var(--pop) forwards; }
+  .widget.fade-out { animation: widgetOut 0.15s cubic-bezier(0.4, 0, 1, 1) forwards; }
+  @keyframes widgetIn {
+    0% { opacity: 0; transform: translateX(24px) scale(0.96); }
+    100% { opacity: 1; transform: translateX(0) scale(1); }
+  }
+  @keyframes widgetOut {
+    0% { opacity: 1; transform: translateX(0) scale(1); }
+    100% { opacity: 0; transform: translateX(24px) scale(0.96); }
+  }
+
+  /* Compact mode */
+  body.compact .widget { padding: 8px 10px; gap: 6px; }
+  body.compact .header { padding: 7px 10px; }
+  body.compact .usage-row { padding: 6px 10px; box-shadow: var(--shadow-sm); }
+  body.compact .usage-label { font-size: 9px; margin-bottom: 4px; }
+  body.compact .seg { height: 9px; border-width: 1.5px; }
+  body.compact .bar-pct { font-size: 12px; }
+  body.compact .reset-info { display: none; }
+  body.compact .widget-habits { padding: 7px 10px; box-shadow: var(--shadow-sm); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--ink); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="pomo-celebration" id="pomoCelebration">
+  <div class="confetti-container" id="confettiContainer"></div>
+  <div class="celeb-text" id="celebText">Focus session complete!</div>
+  <div class="celeb-sub">Time for a break</div>
+</div>
+
+<div class="widget">
+  <div class="header">
+    <div class="header-left">
+      <span class="dot stale" id="statusDot"></span>
+      <span class="title">Claude Meter</span>
+      <span class="streak-badge" id="streakBadge" style="display:none;"><span class="streak-fire">&#x1F525;</span><span id="streakCount">0</span></span>
+      <span class="sync-status" id="syncStatus"></span>
+    </div>
+    <div class="header-icons">
+      <button class="dash-btn" id="dashBtn" title="Dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="square"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg></button>
+      <button class="dash-btn" id="tasksBtn" title="Tasks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="square"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 12.5l3 3 5.5-6.5"/></svg><span class="icon-badge hidden" id="tasksBadge"></span></button>
+      <button class="dash-btn" id="notesBtn" title="Notes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="square"><path d="M4 20.5l1.2-4.8L16.5 4.4a2.1 2.1 0 0 1 3 0l.6.6a2.1 2.1 0 0 1 0 3L8.8 19.3z"/><path d="M13.5 7.5l3.5 3.5"/></svg></button>
+      <div class="pomo-ring-wrap" id="pomoRing" title="Pomodoro">
+        <svg class="pomo-ring-svg" viewBox="0 0 28 28">
+          <circle class="pomo-ring-bg" cx="14" cy="14" r="11"/>
+          <circle class="pomo-ring-fill idle" id="pomoRingFill" cx="14" cy="14" r="11" stroke-dasharray="69.12" stroke-dashoffset="0"/>
+        </svg>
+        <div class="pomo-ring-text" id="pomoRingText">25</div>
+        <div class="pomo-tooltip" id="pomoTooltip">
+          <div class="pomo-tooltip-time" id="pomoTooltipTime">25:00</div>
+          <div class="pomo-tooltip-label" id="pomoTooltipLabel">Focus</div>
+          <div class="pomo-tooltip-btns">
+            <button class="pomo-tooltip-btn primary" id="pomoStartBtn">Start</button>
+            <button class="pomo-tooltip-btn" id="pomoResetBtn">Reset</button>
+          </div>
+        </div>
+      </div>
+      <button class="dash-btn" id="calendarBtn" title="Calendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="square"><rect x="3" y="5" width="18" height="16" rx="3"/><line x1="16.5" y1="2.5" x2="16.5" y2="7"/><line x1="7.5" y1="2.5" x2="7.5" y2="7"/><line x1="3" y1="10.5" x2="21" y2="10.5"/><rect x="7" y="14" width="4" height="3.5" rx="1" fill="currentColor" stroke="none"/></svg><span class="icon-badge hidden" id="calBadge"></span></button>
+    </div>
+    <div class="window-controls">
+      <button class="win-btn minimize" id="minimizeBtn" title="Minimize widget"></button>
+      <button class="win-btn close" id="closeBtn" title="Hide all panels"></button>
+    </div>
+  </div>
+
+  <div class="setup-overlay" id="setupOverlay">
+    <div class="setup-icon">&#x1F50C;</div>
+    <div class="setup-title" id="setupTitle">Connect to Claude</div>
+    <div class="setup-desc" id="setupDesc">Sign in with your Anthropic account to start tracking usage.</div>
+    <button class="setup-btn" id="setupSignInBtn">Sign In</button>
+    <div class="setup-waiting" id="setupWaiting" style="display:none">
+      <span class="dot"></span>
+      <span>Waiting for browser login...</span>
+    </div>
+    <button class="setup-install-link" id="setupInstallLink" style="display:none">Install Claude Code first</button>
+  </div>
+
+  <div class="overdue-banner" id="overdueBanner">
+    <span class="overdue-banner-icon">&#x26A0;</span>
+    <span class="overdue-banner-text" id="overdueBannerText"></span>
+    <span class="overdue-banner-time" id="overdueBannerTime"></span>
+    <button class="overdue-banner-close" id="overdueBannerClose">&#x2715;</button>
+  </div>
+
+  <div class="claude-status-banner" id="claudeStatusBanner" title="Click to open status.claude.com">
+    <div class="claude-status-banner-row1">
+      <span class="claude-status-banner-dot"></span>
+      <span class="claude-status-banner-name" id="claudeStatusName"></span>
+    </div>
+    <div class="claude-status-banner-row2" id="claudeStatusMeta"></div>
+  </div>
+
+  <div class="widget-habits" id="widgetHabits" style="display:none;" title="Open Habits dashboard">
+    <div class="widget-habits-row" id="widgetHabitsToday">
+      <span class="widget-habits-label">Habits</span>
+      <span class="widget-habits-today" id="widgetHabitsTodayBadges"></span>
+      <span class="widget-habits-todayhint">today</span>
+    </div>
+  </div>
+
+  <div class="usage-rows" id="usageRows">
+    <div class="usage-section">
+      <div class="usage-row" id="sessionRow"></div>
+      <div class="usage-row" id="weekAllRow"></div>
+      <div class="usage-row" id="weekSonnetRow"></div>
+    </div>
+
+    <div class="extra-section" id="extraSection" style="display:none">
+      <div class="extra-strip" id="extraStrip" title="Extra usage this month">
+        <span class="es-ic">&#x26A1;</span>
+        <span class="es-lbl">Extra</span>
+        <span class="es-amt" id="extraAmt">—</span>
+        <div class="es-track"><div class="es-fill" id="extraFill"></div></div>
+        <span class="es-pct" id="extraPct"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="widget-calendar" id="widgetCalendar">
+    <div class="widget-calendar-header" id="widgetCalToday">Today</div>
+    <div id="widgetCalEvents"></div>
+    <div class="widget-calendar-header" id="widgetCalUpcoming" style="margin-top:8px;">Upcoming</div>
+    <div id="widgetCalUpcomingEvents"></div>
+  </div>
+
+  <div class="footer">
+    <button class="footer-update-btn" id="updateBtn"></button>
+    <div class="footer-left">
+      <button class="refresh-btn" id="refreshBtn" title="Refresh now">&#x21bb;</button>
+      <span class="footer-hint" id="footerHint">Syncing...</span>
+    </div>
+  </div>
+</div>
+
+<script src="renderer.js"></script>
+</body>
+</html>
