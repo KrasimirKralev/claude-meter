@@ -2,6 +2,17 @@
 
 A desktop widget that tracks your **Claude usage** in real time — current session, weekly (all models), Fable-only, and pay-as-you-go **extra-usage spend** — with a built-in planner: **calendar** (with optional Google Calendar sync), **tasks**, **notes** (markdown editor), and **habit tracking**. Pop-brutalist UI, always-on-top, snap-to-edge.
 
+<p align="center">
+  <img src="assets/screenshot-widget.png" alt="Claude Meter widget" width="340">
+</p>
+
+## Screenshots
+
+| Dashboard | Notes editor |
+|:---:|:---:|
+| ![Dashboard](assets/screenshot-dashboard.png) | ![Notes editor](assets/screenshot-notes.png) |
+| Usage overview, 7-day history, and the full planner. | Split markdown editor with live preview, tables → inline bars, and click-to-copy fields. |
+
 ---
 
 ## Download (macOS)

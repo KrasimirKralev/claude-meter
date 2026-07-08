@@ -3,6 +3,11 @@ name: Build macOS DMG
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshot-*.png'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
 
 permissions:
