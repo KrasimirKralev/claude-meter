@@ -51,6 +51,7 @@ const TASKS_BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-tasks-bounds.json'
 const CALENDAR_FILE = path.join(CLAUDE_DIR, 'usage-widget-calendar.json');
 const NOTES_FILE = path.join(CLAUDE_DIR, 'usage-widget-notes.txt');
 const STICKY_NOTES_FILE = path.join(CLAUDE_DIR, 'usage-widget-sticky-notes.json');
+const NOTES_APP_BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-notes-app-bounds.json');
 const NOTES_ARCHIVE_FILE = path.join(CLAUDE_DIR, 'usage-widget-notes-archive.json');
 const POMO_FILE = path.join(CLAUDE_DIR, 'usage-widget-pomo.json');
 const HABITS_FILE = path.join(CLAUDE_DIR, 'usage-widget-habits.json');
@@ -99,6 +100,7 @@ let tasksMovedTimer = null;  // debounced snap timer — cleared on hide to prev
 let claudeStatus = null; // { indicator, description, updatedAt }
 let calWin = null;
 let notesWin = null;
+let notesAppWin = null; // standalone Notes app window (own taskbar identity)
 let addEventWin = null;
 let calendarEvents = [];
 let reminderTimers = {};
@@ -292,6 +294,22 @@ function getAssetPath(filename) {
   const assetDir = path.join(__dirname, 'assets');
   if (fs.existsSync(assetDir)) return path.join(assetDir, filename);
   return path.join(app.getAppPath(), 'assets', filename);
+}
+
+// The Windows shell (taskbar/setAppDetails) can NOT read icons from inside an
+// asar archive — it needs a real file on disk. Copy the icon out once per run.
+function getRealIconPath(filename) {
+  try {
+    const dir = path.join(CLAUDE_DIR, 'usage-widget-icons');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const dest = path.join(dir, filename);
+    const data = fs.readFileSync(getAssetPath(filename)); // fs is asar-aware
+    // Rewrite each launch so icon updates ship with app updates
+    fs.writeFileSync(dest, data);
+    return dest;
+  } catch {
+    return getAssetPath(filename); // fallback: better than nothing
+  }
 }
 
 // Get the display where the widget currently is (fallback to primary)
@@ -891,6 +909,7 @@ async function fetchGcalEvents(account, retryCount) {
               googleEventId: item.id,
               googleAccount: account.email,
               googleLink: item.htmlLink || null,
+              meetLink: extractMeetLink(item),
               createdAt: Date.now(),
               isGoogleEvent: true,
             };
@@ -903,6 +922,35 @@ async function fetchGcalEvents(account, retryCount) {
     req.setTimeout(15000, function () { req.destroy(); reject(new Error('Timeout')); });
     req.end();
   });
+}
+
+// Extract the joinable meeting URL from a Google Calendar event:
+// Meet's hangoutLink → conferenceData video entry point → known-provider URL in location/description
+function extractMeetLink(item) {
+  if (item.hangoutLink) return item.hangoutLink;
+  const eps = item.conferenceData && item.conferenceData.entryPoints;
+  if (Array.isArray(eps)) {
+    const video = eps.find((e) => e && e.entryPointType === 'video' && e.uri);
+    if (video) return video.uri;
+  }
+  const RX = /https:\/\/[^\s<>"']*(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|teams\.live\.com|webex\.com|whereby\.com|meet\.jit\.si)[^\s<>"']*/i;
+  for (const field of [item.location, item.description]) {
+    if (typeof field === 'string') {
+      const m = field.match(RX);
+      if (m) return m[0];
+    }
+  }
+  return null;
+}
+
+// Any https URL in free text (lets local events carry a pasted meeting link in the title)
+function firstUrlInText(s) {
+  const m = typeof s === 'string' && s.match(/https:\/\/[^\s<>"']+/);
+  return m ? m[0] : null;
+}
+
+function eventJoinLink(evt) {
+  return (evt && (evt.meetLink || firstUrlInText(evt.title))) || null;
 }
 
 function googleColorMap(colorId) {
@@ -1118,7 +1166,7 @@ function sendCurrentTheme(targetWin) {
 function broadcastTheme() {
   const theme = THEMES[currentTheme] || THEMES.dark;
   const payload = { name: currentTheme, ...theme };
-  const allWins = [win, tasksWin, calWin, notesWin, dashWin, alertPopup, pomoPopupWin, addEventWin];
+  const allWins = [win, tasksWin, calWin, notesWin, notesAppWin, dashWin, alertPopup, pomoPopupWin, addEventWin];
   for (const w of allWins) {
     if (w && !w.isDestroyed()) {
       try { w.webContents.send('theme-update', payload); } catch { /* ignore */ }
@@ -1538,6 +1586,7 @@ function showReminderPopup(evt, autoDismissMs, stage) {
       color: evt.color || 'blue',
       stage: stage ? stage.key : '15m',
       eventTime: evt.time ? new Date(evt.date + 'T' + evt.time).getTime() : null,
+      meetLink: eventJoinLink(evt),
     });
     sendCurrentTheme(alertPopup);
   });
@@ -3869,6 +3918,159 @@ function openNotesWindow(taskId, taskText) {
   notesWin.on('moved', () => notesDragSnap.onMoved());
 }
 
+// --- Standalone Notes app window ---
+// A promoted, real-app window: own taskbar button + icon, own bounds memory,
+// independent of the widget. Task notes keep the small snapped panel above.
+function loadNotesAppBounds() {
+  try {
+    if (fs.existsSync(NOTES_APP_BOUNDS_FILE)) {
+      const b = JSON.parse(fs.readFileSync(NOTES_APP_BOUNDS_FILE, 'utf-8'));
+      if (b && Number.isFinite(b.x) && Number.isFinite(b.width)) return clampToWorkArea(b);
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+let notesAppBoundsTimer = null;
+function saveNotesAppBounds() {
+  if (notesAppBoundsTimer) clearTimeout(notesAppBoundsTimer);
+  notesAppBoundsTimer = setTimeout(() => {
+    try {
+      if (notesAppWin && !notesAppWin.isDestroyed()) {
+        fs.writeFileSync(NOTES_APP_BOUNDS_FILE, JSON.stringify(notesAppWin.getBounds()));
+      }
+    } catch { /* ignore */ }
+  }, 400);
+}
+
+function openNotesAppWindow() {
+  if (notesAppWin && !notesAppWin.isDestroyed()) {
+    // Toggle like the other widget panels: second click closes
+    if (notesAppWin.isMinimized()) {
+      notesAppWin.restore();
+      notesAppWin.focus();
+    } else if (notesAppWin.isVisible()) {
+      notesAppWin.hide();
+    } else {
+      notesAppWin.show();
+      notesAppWin.focus();
+    }
+    return;
+  }
+
+  const saved = loadNotesAppBounds();
+  const bounds = saved || clampToWorkArea({ x: 160, y: 110, width: 760, height: 560 });
+
+  notesAppWin = new BrowserWindow({
+    width: bounds.width, height: bounds.height, x: bounds.x, y: bounds.y,
+    frame: false, resizable: true, minWidth: 420, minHeight: 320,
+    skipTaskbar: false, alwaysOnTop: false, ...GLASS_OPTS_FN(),
+    show: false, icon: getAssetPath('notes-icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'notes-preload.js'),
+      contextIsolation: true, nodeIntegration: false, sandbox: true,
+      spellcheck: true,
+    },
+  });
+  notesAppWin.webContents.session.setSpellCheckerLanguages(['en-US', 'bg']);
+
+  // Own taskbar identity on Windows: separate group + custom icon, pinnable.
+  // Must be a REAL file path — the shell can't read from inside the asar.
+  if (process.platform === 'win32') {
+    try {
+      notesAppWin.setAppDetails({
+        appId: 'claude-meter.notes',
+        appIconPath: getRealIconPath('notes-icon.ico'),
+        appIconIndex: 0,
+      });
+    } catch { /* ignore */ }
+  }
+
+  notesAppWin.loadFile('notes.html', { query: { mode: 'app' } });
+  notesAppWin.once('ready-to-show', () => {
+    if (!notesAppWin || notesAppWin.isDestroyed()) return;
+    notesAppWin.show();
+    const theme = THEMES[currentTheme] || THEMES.dark;
+    notesAppWin.webContents.send('theme-update', { name: currentTheme, ...theme });
+  });
+
+  // Spellcheck context menu (same UX as the panel)
+  notesAppWin.webContents.on('context-menu', (event, params) => {
+    if (params.misspelledWord) {
+      const menuItems = [];
+      for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
+        menuItems.push({
+          label: suggestion,
+          click: () => notesAppWin.webContents.replaceMisspelling(suggestion),
+        });
+      }
+      if (menuItems.length > 0) menuItems.push({ type: 'separator' });
+      menuItems.push({
+        label: 'Add to dictionary',
+        click: () => notesAppWin.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+      });
+      Menu.buildFromTemplate(menuItems).popup({ window: notesAppWin });
+    }
+  });
+
+  notesAppWin.on('moved', saveNotesAppBounds);
+  notesAppWin.on('resized', saveNotesAppBounds);
+  notesAppWin.on('closed', () => { notesAppWin = null; });
+}
+
+// --- Global quick-capture (Ctrl+Shift+N anywhere) ---
+let captureWin = null;
+
+function openQuickCapture() {
+  if (captureWin && !captureWin.isDestroyed()) { captureWin.focus(); return; }
+  const { workArea } = screen.getPrimaryDisplay();
+  const cw = 460, ch = 106;
+  captureWin = new BrowserWindow({
+    width: cw, height: ch,
+    x: Math.round(workArea.x + (workArea.width - cw) / 2),
+    y: Math.round(workArea.y + workArea.height * 0.18),
+    frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true,
+    ...GLASS_OPTS_FN(), show: false, icon: getAssetPath('notes-icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'capture-preload.js'),
+      contextIsolation: true, nodeIntegration: false, sandbox: true,
+      spellcheck: true,
+    },
+  });
+  captureWin.loadFile('capture.html');
+  captureWin.once('ready-to-show', () => {
+    if (captureWin && !captureWin.isDestroyed()) { captureWin.show(); captureWin.focus(); }
+  });
+  captureWin.on('blur', () => { if (captureWin && !captureWin.isDestroyed()) captureWin.close(); });
+  captureWin.on('closed', () => { captureWin = null; });
+}
+
+// Append a captured line to the "Inbox" note (created on first capture)
+function appendToInbox(text) {
+  let notes = [];
+  try {
+    if (fs.existsSync(STICKY_NOTES_FILE)) notes = JSON.parse(fs.readFileSync(STICKY_NOTES_FILE, 'utf-8')) || [];
+  } catch { notes = []; }
+  if (!Array.isArray(notes)) notes = [];
+  const line = '- ' + String(text).slice(0, 500);
+  let inbox = notes.find(n => n && typeof n.text === 'string' && /^#\s*Inbox\b/i.test(n.text.trim()));
+  if (inbox) {
+    inbox.text = inbox.text.replace(/\s+$/, '') + '\n' + line;
+  } else {
+    inbox = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      title: '', text: '# Inbox\n\n' + line, color: 'yellow', createdAt: Date.now(),
+    };
+    notes.unshift(inbox);
+  }
+  try { fs.writeFileSync(STICKY_NOTES_FILE, JSON.stringify(notes, null, 2)); } catch { /* ignore */ }
+  for (const w of [notesWin, notesAppWin]) {
+    if (w && !w.isDestroyed()) {
+      try { w.webContents.send('sticky-notes-updated', notes); } catch { /* ignore */ }
+    }
+  }
+}
+
 function openCalendarWindow() {
   if (calWin && !calWin.isDestroyed()) {
     if (calWin.isVisible()) {
@@ -4168,6 +4370,9 @@ app.whenReady().then(() => {
     setTimeout(registerHotkey, 3000);
   }
 
+  // Quick-capture hotkey: jot a note from anywhere → Inbox
+  try { globalShortcut.register('Control+]', openQuickCapture); } catch { /* ignore */ }
+
   // IPC sender validation helper
   const isLocalSender = (event) => {
     try {
@@ -4303,6 +4508,26 @@ app.whenReady().then(() => {
     if (!isLocalSender(event)) return;
     if (typeof url === 'string' && url.startsWith('https://')) {
       shell.openExternal(url);
+    }
+  });
+
+  // Widget reports its natural content height → enforce it as the window minimum
+  // so resizing can never clip rows; if currently clipped, grow to fit.
+  ipcMain.on('widget-min-height', (event, h) => {
+    if (!isLocalSender(event)) return;
+    if (!win || win.isDestroyed()) return;
+    let needed = Math.round(Number(h));
+    if (!Number.isFinite(needed) || needed <= 0) return;
+    const wa = screen.getDisplayMatching(win.getBounds()).workArea;
+    needed = Math.max(200, Math.min(needed, wa.height));
+    const minSize = win.getMinimumSize();
+    win.setMinimumSize(minSize[0] || 280, needed);
+    const b = win.getBounds();
+    // Height auto-fits the content exactly: grow when clipped, shrink when
+    // there's dead space (the calendar card stretches, so excess = empty white).
+    if (Math.abs(b.height - needed) > 2) {
+      const y = Math.max(wa.y, Math.min(b.y, wa.y + wa.height - needed));
+      win.setBounds({ x: b.x, y, width: b.width, height: needed });
     }
   });
 
@@ -4648,7 +4873,8 @@ app.whenReady().then(() => {
 
   ipcMain.on('open-notes-window', (event) => {
     if (!isLocalSender(event)) return;
-    openNotesWindow();
+    // Global notes now open the standalone Notes app; task notes keep the snapped panel
+    openNotesAppWindow();
   });
 
   ipcMain.handle('notes-get', () => {
@@ -4684,6 +4910,23 @@ app.whenReady().then(() => {
       createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
     }));
     try { fs.writeFileSync(STICKY_NOTES_FILE, JSON.stringify(clean, null, 2)); } catch { /* ignore */ }
+    // Keep the other notes window (panel vs app) in sync
+    for (const w of [notesWin, notesAppWin]) {
+      if (w && !w.isDestroyed() && w.webContents !== event.sender) {
+        try { w.webContents.send('sticky-notes-updated', clean); } catch { /* ignore */ }
+      }
+    }
+  });
+
+  // Quick-capture popover → Inbox note
+  ipcMain.on('quick-capture-submit', (event, text) => {
+    if (!isLocalSender(event)) return;
+    if (typeof text === 'string' && text.trim()) appendToInbox(text.trim());
+    if (captureWin && !captureWin.isDestroyed()) captureWin.close();
+  });
+  ipcMain.on('quick-capture-close', (event) => {
+    if (!isLocalSender(event)) return;
+    if (captureWin && !captureWin.isDestroyed()) captureWin.close();
   });
 
   // Export a note as clean, send-ready Markdown
@@ -4837,7 +5080,19 @@ app.whenReady().then(() => {
 
   ipcMain.on('notes-window-close', (event) => {
     if (!isLocalSender(event)) return;
+    // App window really closes; the snapped panel just hides
+    if (notesAppWin && !notesAppWin.isDestroyed() && event.sender === notesAppWin.webContents) {
+      notesAppWin.close();
+      return;
+    }
     if (notesWin && !notesWin.isDestroyed()) notesWin.hide();
+  });
+
+  ipcMain.on('notes-window-minimize', (event) => {
+    if (!isLocalSender(event)) return;
+    if (notesAppWin && !notesAppWin.isDestroyed() && event.sender === notesAppWin.webContents) {
+      notesAppWin.minimize();
+    }
   });
 
   // Task-specific notes

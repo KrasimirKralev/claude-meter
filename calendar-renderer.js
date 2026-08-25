@@ -1,5 +1,11 @@
 /* Calendar renderer — Week Strip + Agenda design */
 
+/* First https URL in free text (lets local events carry a meeting link in the title) */
+function firstUrlIn(s) {
+  var m = typeof s === 'string' && s.match(/https:\/\/[^\s<>"']+/);
+  return m ? m[0] : null;
+}
+
 var calEvents = [];
 var selectedDate = null;
 var weekOffset = 0; // 0 = current week, -1 = last week, etc.
@@ -275,8 +281,14 @@ function renderEvents() {
     var titleEl = el('div', 'cal-event-title', ev.title);
     row.appendChild(titleEl);
 
+    // Joinable meeting link: synced Meet/Zoom link, or any https URL pasted in a local event's title
+    var joinLink = ev.meetLink || firstUrlIn(ev.title);
+
     // Meta (duration, recurrence)
     var meta = [];
+    if (joinLink) {
+      meta.push('🎥');   /* camera — event has a meeting link */
+    }
     if (ev.duration) {
       meta.push(ev.duration >= 60 ? (ev.duration / 60) + 'h' : ev.duration + 'm');
     }
@@ -292,16 +304,28 @@ function renderEvents() {
     }
 
     if (ev.isGoogleEvent) {
-      // Google events are read-only — click opens in Google Calendar
-      if (ev.googleLink) {
+      // Click joins the meeting directly; falls back to the Google Calendar page
+      var gLink = joinLink || ev.googleLink;
+      if (gLink) {
         row.style.cursor = 'pointer';
+        row.title = joinLink ? 'Join meeting' : 'Open in Google Calendar';
         (function(link) {
           row.addEventListener('click', function() {
             window.calendarAPI.openExternal(link);
           });
-        })(ev.googleLink);
+        })(gLink);
       }
     } else {
+      // Local events with a pasted link are joinable too
+      if (joinLink) {
+        row.style.cursor = 'pointer';
+        row.title = 'Join meeting';
+        (function(link) {
+          row.addEventListener('click', function() {
+            window.calendarAPI.openExternal(link);
+          });
+        })(joinLink);
+      }
       // Delete button (appears on hover via CSS)
       var delBtn = el('button', 'cal-event-del', '\u2715');
       (function(evId) {

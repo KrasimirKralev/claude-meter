@@ -56,9 +56,10 @@ If you're not logged into Claude Code, the usage bars will be empty.
 
 - **Usage meters** — current session, weekly (all models), Fable-only, each as a segmented bar with reset countdown.
 - **Extra-usage strip** — how much pay-as-you-go credit you've spent this month vs your limit, color-coded (teal → yellow at 80% → red at 100%). Auto-hidden if you don't have extra usage enabled.
-- **Calendar** — local events + optional read-only Google Calendar sync (see below).
+- **Calendar** — local events + optional read-only Google Calendar sync (see below). Meetings with a Meet/Zoom/Teams link show a 🎥 marker — click to **join directly**.
 - **Tasks** — quick to-dos with a completion-streak badge.
-- **Notes** — sticky board + a markdown editor with live preview, tables, and click-to-copy fields for links/keys.
+- **Notes** — a **standalone note-taking app** (own window + taskbar icon) with a sticky board, markdown editor + live preview, tables → inline bars, tap-to-edit blocks in read view, a quick-capture bar, `/` slash commands, #tags + search, and click-to-copy fields for links/keys.
+- **Quick capture** — `Ctrl+]` from anywhere drops a popover to jot a note straight into your Inbox.
 - **Habits** — Training / Reading / Learning day-trackers with monthly calendars, reflected on the widget.
 
 ---

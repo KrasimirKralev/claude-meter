@@ -6,6 +6,13 @@ var activeNoteId = null;
 var currentTaskId = null;
 var saveTimer = null;
 var editing = false;
+var boardQuery = '';
+var refreshTimer = null;
+var blockEditing = null;   // { el, ta, line } while a Read-view block is being edited inline
+
+/* Standalone app mode (?mode=app): real min/close semantics + roomier layout */
+var isAppMode = /[?&]mode=app/.test(location.search);
+if (isAppMode) document.body.classList.add('app-mode');
 
 /* note color key -> sticky card class + swatch color */
 var COLORS = [
@@ -32,6 +39,11 @@ var colorPick   = document.getElementById('colorPick');
 var helper      = document.getElementById('helper');
 var panelOutline= document.getElementById('panelOutline');
 var archivePanel= document.getElementById('archivePanel');
+var boardSearch = document.getElementById('boardSearch');
+var captureInput= document.getElementById('captureInput');
+var captureBtn  = document.getElementById('captureBtn');
+var slashMenu   = document.getElementById('slashMenu');
+var rawPane     = document.getElementById('rawPane');
 
 /* ---- helpers ---- */
 function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
@@ -63,22 +75,55 @@ function notePreview(note) {
   return out.join('\n').trim();
 }
 
+/* ============ TAGS ============ */
+var TAG_COLORS = ['#ffc900', '#ff90e8', '#9ee7c8', '#a9d5ff', '#c5b3f6', '#ffffff'];
+function extractTags(text) {
+  var out = [], m;
+  var re = /(^|\s)#([a-zA-ZЀ-ӿ][\wЀ-ӿ-]{1,19})/g;
+  while ((m = re.exec(text || ''))) {
+    var t = m[2].toLowerCase();
+    if (out.indexOf(t) === -1) out.push(t);
+  }
+  return out;
+}
+function tagColor(t) {
+  var h = 0;
+  for (var i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0;
+  return TAG_COLORS[h % TAG_COLORS.length];
+}
+function filteredNotes() {
+  var q = (boardQuery || '').trim().toLowerCase();
+  if (!q) return stickyNotes;
+  if (q.charAt(0) === '#') {
+    var tag = q.slice(1);
+    return stickyNotes.filter(function(n){ return extractTags(n.text).indexOf(tag) !== -1; });
+  }
+  return stickyNotes.filter(function(n) {
+    return (noteTitle(n) + ' ' + (n.text || '')).toLowerCase().indexOf(q) !== -1;
+  });
+}
+
 /* ============ BOARD ============ */
 function renderBoard() {
   clear(boardEl);
-  noteCountEl.textContent = stickyNotes.length + (stickyNotes.length === 1 ? ' note' : ' notes');
+  var list = filteredNotes();
+  var filtered = list.length !== stickyNotes.length;
+  noteCountEl.textContent = filtered
+    ? list.length + ' of ' + stickyNotes.length
+    : stickyNotes.length + (stickyNotes.length === 1 ? ' note' : ' notes');
 
-  if (stickyNotes.length === 0) {
+  if (list.length === 0) {
     var empty = document.createElement('div');
     empty.className = 'board-empty';
-    var b = document.createElement('b'); b.textContent = 'No notes yet.';
+    var b = document.createElement('b');
+    b.textContent = filtered ? 'No matches.' : 'No notes yet.';
     empty.appendChild(b);
-    empty.appendChild(document.createTextNode(' Click + to pin your first one.'));
+    empty.appendChild(document.createTextNode(filtered ? ' Try a different search.' : ' Click + to pin your first one.'));
     boardEl.appendChild(empty);
     return;
   }
 
-  stickyNotes.forEach(function(note) {
+  list.forEach(function(note) {
     var card = document.createElement('div');
     card.className = 'scard c-' + (note.color || 'default');
 
@@ -86,6 +131,26 @@ function renderBoard() {
 
     var t = document.createElement('div'); t.className = 'sc-title';
     t.textContent = noteTitle(note); card.appendChild(t);
+
+    var tags = extractTags(note.text);
+    if (tags.length) {
+      var tw = document.createElement('div'); tw.className = 'sc-tags';
+      tags.slice(0, 4).forEach(function(tg) {
+        var chip = document.createElement('span');
+        chip.className = 'sc-tag';
+        chip.textContent = '#' + tg;
+        chip.style.background = tagColor(tg);
+        chip.title = 'Filter by #' + tg;
+        chip.addEventListener('click', function(e) {
+          e.stopPropagation();
+          boardQuery = '#' + tg;
+          if (boardSearch) boardSearch.value = boardQuery;
+          renderBoard();
+        });
+        tw.appendChild(chip);
+      });
+      card.appendChild(tw);
+    }
 
     var body = document.createElement('div'); body.className = 'sc-body';
     body.textContent = notePreview(note) || 'Empty note'; card.appendChild(body);
@@ -262,7 +327,9 @@ function renderMarkdown(src) {
       i = j - 1;
       continue;
     }
-    if ((m = l.match(/^#\s+(.*)/))) {
+    if (/^---+\s*$/.test(l.trim()) && l.trim() !== '') {
+      endList(); el = document.createElement('hr'); el.className = 'md-hr'; el.setAttribute('data-line', i); renderOut.appendChild(el);
+    } else if ((m = l.match(/^#\s+(.*)/))) {
       endList(); el = document.createElement('h1'); el.setAttribute('data-line', i); appendInline(el, m[1]); renderOut.appendChild(el);
     } else if ((m = l.match(/^##\s+(.*)/))) {
       endList(); el = document.createElement('h2'); el.setAttribute('data-line', i); appendInline(el, m[1]); renderOut.appendChild(el);
@@ -333,17 +400,30 @@ function closeEditor() {
 
 function refresh() {
   var note = getActiveNote();
-  editorTitle.textContent = note ? noteTitle(note) : 'Untitled';
+  if (!currentTaskId) editorTitle.textContent = note ? noteTitle(note) : 'Untitled';
+  // Preserve the reader's scroll position across re-renders (kills the flicker-jump)
+  var st = rendered.scrollTop;
   renderMarkdown(md.value);
+  rendered.scrollTop = st;
   buildOutline(md.value);
   var words = md.value.replace(/[#>*`\-\[\]()]/g, ' ').trim().split(/\s+/).filter(Boolean).length;
   wcEl.textContent = words + ' words · markdown';
 }
 
+/* Debounced preview render — typing no longer rebuilds the DOM per keystroke */
+function scheduleRefresh() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(function() {
+    refreshTimer = null;
+    refresh();
+    if (editing) syncFromCaret();
+  }, 120);
+}
+
 function onEdit() {
   var note = getActiveNote();
   if (note && !currentTaskId) { note.text = md.value; }
-  refresh();
+  scheduleRefresh();
   scheduleSave();
 }
 
@@ -431,6 +511,8 @@ function jumpToLine(line) {
 /* ---- read / edit mode ---- */
 function setEditMode(on) {
   editing = on;
+  if (!on && typeof closeSlash === 'function') closeSlash();
+  if (blockEditing) commitBlockEdit(true);
   editorView.classList.toggle('editing', on);
   document.getElementById('editBtn').classList.toggle('on', on);
   document.getElementById('readBtn').classList.toggle('on', !on);
@@ -494,8 +576,63 @@ function addNote() {
   setEditMode(true);
 }
 
+/* ============ READ-VIEW BLOCK EDITING ============ */
+/* Click a rendered block → edit just that source line in place. Enter/blur commits, Esc cancels. */
+function startBlockEdit(el) {
+  if (editing) return;
+  if (blockEditing) commitBlockEdit(true);
+  // Committing the previous block re-renders the preview — if our element got
+  // replaced by that rebuild, re-find its fresh counterpart by source line.
+  if (!el.isConnected) {
+    el = renderOut.querySelector('[data-line="' + el.getAttribute('data-line') + '"]');
+    if (!el) return;
+  }
+  var line = parseInt(el.getAttribute('data-line'), 10);
+  var lines = md.value.split('\n');
+  if (isNaN(line) || lines[line] == null) return;
+
+  var ta = document.createElement('textarea');
+  ta.className = 'blk-edit';
+  ta.value = lines[line];
+  ta.spellcheck = true;
+  el.style.display = 'none';
+  el.parentNode.insertBefore(ta, el.nextSibling);
+  blockEditing = { el: el, ta: ta, line: line };
+
+  function autosize() { ta.style.height = 'auto'; ta.style.height = (ta.scrollHeight + 2) + 'px'; }
+  autosize();
+  ta.addEventListener('input', autosize);
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = ta.value.length;
+
+  ta.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitBlockEdit(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); commitBlockEdit(false); }
+  });
+  ta.addEventListener('blur', function() { commitBlockEdit(true); });
+}
+
+function commitBlockEdit(save) {
+  if (!blockEditing) return;
+  var be = blockEditing; blockEditing = null;
+  var val = be.ta.value;
+  try { be.ta.parentNode.removeChild(be.ta); } catch (e) { /* already gone */ }
+  be.el.style.display = '';
+  if (!save) return;
+  var lines = md.value.split('\n');
+  if (lines[be.line] == null || lines[be.line] === val) return;
+  // Shift+Enter allows multi-line replacements of a single source line
+  var repl = val.split('\n');
+  Array.prototype.splice.apply(lines, [be.line, 1].concat(repl));
+  md.value = lines.join('\n');
+  var note = getActiveNote();
+  if (note && !currentTaskId) note.text = md.value;
+  flushSave();
+  refresh();
+}
+
 /* ============ WIRING ============ */
-md.addEventListener('input', function(){ onEdit(); syncFromCaret(); });
+md.addEventListener('input', function(){ onEdit(); syncFromCaret(); updateSlash(); });
 md.addEventListener('keyup', syncFromCaret);
 md.addEventListener('click', syncFromCaret);
 md.addEventListener('scroll', function() {
@@ -504,8 +641,22 @@ md.addEventListener('scroll', function() {
   rendered.scrollTop = ratio * (rendered.scrollHeight - rendered.clientHeight);
 });
 
-/* tick checkboxes in read (or preview) mode */
+/* Read-view clicks: copy chips, checkbox toggles, and tap-to-edit blocks */
+function toggleCheckbox(li) {
+  var line = parseInt(li.getAttribute('data-line'), 10);
+  var lines = md.value.split('\n');
+  if (lines[line] != null) {
+    lines[line] = lines[line].replace(/\[( |x)\]/, function(_, c){ return c === 'x' ? '[ ]' : '[x]'; });
+    md.value = lines.join('\n');
+    var note = getActiveNote();
+    if (note && !currentTaskId) note.text = md.value;
+    flushSave();
+    refresh();
+  }
+}
+
 renderOut.addEventListener('click', function(e) {
+  if (blockEditing && blockEditing.ta.contains(e.target)) return;
   // Click-to-copy on inline `code` chips
   var chip = e.target.closest && e.target.closest('code.copyable');
   if (chip) {
@@ -515,13 +666,25 @@ renderOut.addEventListener('click', function(e) {
     return;
   }
   var li = e.target.closest && e.target.closest('li.chk');
-  if (!li) return;
-  var line = parseInt(li.getAttribute('data-line'), 10);
-  var lines = md.value.split('\n');
-  if (lines[line] != null) {
-    lines[line] = lines[line].replace(/\[( |x)\]/, function(_, c){ return c === 'x' ? '[ ]' : '[x]'; });
-    md.value = lines.join('\n');
-    onEdit();
+  if (li) {
+    // Clicking the checkbox square toggles; clicking the text edits in place (Read mode)
+    var inBox = (e.clientX - li.getBoundingClientRect().left) <= 25;
+    if (editing || inBox) toggleCheckbox(li);
+    else startBlockEdit(li);
+    return;
+  }
+  if (!editing) {
+    // Empty note → focus quick capture
+    if (e.target.classList && e.target.classList.contains('empty-note')) {
+      if (captureInput) captureInput.focus();
+      return;
+    }
+    var blk = e.target.closest && e.target.closest('[data-line]');
+    if (blk && renderOut.contains(blk) &&
+        blk.tagName !== 'TABLE' &&
+        !blk.classList.contains('copy-card')) {
+      startBlockEdit(blk);
+    }
   }
 });
 
@@ -531,6 +694,123 @@ function doCopy(text) {
     if (window.notesAPI && window.notesAPI.copyText) { window.notesAPI.copyText(String(text)); return; }
   } catch (e) { /* fall through */ }
   try { navigator.clipboard.writeText(String(text)); } catch (e) { /* ignore */ }
+}
+
+/* ============ QUICK-CAPTURE BAR ============ */
+/* Continues the format of the last line: checklist stays checklist, bullets stay bullets */
+function smartPrefix(text) {
+  if (/^([#>]|[-*]\s|\d+\.\s|copy:)/.test(text)) return text;   // already markdown
+  var lines = md.value.split('\n');
+  for (var i = lines.length - 1; i >= 0; i--) {
+    var l = lines[i].trim();
+    if (!l) continue;
+    if (/^-\s\[( |x)\]/.test(l)) return '- [ ] ' + text;
+    if (/^[-*]\s/.test(l)) return '- ' + text;
+    break;
+  }
+  return text;
+}
+function captureAdd() {
+  var v = captureInput.value.trim();
+  if (!v) return;
+  var line = smartPrefix(v);
+  var base = md.value.replace(/\s+$/, '');
+  md.value = base ? base + '\n' + line : line;
+  captureInput.value = '';
+  var note = getActiveNote();
+  if (note && !currentTaskId) note.text = md.value;
+  flushSave();
+  refresh();
+  rendered.scrollTop = rendered.scrollHeight;
+  captureInput.focus();
+}
+if (captureInput) {
+  captureInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); captureAdd(); }
+  });
+  captureBtn.addEventListener('click', captureAdd);
+}
+
+/* ============ SLASH COMMANDS ============ */
+var SLASH_ITEMS = [
+  { k: '#',    d: 'Big heading',   ins: '# ' },
+  { k: '##',   d: 'Section',       ins: '## ' },
+  { k: '[]',   d: 'Checkbox',      ins: '- [ ] ' },
+  { k: '-',    d: 'Bullet',        ins: '- ' },
+  { k: '>',    d: 'Callout',       ins: '> ' },
+  { k: '| |',  d: 'Table + bars',  ins: '| Metric | Value |\n| --- | --- |\n| row 1 | 11 |\n| row 2 | 38 |\n' },
+  { k: 'copy', d: 'Copy button',   ins: 'copy: ' },
+  { k: '---',  d: 'Divider',       ins: '---\n' },
+  { k: 'date', d: "Today's date",  ins: null },   // dynamic
+];
+var slashState = null;   // { start, items, sel }
+
+function slashQueryAt() {
+  var pos = md.selectionStart;
+  var before = md.value.slice(0, pos);
+  var m = before.match(/(^|\n)\/([a-zA-Z#\->\[\]|]{0,12})$/);
+  if (!m) return null;
+  return { start: pos - m[2].length - 1, q: m[2].toLowerCase() };
+}
+function closeSlash() { slashState = null; slashMenu.classList.remove('open'); }
+function renderSlash() {
+  clear(slashMenu);
+  slashState.items.forEach(function(it, idx) {
+    var row = document.createElement('div');
+    row.className = 'slash-item' + (idx === slashState.sel ? ' sel' : '');
+    var c = document.createElement('code'); c.textContent = it.k; row.appendChild(c);
+    row.appendChild(document.createTextNode(it.d));
+    row.addEventListener('mousedown', function(e) { e.preventDefault(); applySlash(it); });
+    slashMenu.appendChild(row);
+  });
+}
+function positionSlash() {
+  var lh = parseFloat(getComputedStyle(md).lineHeight) || 20;
+  var line = caretLine();
+  var top = md.offsetTop + (line + 1) * lh - md.scrollTop + 4;
+  top = Math.max(28, Math.min(top, rawPane.clientHeight - 150));
+  slashMenu.style.top = top + 'px';
+}
+function updateSlash() {
+  if (!editing) { closeSlash(); return; }
+  var s = slashQueryAt();
+  if (!s) { closeSlash(); return; }
+  var items = SLASH_ITEMS.filter(function(it) {
+    return !s.q || it.d.toLowerCase().indexOf(s.q) !== -1 || it.k.indexOf(s.q) !== -1;
+  });
+  if (!items.length) { closeSlash(); return; }
+  var keepSel = slashState ? Math.min(slashState.sel, items.length - 1) : 0;
+  slashState = { start: s.start, items: items, sel: keepSel };
+  renderSlash();
+  positionSlash();
+  slashMenu.classList.add('open');
+}
+function applySlash(item) {
+  if (!slashState) return;
+  var ins = item.ins != null ? item.ins : (new Date().toLocaleDateString() + ' ');
+  var end = md.selectionStart;
+  md.value = md.value.slice(0, slashState.start) + ins + md.value.slice(end);
+  var np = slashState.start + ins.length;
+  closeSlash();
+  md.focus();
+  md.selectionStart = md.selectionEnd = np;
+  onEdit();
+}
+md.addEventListener('keydown', function(e) {
+  if (!slashState) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); slashState.sel = (slashState.sel + 1) % slashState.items.length; renderSlash(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); slashState.sel = (slashState.sel - 1 + slashState.items.length) % slashState.items.length; renderSlash(); }
+  else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); applySlash(slashState.items[slashState.sel]); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeSlash(); }
+});
+md.addEventListener('blur', function() { setTimeout(closeSlash, 150); });
+
+/* ============ BOARD SEARCH ============ */
+if (boardSearch) {
+  boardSearch.addEventListener('input', function() {
+    boardQuery = this.value;
+    renderBoard();
+  });
 }
 
 document.getElementById('readBtn').addEventListener('click', function(){ setEditMode(false); });
@@ -600,12 +880,30 @@ document.getElementById('exportPdfBtn').addEventListener('click', function(){
 });
 function baseName(p){ return p ? String(p).replace(/\\/g, '/').split('/').pop() : ''; }
 
-/* window controls (both bars) */
+/* window controls (both bars) — app mode gets real minimize; panel mode hides */
 function closeWin(){ flushSave(); window.notesAPI.close(); }
-document.getElementById('minBtnBoard').addEventListener('click', closeWin);
+function minWin(){
+  if (isAppMode && window.notesAPI.minimize) { flushSave(); window.notesAPI.minimize(); }
+  else closeWin();
+}
+document.getElementById('minBtnBoard').addEventListener('click', minWin);
 document.getElementById('closeBtnBoard').addEventListener('click', closeWin);
-document.getElementById('minBtnEd').addEventListener('click', closeWin);
+document.getElementById('minBtnEd').addEventListener('click', minWin);
 document.getElementById('closeBtnEd').addEventListener('click', closeWin);
+
+/* Cross-window sync: panel and app window edit the same notes file */
+if (window.notesAPI.onNotesUpdated) {
+  window.notesAPI.onNotesUpdated(function(notes) {
+    if (!Array.isArray(notes)) return;
+    stickyNotes = notes;
+    // Keep local unsaved edits of the currently open note
+    if (activeNoteId && editorView.classList.contains('active') && !currentTaskId) {
+      var mine = getActiveNote();
+      if (mine) mine.text = md.value;
+    }
+    if (boardView.classList.contains('active')) renderBoard();
+  });
+}
 
 /* ============ DATA LOAD ============ */
 window.notesAPI.getStickyNotes().then(function(notes) {

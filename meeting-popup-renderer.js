@@ -101,6 +101,21 @@ window.meetingPopupAPI.onData(function(data) {
 
   eventName.textContent = data.label || 'Meeting';
 
+  // Join button — shown only when the event carries a meeting link
+  var joinBtn = document.getElementById('joinBtn');
+  if (joinBtn) {
+    if (data.meetLink) {
+      joinBtn.style.display = '';
+      joinBtn.onclick = function() {
+        window.meetingPopupAPI.openUrl(data.meetLink);
+        window.meetingPopupAPI.dismiss();
+      };
+    } else {
+      joinBtn.style.display = 'none';
+      joinBtn.onclick = null;
+    }
+  }
+
   var isCritical = data.stage === '0m' || data.stage === '5m';
 
   if (data.stage === '0m') {

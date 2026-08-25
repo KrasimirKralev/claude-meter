@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('notesAPI', {
   getTaskNote: (taskId) => ipcRenderer.invoke('task-note-get', taskId),
   saveTaskNote: (taskId, text) => ipcRenderer.send('task-note-save', taskId, text),
   close: () => ipcRenderer.send('notes-window-close'),
+  minimize: () => ipcRenderer.send('notes-window-minimize'),
+  onNotesUpdated: (cb) => ipcRenderer.on('sticky-notes-updated', (_e, notes) => cb(notes)),
   onSnapGlow: (cb) => ipcRenderer.on('snap-glow', () => cb()),
   onLoadTaskNote: (cb) => ipcRenderer.on('load-task-note', (_e, data) => cb(data)),
   onLoadGlobalNote: (cb) => ipcRenderer.on('load-global-note', () => cb()),

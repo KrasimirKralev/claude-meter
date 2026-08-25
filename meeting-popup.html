@@ -211,6 +211,7 @@
   .btn:active { transform: translate(2px,2px) !important; box-shadow: 0.5px 0.5px 0 var(--ink) !important; }
   .btn-primary { background: var(--accent) !important; }
   .btn-primary.work { background: var(--green) !important; color: #fff !important; }
+  .btn-join { background: var(--green) !important; color: #fff !important; }
   .countdown { color: var(--text-dim) !important; font-weight: 700 !important; }
   .progress-bar { background: var(--ink) !important; opacity: 0.25; }
 </style>
@@ -228,6 +229,7 @@
   <div class="event-name" id="eventName"></div>
   <div class="subtitle" id="subtitle"></div>
   <div class="btn-row">
+    <button class="btn btn-primary btn-join" id="joinBtn" style="display:none">&#x1F3A5; Join</button>
     <button class="btn btn-primary" id="okBtn">Got it</button>
     <button class="btn btn-secondary" id="dismissBtn">Dismiss</button>
   </div>

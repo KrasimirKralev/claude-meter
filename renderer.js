@@ -873,6 +873,7 @@ function renderWidgetCalendar(events, forceShow) {
   } else {
     upcomingHeader.style.display = 'none';
   }
+  if (typeof reportMinHeight === 'function') reportMinHeight();
 }
 
 function buildWidgetCalEvent(evt, showDate) {
@@ -915,9 +916,27 @@ function buildWidgetCalEvent(evt, showDate) {
   titleEl.textContent = evt.title;
   row.appendChild(titleEl);
 
+  // Meetings with a link: click jumps straight into the meeting
+  var joinLink = evt.meetLink || (function(s) {
+    var m = typeof s === 'string' && s.match(/https:\/\/[^\s<>"']+/);
+    return m ? m[0] : null;
+  })(evt.title);
+
+  if (joinLink) {
+    var cam = createElement('span', 'widget-cal-join');
+    cam.textContent = '🎥';
+    cam.style.fontSize = '10px';
+    cam.style.flexShrink = '0';
+    row.appendChild(cam);
+  }
+
   row.style.cursor = 'pointer';
-  row.title = evt.title;
+  row.title = joinLink ? 'Join meeting: ' + joinLink : evt.title;
   row.addEventListener('click', function() {
+    if (joinLink) {
+      window.electronAPI.openExternalUrl(joinLink);
+      return;
+    }
     // Calendar events open the Calendar window, not the generic dashboard
     window.electronAPI.openCalendar();
   });
@@ -945,6 +964,27 @@ function applyResponsiveScaling() {
   widget.classList.toggle('tight', h < 400);
   widget.classList.toggle('very-tight', h < 300);
   widget.classList.toggle('narrow', w < 320);
+  reportMinHeight();
+}
+
+/* The window's minimum height tracks the content's natural height, so nothing
+   can ever be clipped off the bottom — main grows the window if it's short. */
+var minHeightTimer = null;
+function reportMinHeight() {
+  if (minHeightTimer) clearTimeout(minHeightTimer);
+  minHeightTimer = setTimeout(function() {
+    minHeightTimer = null;
+    var widget = document.querySelector('.widget');
+    if (!widget || !window.electronAPI.setMinContentHeight) return;
+    // scrollHeight lies here: flex-grow children (calendar card) stretch to fill,
+    // so measure the TRUE natural height with height:max-content, then restore.
+    // Both happen in the same JS turn — no visible flash.
+    var prev = widget.style.height;
+    widget.style.height = 'max-content';
+    var needed = widget.offsetHeight + 4; // small safety margin
+    widget.style.height = prev;
+    if (needed > 40) window.electronAPI.setMinContentHeight(needed);
+  }, 150);
 }
 
 // Set up ResizeObserver to call it on resize
@@ -1022,6 +1062,7 @@ function applyResponsiveScaling() {
       todayBadges.appendChild(makeBadge('reading', 'Read', r));
       todayBadges.appendChild(makeBadge('learning', 'Learn', l));
     }
+    if (typeof reportMinHeight === 'function') reportMinHeight();
   }
 
   var habitsBox = document.getElementById('widgetHabits');

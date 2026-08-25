@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkAuthStatus: () => ipcRenderer.invoke('check-auth-status'),
   launchAuthLogin: () => ipcRenderer.invoke('launch-auth-login'),
   openExternalUrl: (url) => ipcRenderer.send('open-external-url', url),
+  setMinContentHeight: (h) => ipcRenderer.send('widget-min-height', h),
   onAuthStatusChanged: (cb) => {
     if (authStatusHandler) ipcRenderer.removeListener('auth-status-changed', authStatusHandler);
     authStatusHandler = (_e, data) => cb(data);

@@ -18,6 +18,7 @@
     --shadow-sm: 2.5px 2.5px 0 var(--ink);
     --r: 12px; --r-sm: 8px;
     --pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
     --mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
   }
   html, body { height: 100%; }
@@ -28,9 +29,14 @@
     -webkit-font-smoothing: antialiased;
     display: flex; flex-direction: column;
   }
-  #app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  /* Crisp brutalist window edge — the frameless window gets a real ink border */
+  #app { flex: 1; display: flex; flex-direction: column; min-height: 0; border: var(--bw) solid var(--ink); }
   .view { flex: 1; display: none; flex-direction: column; min-height: 0; }
-  .view.active { display: flex; }
+  .view.active { display: flex; animation: viewIn 0.22s var(--ease); }
+  @keyframes viewIn {
+    from { opacity: 0; transform: translateY(8px) scale(0.995); }
+    to   { opacity: 1; transform: none; }
+  }
 
   /* ---------- Shared top bar ---------- */
   .nbar {
@@ -49,7 +55,7 @@
     font-size: 12px; font-weight: 900; cursor: pointer;
     display: flex; align-items: center; justify-content: center; gap: 5px;
     font-family: inherit; line-height: 1;
-    transition: all 0.12s var(--pop);
+    transition: background-color 0.12s ease, color 0.12s ease, transform 0.12s var(--pop);
   }
   .nbtn:hover { background: #fff; color: var(--ink); }
   .nbtn.add { background: var(--yellow); color: var(--ink); }
@@ -57,7 +63,7 @@
   .nwin {
     width: 12px; height: 12px; border-radius: 3px;
     border: 1.5px solid #fff; cursor: pointer; opacity: 0.75;
-    transition: all 0.15s; background: transparent; padding: 0;
+    transition: opacity 0.15s ease, transform 0.15s var(--pop); background: transparent; padding: 0;
   }
   .nwin:hover { opacity: 1; transform: scale(1.15); }
   .nwin.min { background: var(--yellow); }
@@ -73,7 +79,7 @@
     height: 24px; width: 24px; border: 2px solid #ffffff44; border-radius: 6px;
     background: #ffffff18; color: #fff; font-size: 14px; font-weight: 900;
     cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: all 0.12s var(--pop); -webkit-app-region: no-drag;
+    transition: background-color 0.12s ease, color 0.12s ease, transform 0.12s var(--pop); -webkit-app-region: no-drag;
   }
   .eback:hover { background: #fff; color: var(--ink); transform: translateX(-2px); }
   .cpick { display: flex; gap: 4px; }
@@ -210,14 +216,21 @@
   .rendered .md-table .mdt-cell .mdt-val { position: relative; z-index: 1; font-family: var(--mono); font-weight: 900; font-size: 12.5px; overflow-wrap: anywhere; }
   .rendered .md-table .mdt-cell.txt .mdt-val { font-family: Inter, sans-serif; font-size: 10px; font-weight: 800; text-transform: uppercase; }
 
-  .raw { width: 50%; flex-shrink: 0; border-right: var(--bw) dashed var(--ink); background: var(--surface2); display: none; flex-direction: column; }
+  /* Animated split: the source pane slides open instead of teleporting in */
+  .raw {
+    width: 0; flex-shrink: 0; overflow: hidden; position: relative;
+    border-right: 0 dashed var(--ink); background: var(--surface2);
+    display: flex; flex-direction: column; opacity: 0;
+    transition: width 0.24s var(--ease), opacity 0.18s ease, border-right-width 0.24s var(--ease);
+  }
+  .raw > * { min-width: 190px; }
   .raw-head, .prev-head { font-size: 8px; font-weight: 900; letter-spacing: 1.2px; text-transform: uppercase; color: var(--text-dim); padding: 7px 13px 3px; flex-shrink: 0; }
   .prev-head { padding: 0 0 6px; display: none; }
   .raw textarea {
     flex: 1; border: none; outline: none; resize: none; background: transparent;
     padding: 2px 13px 13px; font-family: var(--mono); font-size: 11.5px; line-height: 1.75; color: var(--ink);
   }
-  .editor-view.editing .raw { display: flex; }
+  .editor-view.editing .raw { width: 50%; opacity: 1; border-right: var(--bw) dashed var(--ink); }
   .editor-view.editing .rendered { flex: 1; }
   .editor-view.editing .prev-head { display: block; }
 
@@ -320,6 +333,95 @@
   .snap-glow { animation: snapGlow 0.4s ease-out; }
   @keyframes snapGlow { 0% { box-shadow: inset 0 0 0 3px var(--yellow); } 100% { box-shadow: none; } }
 
+  /* ---------- Tap-to-edit blocks (Read view) ---------- */
+  .editor-view:not(.editing) #renderOut > [data-line]:not(.md-table):not(.copy-card):hover,
+  .editor-view:not(.editing) #renderOut ul li[data-line]:hover {
+    outline: 2px dashed rgba(17,17,17,0.3); outline-offset: 3px; border-radius: 4px; cursor: text;
+  }
+  .blk-edit {
+    display: block; width: 100%;
+    border: var(--bw) solid var(--ink); border-radius: 8px;
+    background: var(--surface2); box-shadow: 3px 3px 0 var(--ink);
+    font-family: var(--mono); font-size: 12px; line-height: 1.6; color: var(--ink);
+    padding: 8px 10px; resize: none; outline: none; margin: 6px 0;
+    animation: blkIn 0.14s var(--ease);
+  }
+  @keyframes blkIn { from { opacity: 0.4; transform: scale(0.99); } to { opacity: 1; transform: none; } }
+  .md-hr { border: none; border-top: 3px solid var(--ink); border-radius: 2px; margin: 13px 0; }
+
+  /* ---------- Quick-capture bar (Read view) ---------- */
+  .capture-bar {
+    display: flex; gap: 7px; align-items: center;
+    padding: 8px 12px; background: var(--surface2);
+    border-top: var(--bw) solid var(--ink); flex-shrink: 0;
+  }
+  .editor-view.editing .capture-bar { display: none; }
+  .capture-bar input {
+    flex: 1; min-width: 0; border: 2px solid var(--ink); border-radius: 8px;
+    background: var(--surface); color: var(--ink);
+    padding: 7px 11px; font: inherit; font-size: 12px; font-weight: 600; outline: none;
+    transition: box-shadow 0.12s ease;
+  }
+  .capture-bar input:focus { box-shadow: 2.5px 2.5px 0 var(--ink); }
+  .capture-bar button {
+    flex-shrink: 0; height: 32px; padding: 0 13px;
+    border: 2px solid var(--ink); border-radius: 8px;
+    background: var(--yellow); color: var(--ink);
+    font-family: inherit; font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.6px;
+    cursor: pointer; box-shadow: 2px 2px 0 var(--ink);
+    transition: transform 0.1s var(--pop), box-shadow 0.1s var(--pop);
+  }
+  .capture-bar button:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--ink); }
+  .capture-bar button:active { transform: translate(1.5px,1.5px); box-shadow: 0.5px 0.5px 0 var(--ink); }
+
+  /* ---------- Slash command menu ---------- */
+  .slash-menu {
+    position: absolute; left: 18px; width: 216px; max-height: 240px; overflow-y: auto;
+    background: var(--surface); border: var(--bw) solid var(--ink);
+    border-radius: 10px; box-shadow: 5px 5px 0 var(--ink);
+    padding: 5px; z-index: 50; display: none; flex-direction: column; gap: 2px;
+  }
+  .slash-menu.open { display: flex; animation: shareIn 0.15s var(--pop); }
+  .slash-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 7px; cursor: pointer;
+    font-size: 11px; font-weight: 700; color: var(--ink);
+  }
+  .slash-item code { font-family: var(--mono); font-weight: 800; background: var(--ink); color: var(--mint); padding: 1px 5px; border-radius: 3px; font-size: 9px; flex-shrink: 0; min-width: 34px; text-align: center; }
+  .slash-item.sel { background: var(--yellow); }
+  .slash-item:hover { background: var(--surface2); }
+  .slash-item.sel:hover { background: var(--yellow); }
+
+  /* ---------- Tags ---------- */
+  .sc-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 5px; }
+  .sc-tag {
+    font-size: 7.5px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.4px;
+    border: 1.5px solid var(--ink); border-radius: 4px; padding: 1px 5px;
+    background: #fff; color: var(--ink); cursor: pointer;
+  }
+  .sc-tag:hover { background: var(--ink); color: #fff; }
+
+  /* ---------- Board search ---------- */
+  .board-search {
+    -webkit-app-region: no-drag;
+    width: 104px; border: 2px solid #ffffff33; border-radius: 6px;
+    background: #ffffff18; color: #fff;
+    padding: 4px 8px; font: inherit; font-size: 10.5px; font-weight: 600; outline: none;
+    transition: width 0.2s var(--ease), background-color 0.15s ease, color 0.15s ease;
+  }
+  .board-search::placeholder { color: #ffffff77; }
+  .board-search:focus { width: 150px; background: #fff; color: var(--ink); }
+  .board-search:focus::placeholder { color: rgba(17,17,17,0.4); }
+
+  /* ---------- Standalone app mode ---------- */
+  body.app-mode .board { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); padding: 18px; gap: 16px; }
+  body.app-mode .rendered { padding: 20px 26px; }
+  body.app-mode .rendered p, body.app-mode .rendered li { font-size: 13.5px; }
+  body.app-mode .rendered h1 { font-size: 22px; }
+  body.app-mode .rendered h2 { font-size: 15px; }
+  body.app-mode .raw textarea { font-size: 12.5px; }
+  body.app-mode .nbar { padding: 10px 13px; }
+
   @media (prefers-reduced-motion: reduce) { * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 
   ::-webkit-scrollbar { width: 7px; height: 7px; }
@@ -336,6 +438,7 @@
       <span class="ntitle" id="boardTitle">Notes</span>
       <span class="ncount" id="noteCount"></span>
       <div class="sp">
+        <input class="board-search" id="boardSearch" type="text" placeholder="Search or #tag" spellcheck="false">
         <button class="nbtn add" id="addNoteBtn" title="New note">+</button>
         <button class="nbtn" id="archiveBtn" title="Deleted notes">&#x1f5d1;</button>
         <button class="nwin min" id="minBtnBoard" title="Minimize"></button>
@@ -378,7 +481,8 @@
     <div class="ed-content" id="edContent">
       <div class="raw" id="rawPane">
         <div class="raw-head">Markdown source</div>
-        <textarea id="md" spellcheck="true" placeholder="# Title&#10;&#10;Write in markdown..."></textarea>
+        <textarea id="md" spellcheck="true" placeholder="# Title&#10;&#10;Write in markdown... (type / for commands)"></textarea>
+        <div class="slash-menu" id="slashMenu"></div>
       </div>
       <div class="rendered" id="rendered">
         <div class="prev-head">Live preview</div>
@@ -402,9 +506,13 @@
           <div class="cheat-row" data-ins="[text](url)"><code>[](url)</code><span class="d">Link</span></div>
           <div class="cheat-row" data-ins="| Метрика | Стойност |&#10;| --- | --- |&#10;| ред 1 | 11 |&#10;| ред 2 | 38 |&#10;"><code>| |</code><span class="d">Table + bars</span></div>
           <div class="cheat-row" data-ins="copy: "><code>copy:</code><span class="d">Copy button</span></div>
-          <div class="cheat-tip">Wrap a key/link in <code>`backticks`</code> to click-copy it, or start a line with <code>copy:</code> for a Copy button.</div>
+          <div class="cheat-tip">Type <code>/</code> at a line start for quick-insert commands. Wrap a key/link in <code>`backticks`</code> to click-copy it, or start a line with <code>copy:</code> for a Copy button. In Read mode, click any block to edit it in place.</div>
         </div>
       </div>
+    </div>
+    <div class="capture-bar" id="captureBar">
+      <input id="captureInput" type="text" placeholder="Quick add… press Enter" spellcheck="true">
+      <button id="captureBtn" title="Append to note">Add</button>
     </div>
     <div class="ed-foot">
       <span class="wc" id="wc"></span>

@@ -1,6 +1,6 @@
 {
   "name": "claude-usage-widget",
-  "version": "2.6.2",
+  "version": "2.7.0",
   "description": "Desktop widget for Claude usage + a planner (calendar, tasks, notes, habits).",
   "main": "main.js",
   "author": "Krasimir Kralev",
