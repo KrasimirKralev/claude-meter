@@ -59,7 +59,7 @@ If you're not logged into Claude Code, the usage bars will be empty.
 - **Calendar** — local events + optional read-only Google Calendar sync (see below). Meetings with a Meet/Zoom/Teams link show a 🎥 marker — click to **join directly**.
 - **Tasks** — quick to-dos with a completion-streak badge.
 - **Notes** — a **standalone note-taking app** (own window + taskbar icon) with a sticky board, markdown editor + live preview, tables → inline bars, tap-to-edit blocks in read view, a quick-capture bar, `/` slash commands, #tags + search, and click-to-copy fields for links/keys.
-- **Quick capture** — `Ctrl+]` from anywhere drops a popover to jot a note straight into your Inbox.
+- **Quick task** — `Ctrl+]` from anywhere opens a popover that adds a task to your list.
 - **Habits** — Training / Reading / Learning day-trackers with monthly calendars, reflected on the widget.
 
 ---

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';">
-<title>Quick note</title>
+<title>Quick task</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
@@ -52,12 +52,12 @@
 <body>
   <div class="bar">
     <span class="dot"></span>
-    <span class="t">Quick note &#8594; Inbox</span>
-    <span class="hint">ENTER SAVE &#183; ESC CLOSE</span>
+    <span class="t">Quick task</span>
+    <span class="hint">ENTER ADD &#183; ESC CLOSE</span>
   </div>
   <div class="body">
-    <input id="in" type="text" placeholder="Jot it down&#8230;" spellcheck="true" autofocus>
-    <button id="go">Save</button>
+    <input id="in" type="text" placeholder="What needs to be done?" maxlength="200" spellcheck="true" autofocus>
+    <button id="go">Add task</button>
   </div>
 <script src="capture-renderer.js"></script>
 </body>
