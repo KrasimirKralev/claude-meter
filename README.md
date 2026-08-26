@@ -1,9 +1,21 @@
 # Claude Meter
 
+<p align="center">
+  <a href="https://github.com/KrasimirKralev/claude-meter/stargazers"><img src="https://img.shields.io/github/stars/KrasimirKralev/claude-meter?style=for-the-badge&logo=github&color=ffc900&labelColor=111" alt="Stars"></a>
+  <a href="https://github.com/KrasimirKralev/claude-meter/releases/latest"><img src="https://img.shields.io/github/v/release/KrasimirKralev/claude-meter?style=for-the-badge&color=ff90e8&labelColor=111" alt="Latest release"></a>
+  <a href="https://github.com/KrasimirKralev/claude-meter/releases/latest"><img src="https://img.shields.io/github/downloads/KrasimirKralev/claude-meter/total?style=for-the-badge&color=23a094&labelColor=111" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-9ee7c8?style=for-the-badge&labelColor=111" alt="Platforms">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/KrasimirKralev/claude-meter?style=for-the-badge&color=e5484d&labelColor=111" alt="License"></a>
+</p>
+
 A desktop widget that tracks your **Claude usage** in real time — current session, weekly (all models), Fable-only, and pay-as-you-go **extra-usage spend** — with a built-in planner: **calendar** (with optional Google Calendar sync), **tasks**, **notes** (markdown editor), and **habit tracking**. Pop-brutalist UI, always-on-top, snap-to-edge.
 
 <p align="center">
   <img src="assets/screenshot-widget.png" alt="Claude Meter widget" width="340">
+</p>
+
+<p align="center">
+  <b>⭐ If Claude Meter saves you a glance at the usage page, drop a star — it's the whole reason it's free and open.</b>
 </p>
 
 ## Screenshots
@@ -124,6 +136,22 @@ arm64 and x64 DMGs on every push to `main` and publishes them to a Release — n
 ## Tech
 
 Electron 33 · Chart.js · vanilla JS (no framework). All rendering is safe-DOM (no `innerHTML`), credentials never leave your machine.
+
+## Contributing
+
+PRs welcome — bugfixes, new widgets, themes, extra integrations. Thanks to everyone who's chipped in:
+
+- [@GeorgiK77](https://github.com/GeorgiK77) — quick-task global shortcut
+
+## Star history
+
+If this is useful to you, a ⭐ genuinely helps other people find it:
+
+<p align="center">
+  <a href="https://star-history.com/#KrasimirKralev/claude-meter&Date">
+    <img src="https://api.star-history.com/svg?repos=KrasimirKralev/claude-meter&type=Date" alt="Star History Chart" width="600">
+  </a>
+</p>
 
 ## License
 
