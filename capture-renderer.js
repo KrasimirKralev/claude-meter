@@ -1,4 +1,4 @@
-/* Quick-capture popover — Enter saves to the Inbox note, Esc dismisses. */
+/* Quick-task popover — Enter adds a task, Esc dismisses. */
 var input = document.getElementById('in');
 var goBtn = document.getElementById('go');
 

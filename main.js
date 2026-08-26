@@ -4018,10 +4018,10 @@ function openNotesAppWindow() {
   notesAppWin.on('closed', () => { notesAppWin = null; });
 }
 
-// --- Global quick-capture (Ctrl+Shift+N anywhere) ---
+// --- Global quick-task capture (Ctrl+] anywhere) ---
 let captureWin = null;
 
-function openQuickCapture() {
+function openQuickTaskCapture() {
   if (captureWin && !captureWin.isDestroyed()) { captureWin.focus(); return; }
   const { workArea } = screen.getPrimaryDisplay();
   const cw = 460, ch = 106;
@@ -4030,7 +4030,7 @@ function openQuickCapture() {
     x: Math.round(workArea.x + (workArea.width - cw) / 2),
     y: Math.round(workArea.y + workArea.height * 0.18),
     frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true,
-    ...GLASS_OPTS_FN(), show: false, icon: getAssetPath('notes-icon.png'),
+    ...GLASS_OPTS_FN(), show: false, icon: getAssetPath('icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'capture-preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
@@ -4043,32 +4043,6 @@ function openQuickCapture() {
   });
   captureWin.on('blur', () => { if (captureWin && !captureWin.isDestroyed()) captureWin.close(); });
   captureWin.on('closed', () => { captureWin = null; });
-}
-
-// Append a captured line to the "Inbox" note (created on first capture)
-function appendToInbox(text) {
-  let notes = [];
-  try {
-    if (fs.existsSync(STICKY_NOTES_FILE)) notes = JSON.parse(fs.readFileSync(STICKY_NOTES_FILE, 'utf-8')) || [];
-  } catch { notes = []; }
-  if (!Array.isArray(notes)) notes = [];
-  const line = '- ' + String(text).slice(0, 500);
-  let inbox = notes.find(n => n && typeof n.text === 'string' && /^#\s*Inbox\b/i.test(n.text.trim()));
-  if (inbox) {
-    inbox.text = inbox.text.replace(/\s+$/, '') + '\n' + line;
-  } else {
-    inbox = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      title: '', text: '# Inbox\n\n' + line, color: 'yellow', createdAt: Date.now(),
-    };
-    notes.unshift(inbox);
-  }
-  try { fs.writeFileSync(STICKY_NOTES_FILE, JSON.stringify(notes, null, 2)); } catch { /* ignore */ }
-  for (const w of [notesWin, notesAppWin]) {
-    if (w && !w.isDestroyed()) {
-      try { w.webContents.send('sticky-notes-updated', notes); } catch { /* ignore */ }
-    }
-  }
 }
 
 function openCalendarWindow() {
@@ -4370,8 +4344,8 @@ app.whenReady().then(() => {
     setTimeout(registerHotkey, 3000);
   }
 
-  // Quick-capture hotkey: jot a note from anywhere → Inbox
-  try { globalShortcut.register('Control+]', openQuickCapture); } catch { /* ignore */ }
+  // Quick-task hotkey: add a task from anywhere
+  try { globalShortcut.register('Control+]', openQuickTaskCapture); } catch { /* ignore */ }
 
   // IPC sender validation helper
   const isLocalSender = (event) => {
@@ -4918,13 +4892,13 @@ app.whenReady().then(() => {
     }
   });
 
-  // Quick-capture popover → Inbox note
-  ipcMain.on('quick-capture-submit', (event, text) => {
+  // Quick-task popover → task list
+  ipcMain.on('quick-task-submit', (event, text) => {
     if (!isLocalSender(event)) return;
-    if (typeof text === 'string' && text.trim()) appendToInbox(text.trim());
+    if (typeof text === 'string' && text.trim()) addTask(text.trim(), 'medium');
     if (captureWin && !captureWin.isDestroyed()) captureWin.close();
   });
-  ipcMain.on('quick-capture-close', (event) => {
+  ipcMain.on('quick-task-close', (event) => {
     if (!isLocalSender(event)) return;
     if (captureWin && !captureWin.isDestroyed()) captureWin.close();
   });
