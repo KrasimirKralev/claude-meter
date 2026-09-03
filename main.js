@@ -40,11 +40,8 @@ try {
 
 // --- Constants ---
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
-const CREDS_FILE = path.join(CLAUDE_DIR, '.credentials.json');
-const DATA_FILE = path.join(CLAUDE_DIR, 'usage-widget-data.json');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 const BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-bounds.json');
-const HISTORY_FILE = path.join(CLAUDE_DIR, 'usage-widget-history.json');
 const SETTINGS_FILE = path.join(CLAUDE_DIR, 'usage-widget-settings.json');
 const TASKS_FILE = path.join(CLAUDE_DIR, 'usage-widget-tasks.json');
 const TASKS_BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-tasks-bounds.json');
@@ -65,23 +62,31 @@ let currentHotkey = DEFAULT_HOTKEY;
 
 let win = null;
 let tray = null;
-let syncing = false;
-let syncStartedAt = 0;
-let activeRequest = null;
-let cachedUsage = null;
 let fileWatcher = null;
 let fileChangeTimer = null;
 let dashWin = null;
 let lastAutoSync = 0;
-let lastSuccessfulSync = 0;
 const MIN_SYNC_INTERVAL = 60000; // don't hit API more than once per minute (was 5min)
-let usageHistory = [];
 // Track all intervals/timers that need cleanup on quit
 const cleanupTimers = [];
-let credsWatcher = null;
-// Track last alerted pct step (fires at threshold, then every 10%)
-let lastAlertedStep = { session: -1, weekAll: -1, weekSonnet: -1 };
+let credsWatchers = [];
 let alertPopup = null;
+
+// --- Multi-account state ---
+// accountList holds the persisted descriptors; accountCtx holds the live
+// per-account runtime (token cache, sync state, backoff) so one account's
+// rate limit or expired session can never stall the others.
+let accountList = [];
+const accountCtx = Object.create(null);
+let activeAccountId = null;
+// Optional settings.primaryAccount — the account NAME to start on.
+let primaryAccountName = null;
+// Contents of ~/.claude/active-account.json, written by the CLI launcher so
+// the widget can flag which account Claude Code is currently running on.
+// Read-only: the widget never writes this file.
+let cliActiveAccount = null;
+let cliMarkerWatcher = null;
+let cliMarkerDebounce = null;
 const ALERT_THRESHOLDS = { session: 80, weekAll: 90, weekSonnet: 90 };
 let trayHasAlert = false;
 let tasksWin = null;
@@ -233,7 +238,7 @@ function showPomoPopup(type) {
     skipTaskbar: true,
     alwaysOnTop: true,
     show: false,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -241,6 +246,7 @@ function showPomoPopup(type) {
       preload: path.join(__dirname, 'pomo-popup-preload.js'),
     },
   });
+  applyLinuxPopupTransparency(pomoPopupWin);
 
   pomoPopupWin.on('closed', () => { pomoPopupWin = null; });
   pomoPopupWin.once('ready-to-show', () => {
@@ -382,30 +388,401 @@ function saveBoundsNow() {
   } catch { /* ignore */ }
 }
 
-// --- Load/save cached data ---
+// --- Accounts: discovery, naming, runtime contexts ---
 
-function loadCachedUsage() {
+const HOME_DIR = os.homedir();
+const DEFAULT_ACCOUNT_DIR = CLAUDE_DIR;
+const DEFAULT_ACCOUNT_ID = path.basename(DEFAULT_ACCOUNT_DIR);
+const ACCOUNT_DIR_PREFIX = '.claude-';
+
+function capitalizeWord(s) {
+  if (!s) return '';
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// The signed-in email for a config dir. The default dir keeps it in the sibling
+// ~/.claude.json; every named dir keeps its own copy inside the dir.
+function readAccountEmail(dir) {
+  const file = (dir === DEFAULT_ACCOUNT_DIR)
+    ? path.join(HOME_DIR, '.claude.json')
+    : path.join(dir, '.claude.json');
   try {
-    if (fs.existsSync(DATA_FILE)) {
-      const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
-      return data.usage || null;
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    const email = data && data.oauthAccount && data.oauthAccount.emailAddress;
+    return (typeof email === 'string' && email.indexOf('@') > 0) ? email : null;
+  } catch { return null; }
+}
+
+// Generic label: `.claude-<suffix>` -> capitalized suffix; the default dir uses
+// the local part of the signed-in email (nothing user-specific is hardcoded).
+function accountDisplayName(dir) {
+  const base = path.basename(dir);
+  if (base === DEFAULT_ACCOUNT_ID) {
+    const email = readAccountEmail(dir);
+    return email ? capitalizeWord(email.split('@')[0]) : 'Default';
+  }
+  if (base.indexOf(ACCOUNT_DIR_PREFIX) === 0) {
+    return capitalizeWord(base.slice(ACCOUNT_DIR_PREFIX.length)) || base;
+  }
+  return base;
+}
+
+function normalizeEmail(email) {
+  return (typeof email === 'string' && email) ? email.trim().toLowerCase() : '';
+}
+
+function dirHasCredentials(dir) {
+  try { return fs.existsSync(path.join(dir, '.credentials.json')); } catch { return false; }
+}
+
+// Discovery re-runs every minute, so a duplicate would otherwise log every
+// minute forever. Log each kept/dropped pairing once.
+const loggedDuplicates = new Set();
+
+function logDuplicateOnce(email, keptId, droppedId) {
+  const key = email + '|' + keptId + '|' + droppedId;
+  if (loggedDuplicates.has(key)) return;
+  loggedDuplicates.add(key);
+  console.log('[accounts] duplicate email - keeping', keptId, ', dropping', droppedId);
+}
+
+// Every Claude Code config dir holding credentials: ~/.claude plus ~/.claude-*
+function discoverAccountDirs() {
+  const dirs = [];
+  if (dirHasCredentials(DEFAULT_ACCOUNT_DIR)) dirs.push(DEFAULT_ACCOUNT_DIR);
+  try {
+    const names = fs.readdirSync(HOME_DIR).sort();
+    for (const name of names) {
+      if (name.indexOf(ACCOUNT_DIR_PREFIX) !== 0) continue;
+      const full = path.join(HOME_DIR, name);
+      try { if (!fs.statSync(full).isDirectory()) continue; } catch { continue; }
+      if (dirHasCredentials(full)) dirs.push(full);
     }
   } catch { /* ignore */ }
+  return dirs;
+}
+
+// The default account keeps the original single-account file names so existing
+// cached usage and history survive the upgrade untouched.
+function accountFileSuffix(id) {
+  if (id === DEFAULT_ACCOUNT_ID) return '';
+  return '-' + String(id).replace(/[^A-Za-z0-9_-]/g, '_');
+}
+
+function makeAccountCtx(acc) {
+  const suffix = accountFileSuffix(acc.id);
+  return {
+    id: acc.id,
+    dir: acc.dir,
+    name: acc.name,
+    email: readAccountEmail(acc.dir),
+    credsFile: path.join(acc.dir, '.credentials.json'),
+    dataFile: path.join(CLAUDE_DIR, 'usage-widget-data' + suffix + '.json'),
+    historyFile: path.join(CLAUDE_DIR, 'usage-widget-history' + suffix + '.json'),
+    cachedToken: null,
+    tokenLastRead: 0,
+    signedOut: false,
+    isRefreshing: false,
+    refreshRetryTimer: null,
+    refreshRetryCount: 0,
+    cachedUsage: null,
+    history: [],
+    lastSuccessfulSync: 0,
+    rateLimitUntil: 0,
+    retryTimer: null,
+    retryCount: 0,
+    staggerTimer: null,
+    syncing: false,
+    syncStartedAt: 0,
+    activeRequest: null,
+    lastError: null,
+    needsLogin: false,
+    lastAlertedStep: { session: -1, weekAll: -1, weekSonnet: -1 },
+  };
+}
+
+function destroyAccountCtx(id) {
+  const ctx = accountCtx[id];
+  if (!ctx) return;
+  if (ctx.retryTimer) { clearTimeout(ctx.retryTimer); ctx.retryTimer = null; }
+  if (ctx.refreshRetryTimer) { clearTimeout(ctx.refreshRetryTimer); ctx.refreshRetryTimer = null; }
+  if (ctx.staggerTimer) { clearTimeout(ctx.staggerTimer); ctx.staggerTimer = null; }
+  if (ctx.activeRequest) { try { ctx.activeRequest.destroy(); } catch { /* ignore */ } ctx.activeRequest = null; }
+  delete accountCtx[id];
+}
+
+// Merge persisted accounts with a fresh discovery pass: new dirs are added,
+// user-edited names/enabled flags are kept.
+function initAccounts() {
+  const byId = Object.create(null);
+  const merged = [];
+  for (const acc of accountList) {
+    if (!acc || typeof acc.dir !== 'string') continue;
+    const id = (typeof acc.id === 'string' && acc.id) ? acc.id : path.basename(acc.dir);
+    if (byId[id]) continue;
+    // `autoName` is the label we derived last time. If the stored name still
+    // equals it, the label is ours to refresh (a dir can be re-authenticated to
+    // a different account); if it differs, the user renamed it — leave it.
+    const derived = accountDisplayName(acc.dir);
+    const stored = (typeof acc.name === 'string' && acc.name) ? acc.name : derived;
+    const userRenamed = typeof acc.autoName === 'string' && acc.autoName !== stored;
+    const entry = {
+      id,
+      dir: acc.dir,
+      name: userRenamed ? stored : derived,
+      autoName: derived,
+      enabled: acc.enabled !== false,
+    };
+    byId[id] = entry;
+    merged.push(entry);
+  }
+  for (const dir of discoverAccountDirs()) {
+    const id = path.basename(dir);
+    if (byId[id]) continue;
+    const derived = accountDisplayName(dir);
+    const entry = { id, dir, name: derived, autoName: derived, enabled: true };
+    byId[id] = entry;
+    merged.push(entry);
+  }
+  // One account per signed-in email. `/login` in the default dir can point
+  // ~/.claude at an account that already has its own ~/.claude-<name> dir; the
+  // named dir wins because it is the stable one. Entries with no readable email
+  // are always kept — we cannot prove they are duplicates.
+  const byEmail = Object.create(null);
+  const deduped = [];
+  for (const entry of merged) {
+    const email = normalizeEmail(readAccountEmail(entry.dir));
+    if (!email) { deduped.push(entry); continue; }
+    const seen = byEmail[email];
+    if (!seen) { byEmail[email] = entry; deduped.push(entry); continue; }
+    // Prefer the named dir over the default one.
+    const seenIsDefault = seen.id === DEFAULT_ACCOUNT_ID;
+    const entryIsDefault = entry.id === DEFAULT_ACCOUNT_ID;
+    if (seenIsDefault && !entryIsDefault) {
+      logDuplicateOnce(email, entry.id, seen.id);
+      deduped[deduped.indexOf(seen)] = entry;
+      byEmail[email] = entry;
+      if (accountCtx[seen.id]) destroyAccountCtx(seen.id);
+    } else {
+      logDuplicateOnce(email, seen.id, entry.id);
+      if (accountCtx[entry.id]) destroyAccountCtx(entry.id);
+    }
+  }
+  for (const id of Object.keys(byId)) {
+    if (!deduped.some((e) => e.id === id)) delete byId[id];
+  }
+  accountList = deduped;
+
+  for (const acc of accountList) {
+    const existing = accountCtx[acc.id];
+    if (!existing) {
+      accountCtx[acc.id] = makeAccountCtx(acc);
+    } else {
+      existing.name = acc.name;
+      existing.dir = acc.dir;
+      existing.credsFile = path.join(acc.dir, '.credentials.json');
+      // Re-read: a dir can be re-authenticated to a different account.
+      existing.email = readAccountEmail(acc.dir);
+    }
+  }
+  for (const id of Object.keys(accountCtx)) {
+    if (!byId[id]) destroyAccountCtx(id);
+  }
+
+  // Default active account: settings.primaryAccount by name, else the default
+  // dir's account when it survived dedupe, else the first enabled one.
+  const activeEntry = activeAccountId ? byId[activeAccountId] : null;
+  if (!activeEntry || activeEntry.enabled === false) {
+    const usable = (e) => e && e.enabled !== false;
+    const wanted = primaryAccountName
+      ? accountList.find((a) => usable(a) && a.name.toLowerCase() === primaryAccountName.toLowerCase())
+      : null;
+    const preferred = wanted
+      || (usable(byId[DEFAULT_ACCOUNT_ID]) ? byId[DEFAULT_ACCOUNT_ID] : null)
+      || accountList.find(usable)
+      || accountList[0];
+    activeAccountId = preferred ? preferred.id : null;
+  }
+}
+
+// --- Live account discovery ---
+// A `claude auth login` into a brand new ~/.claude-<name> dir must show up
+// without restarting the app, and a dir whose credentials are deleted must drop
+// out. Both are a cheap directory scan, so re-run it on a timer and on the
+// widget's manual refresh.
+const ACCOUNT_DISCOVERY_INTERVAL_MS = 60 * 1000;
+
+function accountsSignature() {
+  return accountList
+    .map((a) => a.id + ':' + a.name + ':' + (a.enabled !== false ? '1' : '0'))
+    .join('|') + '>' + activeAccountId;
+}
+
+function rediscoverAccounts(reason) {
+  const beforeSig = accountsSignature();
+  const beforeIds = Object.keys(accountCtx);
+
+  // Drop accounts whose credentials file is gone (logged out, dir deleted).
+  // The default dir always stays listed so a fresh install can show sign-in.
+  accountList = accountList.filter(
+    (a) => a.id === DEFAULT_ACCOUNT_ID || dirHasCredentials(a.dir)
+  );
+
+  initAccounts(); // re-scans ~/.claude-*, merges names, applies email dedupe
+
+  if (accountsSignature() === beforeSig) return;
+
+  // Hydrate anything new, then give it exactly one sync of its own.
+  const added = [];
+  for (const id of Object.keys(accountCtx)) {
+    if (beforeIds.indexOf(id) >= 0) continue;
+    const ctx = accountCtx[id];
+    loadAccountState(ctx);
+    ctx.history = loadHistory(ctx);
+    added.push(ctx);
+  }
+
+  console.log('[accounts] re-discovery (' + reason + '):',
+    accountList.map((a) => a.id).join(', ') || '(none)');
+  saveSettings();
+  updateTrayTooltip();
+  broadcastUsage();
+  // A manual refresh syncs every account straight after this call, so leave the
+  // new ones to it rather than spending a second request on them.
+  if (reason === 'manual') return;
+  added.forEach((ctx, i) => {
+    if (ctx.staggerTimer) { clearTimeout(ctx.staggerTimer); ctx.staggerTimer = null; }
+    ctx.staggerTimer = setTimeout(() => {
+      ctx.staggerTimer = null;
+      doSync(ctx);
+    }, i * ACCOUNT_SYNC_STAGGER_MS);
+  });
+}
+
+// --- CLI marker: which account Claude Code itself is running on ---
+//
+// ~/.claude/active-account.json is OWNED by the CLI launcher. The widget is a
+// strictly READ-ONLY consumer: it never creates, writes or deletes this file.
+// Canonical schema {id, name, email, dir, chosenAt (seconds), reason,
+// five_hour, seven_day, next, launcher} — every field is optional here; only
+// `email` is used for matching, so a schema change cannot break the widget.
+const ACTIVE_ACCOUNT_FILE = path.join(CLAUDE_DIR, 'active-account.json');
+const CLI_MARKER_POLL_MS = 60 * 1000;
+const CLI_MARKER_DEBOUNCE_MS = 500;
+const DEFAULT_LAUNCHER_NAME = 'Claude Code';
+
+function readCliActiveAccount() {
+  try {
+    const data = JSON.parse(fs.readFileSync(ACTIVE_ACCOUNT_FILE, 'utf-8'));
+    if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+  } catch { /* missing or unreadable — no tag */ }
   return null;
 }
 
-function saveCachedUsage(usage) {
+// The launcher is being renamed (cc -> clx/ccl), so never hardcode it: take the
+// name it reports, fall back to the product name.
+function cliLauncherName() {
+  const raw = cliActiveAccount && cliActiveAccount.launcher;
+  if (typeof raw !== 'string') return DEFAULT_LAUNCHER_NAME;
+  const clean = raw.trim().slice(0, 24);
+  return /^[\w .+-]+$/.test(clean) ? clean : DEFAULT_LAUNCHER_NAME;
+}
+
+// Re-read the marker; broadcast only when what we display actually changed.
+function refreshCliActiveAccount() {
+  const next = readCliActiveAccount();
+  const beforeEmail = normalizeEmail(cliActiveAccount && cliActiveAccount.email);
+  const beforeLauncher = cliLauncherName();
+  const afterEmail = normalizeEmail(next && next.email);
+  cliActiveAccount = next;
+  if (beforeEmail !== afterEmail || beforeLauncher !== cliLauncherName()) {
+    updateTrayTooltip();
+    broadcastUsage();
+  }
+}
+
+function startCliMarkerWatcher() {
+  refreshCliActiveAccount();
+  // Watch the directory, not the file: the launcher replaces it by rename.
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ lastSync: Date.now(), usage }, null, 2));
+    fs.mkdirSync(CLAUDE_DIR, { recursive: true });
+    cliMarkerWatcher = fs.watch(CLAUDE_DIR, (_, filename) => {
+      if (filename && filename !== 'active-account.json') return;
+      if (cliMarkerDebounce) clearTimeout(cliMarkerDebounce);
+      cliMarkerDebounce = setTimeout(() => {
+        cliMarkerDebounce = null;
+        refreshCliActiveAccount();
+      }, CLI_MARKER_DEBOUNCE_MS);
+    });
+  } catch { /* watch unavailable — the poll below still catches changes */ }
+  const poll = setInterval(refreshCliActiveAccount, CLI_MARKER_POLL_MS);
+  cleanupTimers.push(poll);
+}
+
+function isCliActive(ctx) {
+  const marker = normalizeEmail(cliActiveAccount && cliActiveAccount.email);
+  if (!marker) return false;
+  return normalizeEmail(ctx.email) === marker;
+}
+
+function enabledAccounts() {
+  const out = [];
+  for (const acc of accountList) {
+    if (acc.enabled === false) continue;
+    const ctx = accountCtx[acc.id];
+    if (ctx) out.push(ctx);
+  }
+  return out;
+}
+
+function getActiveCtx() {
+  if (activeAccountId && accountCtx[activeAccountId]) return accountCtx[activeAccountId];
+  const list = enabledAccounts();
+  return list.length > 0 ? list[0] : null;
+}
+
+function activeUsage() {
+  const ctx = getActiveCtx();
+  return ctx ? ctx.cachedUsage : null;
+}
+
+function activeHistory() {
+  const ctx = getActiveCtx();
+  return ctx ? ctx.history : [];
+}
+
+// --- Load/save cached data (per account) ---
+
+// Restores this account's last usage AND any unexpired rate-limit backoff — the
+// API's token bucket does not reset because the app restarted, so neither should
+// our backoff, or every launch would spend a request on a throttled token.
+function loadAccountState(ctx) {
+  try {
+    if (fs.existsSync(ctx.dataFile)) {
+      const data = JSON.parse(fs.readFileSync(ctx.dataFile, 'utf-8'));
+      ctx.cachedUsage = data.usage || null;
+      const until = Number(data.rateLimitUntil);
+      if (Number.isFinite(until) && until > Date.now()) ctx.rateLimitUntil = until;
+    }
   } catch { /* ignore */ }
 }
 
-// --- Usage history ---
-
-function loadHistory() {
+function saveCachedUsage(ctx) {
   try {
-    if (fs.existsSync(HISTORY_FILE)) {
-      const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+    fs.writeFileSync(ctx.dataFile, JSON.stringify({
+      lastSync: Date.now(),
+      usage: ctx.cachedUsage,
+      rateLimitUntil: ctx.rateLimitUntil || 0,
+    }, null, 2));
+  } catch { /* ignore */ }
+}
+
+// --- Usage history (per account) ---
+
+function loadHistory(ctx) {
+  try {
+    if (fs.existsSync(ctx.historyFile)) {
+      const data = JSON.parse(fs.readFileSync(ctx.historyFile, 'utf-8'));
       if (data.version === 1 && Array.isArray(data.points)) {
         return data.points;
       }
@@ -414,16 +791,18 @@ function loadHistory() {
   return [];
 }
 
-function saveHistory() {
+function saveHistory(ctx) {
   try {
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify({
+    fs.writeFileSync(ctx.historyFile, JSON.stringify({
       version: 1,
-      points: usageHistory,
+      points: ctx.history,
     }, null, 2));
   } catch { /* ignore */ }
 }
 
-function appendHistory(usage) {
+function appendHistory(ctx) {
+  const usage = ctx.cachedUsage;
+  if (!usage) return;
   const point = {
     ts: Date.now(),
     session: usage.session.pct,
@@ -432,7 +811,7 @@ function appendHistory(usage) {
   };
 
   // Deduplicate: skip if values unchanged from last point
-  const last = usageHistory[usageHistory.length - 1];
+  const last = ctx.history[ctx.history.length - 1];
   if (last
     && last.session === point.session
     && last.weekAll === point.weekAll
@@ -440,13 +819,13 @@ function appendHistory(usage) {
     return;
   }
 
-  usageHistory.push(point);
+  ctx.history.push(point);
 
   // Prune points older than 30 days
   const cutoff = Date.now() - HISTORY_MAX_AGE_MS;
-  usageHistory = usageHistory.filter((p) => p.ts > cutoff);
+  ctx.history = ctx.history.filter((p) => p.ts > cutoff);
 
-  saveHistory();
+  saveHistory(ctx);
 }
 
 // --- Settings persistence ---
@@ -476,6 +855,24 @@ function loadSettings() {
       if (data.theme && THEMES[data.theme]) {
         currentTheme = data.theme;
       }
+      if (Array.isArray(data.accounts)) {
+        accountList = data.accounts
+          .filter((a) => a && typeof a.dir === 'string'
+            && path.basename(a.dir).indexOf(DEFAULT_ACCOUNT_ID) === 0)
+          .map((a) => ({
+            id: (typeof a.id === 'string' && a.id) ? a.id : path.basename(a.dir),
+            dir: a.dir,
+            name: (typeof a.name === 'string' && a.name) ? a.name.slice(0, 40) : accountDisplayName(a.dir),
+            autoName: typeof a.autoName === 'string' ? a.autoName.slice(0, 40) : null,
+            enabled: a.enabled !== false,
+          }));
+      }
+      if (typeof data.activeAccountId === 'string') {
+        activeAccountId = data.activeAccountId;
+      }
+      if (typeof data.primaryAccount === 'string' && data.primaryAccount) {
+        primaryAccountName = data.primaryAccount.slice(0, 40);
+      }
     }
   } catch { /* ignore */ }
 }
@@ -493,6 +890,13 @@ function saveSettings() {
     if (currentTheme && currentTheme !== 'dark') {
       obj.theme = currentTheme;
     }
+    if (accountList.length > 0) {
+      obj.accounts = accountList.map((a) => ({
+        id: a.id, name: a.name, autoName: a.autoName, dir: a.dir, enabled: a.enabled !== false,
+      }));
+      obj.activeAccountId = activeAccountId;
+    }
+    if (primaryAccountName) obj.primaryAccount = primaryAccountName;
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(obj, null, 2));
   } catch (err) { console.error('[settings] Save failed:', err.message); }
 }
@@ -1108,8 +1512,9 @@ function showDailyDigest() {
     taskLine += ' (' + highPriority.length + ' high priority)';
   }
   lines.push(taskLine);
-  if (cachedUsage) {
-    lines.push('Session ' + cachedUsage.session.pct + '% \u00b7 Week ' + cachedUsage.weekAll.pct + '%');
+  const digestUsage = activeUsage();
+  if (digestUsage) {
+    lines.push('Session ' + digestUsage.session.pct + '% \u00b7 Week ' + digestUsage.weekAll.pct + '%');
   }
   const summary = lines.join('\n');
 
@@ -1122,10 +1527,11 @@ function showDailyDigest() {
   alertPopup = new BrowserWindow({
     width: 340, height: popH, x: sw - 360, y: sh - popH - 20,
     frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true, show: false,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
       preload: path.join(__dirname, 'popup-preload.js') },
   });
+  applyLinuxPopupTransparency(alertPopup);
   { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
   alertPopup.once('ready-to-show', () => { if (alertPopup && !alertPopup.isDestroyed()) alertPopup.showInactive(); });
   alertPopup.loadFile(path.join(__dirname, 'popup.html'));
@@ -1548,7 +1954,7 @@ function showReminderPopup(evt, autoDismissMs, stage) {
     skipTaskbar: true,
     alwaysOnTop: true,
     show: false,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1556,6 +1962,7 @@ function showReminderPopup(evt, autoDismissMs, stage) {
       preload: path.join(__dirname, 'meeting-popup-preload.js'),
     },
   });
+  applyLinuxPopupTransparency(alertPopup);
 
   { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
   alertPopup.once('ready-to-show', () => {
@@ -1661,7 +2068,7 @@ function showAlertPopup(label, pct, resetsAt, accountLabel) {
     skipTaskbar: true,
     alwaysOnTop: true,
     show: false,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1669,6 +2076,7 @@ function showAlertPopup(label, pct, resetsAt, accountLabel) {
       preload: path.join(__dirname, 'popup-preload.js'),
     },
   });
+  applyLinuxPopupTransparency(alertPopup);
 
   { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
 
@@ -1698,7 +2106,8 @@ function showAlertPopup(label, pct, resetsAt, accountLabel) {
   });
 }
 
-function checkAndNotify(usage) {
+function checkAndNotify(ctx) {
+  const usage = ctx && ctx.cachedUsage;
   if (!usage) return;
   const checks = [
     { key: 'session', pct: usage.session.pct, label: 'Session', resetsAt: usage.session.resetsAt },
@@ -1708,12 +2117,12 @@ function checkAndNotify(usage) {
 
   for (const check of checks) {
     const step = getAlertStep(check.pct, ALERT_THRESHOLDS[check.key]);
-    if (step >= 0 && step !== lastAlertedStep[check.key]) {
-      lastAlertedStep[check.key] = step;
-      showAlertPopup(check.label, check.pct, check.resetsAt, 'Me');
+    if (step >= 0 && step !== ctx.lastAlertedStep[check.key]) {
+      ctx.lastAlertedStep[check.key] = step;
+      showAlertPopup(check.label, check.pct, check.resetsAt, ctx.name || 'Me');
     }
     // Reset tracking when usage drops below threshold
-    if (step < 0) lastAlertedStep[check.key] = -1;
+    if (step < 0) ctx.lastAlertedStep[check.key] = -1;
   }
 }
 
@@ -1953,94 +2362,113 @@ function downloadAndInstallUpdate(downloadUrl) {
 
 // --- OAuth token (cached to avoid reading file on every sync) ---
 
-let cachedToken = null;
-let tokenLastRead = 0;
-let signedOut = false;
 const TOKEN_CACHE_MS = 3 * 60 * 1000; // re-read from disk every 3 minutes
 const REFRESH_WINDOW_MS = 60 * 60 * 1000; // refresh when within 1 HOUR of expiry
-let isRefreshing = false;
-let refreshRetryTimer = null;
-let refreshRetryCount = 0;
 const MAX_REFRESH_RETRIES = 8;
+// Claude Code's public OAuth client id. The refresh endpoint 404s without it,
+// which is why the widget's own token refresh never worked before.
+const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
-function getAccessToken(forceRefresh) {
-  if (signedOut) return null;
-  const now = Date.now();
-  if (!forceRefresh && cachedToken && (now - tokenLastRead) < TOKEN_CACHE_MS) {
-    return cachedToken;
-  }
+// Write refreshed tokens back to a credentials file atomically (tmp + rename,
+// 0600) so a crash mid-write can never leave a half-written credential.
+function persistRefreshedCreds(credsFile, data) {
+  const tmpFile = credsFile + '.tmp';
+  const creds = JSON.parse(fs.readFileSync(credsFile, 'utf-8'));
+  creds.claudeAiOauth.accessToken = data.access_token;
+  if (data.refresh_token) creds.claudeAiOauth.refreshToken = data.refresh_token;
+  if (data.expires_in) creds.claudeAiOauth.expiresAt = Date.now() + data.expires_in * 1000;
+  fs.writeFileSync(tmpFile, JSON.stringify(creds, null, 2), { mode: 0o600 });
+  fs.renameSync(tmpFile, credsFile);
+}
+
+function readOauthCreds(ctx) {
   try {
-    const creds = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8'));
-    const oauth = creds.claudeAiOauth;
-    if (!oauth) { cachedToken = null; return null; }
+    const creds = JSON.parse(fs.readFileSync(ctx.credsFile, 'utf-8'));
+    return creds.claudeAiOauth || null;
+  } catch { return null; }
+}
 
-    // Check if token is expired or about to expire
-    if (oauth.expiresAt && oauth.expiresAt < now + REFRESH_WINDOW_MS) {
-      if (oauth.expiresAt < now) {
-        // Token already expired — don't return it, trigger refresh
-        if (oauth.refreshToken && !isRefreshing) {
-          refreshAccessToken(CREDS_FILE, oauth.refreshToken);
-        }
-        cachedToken = null;
-        return null;
-      }
-      // Expiring soon — refresh in background but still return current token
-      if (oauth.refreshToken && !isRefreshing) {
-        refreshAccessToken(CREDS_FILE, oauth.refreshToken);
-      }
-    }
+function getAccessToken(ctx, forceRefresh) {
+  if (!ctx || ctx.signedOut) return null;
+  const now = Date.now();
+  if (!forceRefresh && ctx.cachedToken && (now - ctx.tokenLastRead) < TOKEN_CACHE_MS) {
+    return ctx.cachedToken;
+  }
+  const oauth = readOauthCreds(ctx);
+  if (!oauth) { ctx.cachedToken = null; return null; }
 
-    const token = oauth.accessToken;
-    if (typeof token !== 'string' || token.length === 0 || /[\r\n]/.test(token)) {
-      cachedToken = null;
+  // Check if token is expired or about to expire
+  if (oauth.expiresAt && oauth.expiresAt < now + REFRESH_WINDOW_MS) {
+    if (oauth.expiresAt < now) {
+      // Token already expired — don't return it, trigger refresh
+      if (oauth.refreshToken && !ctx.isRefreshing) {
+        refreshAccessToken(ctx, oauth.refreshToken);
+      }
+      ctx.cachedToken = null;
       return null;
     }
-    cachedToken = token;
-    tokenLastRead = now;
-    return token;
-  } catch {
-    cachedToken = null;
+    // Expiring soon — refresh in background but still return current token
+    if (oauth.refreshToken && !ctx.isRefreshing) {
+      refreshAccessToken(ctx, oauth.refreshToken);
+    }
+  }
+
+  const token = oauth.accessToken;
+  if (typeof token !== 'string' || token.length === 0 || /[\r\n]/.test(token)) {
+    ctx.cachedToken = null;
     return null;
   }
+  ctx.cachedToken = token;
+  ctx.tokenLastRead = now;
+  return token;
+}
+
+// Only the active account may surface a user-visible re-auth prompt; every
+// other account records needsLogin so the accounts strip can flag it quietly.
+function reportAuthExpired(ctx) {
+  ctx.needsLogin = true;
+  ctx.lastError = 'OAuth session expired — please re-authenticate';
+  if (ctx.id !== activeAccountId) { broadcastUsage(); return; }
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('sync-error', ctx.lastError);
+  }
+  if (dashWin && !dashWin.isDestroyed()) {
+    dashWin.webContents.send('sync-error', ctx.lastError);
+  }
+  broadcastUsage();
 }
 
 // Called by doSync on 401/403 — force a refresh and retry.
 // Only escalates to a user-visible re-auth prompt when no refresh token is available;
 // the refresh endpoint itself will surface a sign-in prompt if the refresh token is rejected.
-function handleAuthFailure() {
-  cachedToken = null;
-  tokenLastRead = 0;
-  try {
-    const creds = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8'));
-    const oauth = creds.claudeAiOauth;
-    if (oauth && oauth.refreshToken) {
-      if (!isRefreshing) {
-        refreshAccessToken(CREDS_FILE, oauth.refreshToken, () => {
-          setTimeout(() => doSync(), 500);
-        });
-      } else {
-        // Refresh already in progress — retry sync after it likely completes
-        setTimeout(() => doSync(), 5000);
-      }
-      return;
+function handleAuthFailure(ctx) {
+  ctx.cachedToken = null;
+  ctx.tokenLastRead = 0;
+  const oauth = readOauthCreds(ctx);
+  if (oauth && oauth.refreshToken) {
+    if (!ctx.isRefreshing) {
+      refreshAccessToken(ctx, oauth.refreshToken, () => {
+        setTimeout(() => doSync(ctx), 500);
+      });
+    } else {
+      // Refresh already in progress — retry sync after it likely completes
+      setTimeout(() => doSync(ctx), 5000);
     }
-  } catch { /* ignore */ }
+    return;
+  }
   // No refresh token available at all — credentials are missing or unusable.
   // This is the only case where we want the setup overlay to show.
-  if (win && !win.isDestroyed()) {
-    win.webContents.send('sync-error', 'OAuth session expired — please re-authenticate');
-  }
-  if (dashWin && !dashWin.isDestroyed()) {
-    dashWin.webContents.send('sync-error', 'OAuth session expired — please re-authenticate');
-  }
+  reportAuthExpired(ctx);
 }
 
-function refreshAccessToken(credsFile, refreshToken, onSuccess) {
-  if (isRefreshing) return;
-  isRefreshing = true;
+function refreshAccessToken(ctx, refreshToken, onSuccess) {
+  if (!ctx || ctx.isRefreshing) return;
+  ctx.isRefreshing = true;
+  const credsFile = ctx.credsFile;
   const postData = JSON.stringify({
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
+    client_id: OAUTH_CLIENT_ID,
   });
 
   const MAX_BODY = 1024 * 1024;
@@ -2060,97 +2488,104 @@ function refreshAccessToken(credsFile, refreshToken, onSuccess) {
       if (body.length > MAX_BODY) { req.destroy(); }
     });
     res.on('end', () => {
-      isRefreshing = false;
+      ctx.isRefreshing = false;
       if (res.statusCode === 200) {
         try {
           const data = JSON.parse(body);
           if (data.access_token) {
-            const tmpFile = credsFile + '.tmp';
-            const creds = JSON.parse(fs.readFileSync(credsFile, 'utf-8'));
-            creds.claudeAiOauth.accessToken = data.access_token;
-            if (data.refresh_token) creds.claudeAiOauth.refreshToken = data.refresh_token;
-            if (data.expires_in) creds.claudeAiOauth.expiresAt = Date.now() + data.expires_in * 1000;
-            fs.writeFileSync(tmpFile, JSON.stringify(creds, null, 2));
-            fs.renameSync(tmpFile, credsFile);
-            cachedToken = data.access_token;
-            tokenLastRead = Date.now();
-            refreshRetryCount = 0;
-            if (refreshRetryTimer) { clearTimeout(refreshRetryTimer); refreshRetryTimer = null; }
+            persistRefreshedCreds(credsFile, data);
+            ctx.cachedToken = data.access_token;
+            ctx.tokenLastRead = Date.now();
+            ctx.refreshRetryCount = 0;
+            ctx.needsLogin = false;
+            if (ctx.refreshRetryTimer) { clearTimeout(ctx.refreshRetryTimer); ctx.refreshRetryTimer = null; }
             if (typeof onSuccess === 'function') onSuccess();
           }
         } catch (parseErr) { console.error('[token-refresh] Parse error:', parseErr.message); }
+      } else if (res.statusCode === 429) {
+        // Throttled, not rejected — back off and try the same refresh token again.
+        console.error('[token-refresh] Rate limited for account', ctx.id, '— backing off');
+        scheduleRefreshRetry(ctx, refreshToken);
       } else if (res.statusCode === 401 || res.statusCode === 403) {
-        // Refresh token revoked
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('sync-error', 'OAuth session expired — please re-authenticate');
-        }
+        // Refresh token revoked or expired (they live ~30 days)
+        console.error('[token-refresh] Refresh rejected for account', ctx.id, 'status', res.statusCode);
+        reportAuthExpired(ctx);
       } else {
-        scheduleRefreshRetry(credsFile, refreshToken);
+        console.error('[token-refresh] Unexpected status', res.statusCode, 'for account', ctx.id);
+        scheduleRefreshRetry(ctx, refreshToken);
       }
     });
   });
-  req.on('error', () => {
-    isRefreshing = false;
-    scheduleRefreshRetry(credsFile, refreshToken);
+  req.on('error', (err) => {
+    ctx.isRefreshing = false;
+    console.error('[token-refresh] Request failed for account', ctx.id + ':', err.message);
+    scheduleRefreshRetry(ctx, refreshToken);
   });
   req.setTimeout(10000, () => {
     req.destroy();
-    isRefreshing = false;
-    scheduleRefreshRetry(credsFile, refreshToken);
+    ctx.isRefreshing = false;
+    scheduleRefreshRetry(ctx, refreshToken);
   });
   req.write(postData);
   req.end();
 }
 
-function scheduleRefreshRetry(credsFile, refreshToken) {
-  if (refreshRetryCount >= MAX_REFRESH_RETRIES) return;
-  if (refreshRetryTimer) clearTimeout(refreshRetryTimer);
-  const delay = Math.min(60000, 5000 * Math.pow(2, refreshRetryCount));
-  refreshRetryCount++;
-  refreshRetryTimer = setTimeout(() => {
-    refreshRetryTimer = null;
-    refreshAccessToken(credsFile, refreshToken);
+function scheduleRefreshRetry(ctx, refreshToken) {
+  if (ctx.refreshRetryCount >= MAX_REFRESH_RETRIES) return;
+  if (ctx.refreshRetryTimer) clearTimeout(ctx.refreshRetryTimer);
+  const delay = Math.min(60000, 5000 * Math.pow(2, ctx.refreshRetryCount));
+  ctx.refreshRetryCount++;
+  ctx.refreshRetryTimer = setTimeout(() => {
+    ctx.refreshRetryTimer = null;
+    refreshAccessToken(ctx, refreshToken);
   }, delay);
 }
 
 // --- Fetch usage from Anthropic API ---
 
-let rateLimitUntil = 0; // backoff timestamp after 429
+// Rate limits are per access token. A 429 on one account must never shorten
+// another's polling, and must never be retried faster than these floors.
+const MIN_TOKEN_POLL_MS = 3 * 60 * 1000;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
 
-function resetSyncIfStale() {
-  if (syncing && syncStartedAt > 0 && (Date.now() - syncStartedAt) > SYNC_TIMEOUT_MS) {
-    if (activeRequest) {
-      try { activeRequest.destroy(); } catch { /* ignore */ }
-      activeRequest = null;
+function resetSyncIfStale(ctx) {
+  if (ctx.syncing && ctx.syncStartedAt > 0 && (Date.now() - ctx.syncStartedAt) > SYNC_TIMEOUT_MS) {
+    if (ctx.activeRequest) {
+      try { ctx.activeRequest.destroy(); } catch { /* ignore */ }
+      ctx.activeRequest = null;
     }
-    syncing = false;
-    syncStartedAt = 0;
+    ctx.syncing = false;
+    ctx.syncStartedAt = 0;
   }
 }
 
-function fetchUsage() {
+function anySyncing() {
+  return enabledAccounts().some((ctx) => ctx.syncing);
+}
+
+function fetchUsage(ctx) {
   return new Promise((resolve, reject) => {
-    resetSyncIfStale();
-    if (syncing) { reject(new Error('Already syncing')); return; }
-    if (Date.now() < rateLimitUntil) {
+    resetSyncIfStale(ctx);
+    if (ctx.syncing) { reject(new Error('Already syncing')); return; }
+    if (Date.now() < ctx.rateLimitUntil) {
       reject(new Error('Rate limited — waiting'));
       return;
     }
-    syncing = true;
-    syncStartedAt = Date.now();
+    ctx.syncing = true;
+    ctx.syncStartedAt = Date.now();
 
-    const token = getAccessToken();
+    const token = getAccessToken(ctx);
     if (!token) {
-      syncing = false;
-      syncStartedAt = 0;
+      ctx.syncing = false;
+      ctx.syncStartedAt = 0;
       reject(new Error('No OAuth token. Log in to Claude Code first.'));
       return;
     }
 
     const url = new URL(USAGE_API);
     if (url.hostname !== 'api.anthropic.com') {
-      syncing = false;
-      syncStartedAt = 0;
+      ctx.syncing = false;
+      ctx.syncStartedAt = 0;
       reject(new Error('Unexpected API hostname'));
       return;
     }
@@ -2159,9 +2594,9 @@ function fetchUsage() {
     const finish = (err, data) => {
       if (settled) return;
       settled = true;
-      syncing = false;
-      syncStartedAt = 0;
-      activeRequest = null;
+      ctx.syncing = false;
+      ctx.syncStartedAt = 0;
+      ctx.activeRequest = null;
       err ? reject(err) : resolve(data);
     };
 
@@ -2179,9 +2614,13 @@ function fetchUsage() {
       // Handle rate limiting — back off using Retry-After or 5 minutes default
       if (res.statusCode === 429) {
         res.resume();
+        // Honour Retry-After when the endpoint sends one, but never poll the
+        // same token more often than every 3 minutes; 5 minutes with no hint.
         const retryAfter = parseInt(res.headers['retry-after'], 10);
-        const backoffMs = (retryAfter > 0 ? retryAfter * 1000 : 300000);
-        rateLimitUntil = Date.now() + backoffMs;
+        const backoffMs = retryAfter > 0
+          ? Math.max(retryAfter * 1000, MIN_TOKEN_POLL_MS)
+          : DEFAULT_RATE_LIMIT_BACKOFF_MS;
+        ctx.rateLimitUntil = Date.now() + backoffMs;
         finish(new Error('Rate limited'));
         return;
       }
@@ -2217,7 +2656,7 @@ function fetchUsage() {
             return;
           }
           // Successful response — clear any rate limit backoff
-          rateLimitUntil = 0;
+          ctx.rateLimitUntil = 0;
           finish(null, data);
         } catch {
           finish(new Error('Invalid response'));
@@ -2225,7 +2664,7 @@ function fetchUsage() {
       });
     });
 
-    activeRequest = req;
+    ctx.activeRequest = req;
     req.on('error', (err) => finish(err));
     req.setTimeout(10000, () => { req.destroy(); finish(new Error('Timeout')); });
     req.end();
@@ -2304,14 +2743,39 @@ function buildUsage(data) {
   return usage;
 }
 
+// The usage-update payload every renderer receives: one entry per enabled
+// account plus which one is active. Renderers pick the active entry for the
+// main meters and may render the rest alongside.
+function buildUsagePayload() {
+  return {
+    accounts: enabledAccounts().map((ctx) => ({
+      id: ctx.id,
+      name: ctx.name,
+      email: ctx.email,
+      dir: ctx.dir, // shown in the "run this to sign in again" hint
+      usage: ctx.cachedUsage || null,
+      lastSuccessfulSync: ctx.lastSuccessfulSync,
+      // Non-zero while this account's own token is in 429 backoff. Its cached
+      // usage stays on screen; the tab shows when the next attempt is due.
+      rateLimitedUntil: ctx.rateLimitUntil > Date.now() ? ctx.rateLimitUntil : 0,
+      cliActive: isCliActive(ctx),
+      error: ctx.lastError,
+      needsLogin: !!ctx.needsLogin,
+    })),
+    activeAccountId: activeAccountId,
+    cliLauncher: cliLauncherName(),
+  };
+}
+
 function broadcastUsage() {
+  const payload = buildUsagePayload();
   if (win && !win.isDestroyed()) {
-    win.webContents.send('usage-update', cachedUsage);
-    win.webContents.send('history-update', usageHistory);
+    win.webContents.send('usage-update', payload);
+    // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
   }
   if (dashWin && !dashWin.isDestroyed()) {
-    dashWin.webContents.send('usage-update', cachedUsage);
-    dashWin.webContents.send('history-update', usageHistory);
+    dashWin.webContents.send('usage-update', payload);
+    dashWin.webContents.send('history-update', activeHistory());
   }
 }
 
@@ -2389,81 +2853,105 @@ function startClaudeStatusPoller() {
   setInterval(fetchClaudeStatus, CLAUDE_STATUS_POLL_MS);
 }
 
-// --- Retry logic for failed syncs ---
-let retryTimer = null;
-let retryCount = 0;
+// --- Retry logic for failed syncs (per account) ---
 const MAX_RETRIES = 5;
+// Accounts are polled one after another with a gap, so N accounts never fire N
+// simultaneous requests. Rate limits are per access token, so the buckets are
+// independent — the stagger just keeps the burst off one network moment.
+const ACCOUNT_SYNC_STAGGER_MS = 2500;
 
-function clearRetryTimer() {
-  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-  retryCount = 0;
+function clearRetryTimer(ctx) {
+  if (ctx.retryTimer) { clearTimeout(ctx.retryTimer); ctx.retryTimer = null; }
+  ctx.retryCount = 0;
 }
 
-function scheduleAuthRetry() {
-  // Retry with increasing delay: 10s, 20s, 40s, 60s, 60s
-  if (retryCount >= MAX_RETRIES) return;
-  if (retryTimer) clearTimeout(retryTimer);
-  const delay = Math.min(60000, 10000 * Math.pow(2, retryCount));
-  retryCount++;
-  retryTimer = setTimeout(() => {
-    retryTimer = null;
-    cachedToken = null; // force re-read — token may have been refreshed
-    doSync();
-  }, delay);
-}
-
-function scheduleNetworkRetry() {
+function scheduleNetworkRetry(ctx) {
   // Network errors after wake: retry 5s, 10s, 20s, 30s, 30s
-  if (retryCount >= MAX_RETRIES) return;
-  if (retryTimer) clearTimeout(retryTimer);
-  const delay = Math.min(30000, 5000 * Math.pow(2, retryCount));
-  retryCount++;
-  retryTimer = setTimeout(() => {
-    retryTimer = null;
-    doSync();
+  if (ctx.retryCount >= MAX_RETRIES) return;
+  if (ctx.retryTimer) clearTimeout(ctx.retryTimer);
+  const delay = Math.min(30000, 5000 * Math.pow(2, ctx.retryCount));
+  ctx.retryCount++;
+  ctx.retryTimer = setTimeout(() => {
+    ctx.retryTimer = null;
+    doSync(ctx);
   }, delay);
 }
 
-// Smart sync — only hits API if data is stale (>2 min old)
-function syncIfStale() {
-  if (Date.now() - lastSuccessfulSync < MIN_SYNC_INTERVAL) {
+// Smart sync — only hits API if data is stale
+function syncIfStale(ctx) {
+  if (!ctx) return;
+  if (Date.now() - ctx.lastSuccessfulSync < MIN_SYNC_INTERVAL) {
     // Data is fresh — just broadcast cached data
     broadcastUsage();
     return;
   }
-  doSync();
+  doSync(ctx);
 }
 
-async function doSync() {
+// One scheduler for every enabled account. Each account's request is fired on
+// its own timer, so a failure or backoff on one can never delay another.
+function syncAllAccounts(force) {
+  const list = enabledAccounts();
+  if (list.length === 0) return;
+  list.forEach((ctx, i) => {
+    const run = () => {
+      if (!accountCtx[ctx.id]) return; // account removed while waiting
+      if (force) {
+        // Manual refresh bypasses the freshness check, but NOT a real 429
+        // backoff — forcing through that just spends another rejected request.
+        doSync(ctx);
+      } else {
+        syncIfStale(ctx);
+      }
+    };
+    if (ctx.staggerTimer) { clearTimeout(ctx.staggerTimer); ctx.staggerTimer = null; }
+    if (i === 0) { run(); return; }
+    // One pending stagger timer per account — a new round replaces the old one
+    // rather than piling up every three minutes.
+    ctx.staggerTimer = setTimeout(() => { ctx.staggerTimer = null; run(); }, i * ACCOUNT_SYNC_STAGGER_MS);
+  });
+}
+
+async function doSync(ctx) {
+  if (!ctx) return;
   // Force-clear stale sync lock
-  resetSyncIfStale();
-  if (win && !win.isDestroyed()) win.webContents.send('sync-start');
-  if (dashWin && !dashWin.isDestroyed()) dashWin.webContents.send('sync-start');
+  resetSyncIfStale(ctx);
+  const isActive = ctx.id === activeAccountId;
+  if (isActive) {
+    if (win && !win.isDestroyed()) win.webContents.send('sync-start');
+    if (dashWin && !dashWin.isDestroyed()) dashWin.webContents.send('sync-start');
+  }
   try {
-    const data = await fetchUsage();
+    const data = await fetchUsage(ctx);
     const newUsage = buildUsage(data);
 
     // Guard: don't overwrite good cached data with all-zero response (treat as bad response)
+    const cached = ctx.cachedUsage;
     const allZero = newUsage.session.pct === 0
       && newUsage.weekAll.pct === 0
       && newUsage.weekSonnet.pct === 0;
     const hasResetTimes = newUsage.session.resetsAt || newUsage.weekAll.resetsAt || newUsage.weekSonnet.resetsAt;
-    if (allZero && cachedUsage && !hasResetTimes
-      && (cachedUsage.session.pct > 0 || cachedUsage.weekAll.pct > 0 || cachedUsage.weekSonnet.pct > 0)) {
+    if (allZero && cached && !hasResetTimes
+      && (cached.session.pct > 0 || cached.weekAll.pct > 0 || cached.weekSonnet.pct > 0)) {
       // Bad response — keep cached data, schedule retry, don't mark as successful sync
       broadcastUsage();
       updateTrayTooltip();
-      scheduleNetworkRetry();
+      scheduleNetworkRetry(ctx);
       return;
     }
 
-    cachedUsage = newUsage;
-    lastSuccessfulSync = Date.now();
-    clearRetryTimer(); // sync succeeded — stop retrying
-    saveCachedUsage(cachedUsage);
-    appendHistory(cachedUsage);
-    checkAndNotify(cachedUsage);
-    updateTrayBadge(cachedUsage);
+    ctx.cachedUsage = newUsage;
+    ctx.lastSuccessfulSync = Date.now();
+    ctx.lastError = null;
+    ctx.needsLogin = false;
+    clearRetryTimer(ctx); // sync succeeded — stop retrying
+    saveCachedUsage(ctx);
+    appendHistory(ctx);
+    // Alerts and the tray badge follow the active account only.
+    if (ctx.id === activeAccountId) {
+      checkAndNotify(ctx);
+      updateTrayBadge(newUsage);
+    }
     broadcastUsage();
     updateTrayTooltip();
   } catch (err) {
@@ -2474,19 +2962,26 @@ async function doSync() {
     // Flow-control errors — don't count as failures, don't burn retries
     if (safeMsg.indexOf('Already syncing') >= 0) {
       // Sync in progress — just broadcast cached data, no retry needed
-      if (cachedUsage) broadcastUsage();
+      if (ctx.cachedUsage) broadcastUsage();
       return;
     }
     if (safeMsg.indexOf('Rate limited') >= 0) {
-      // Rate limited — schedule ONE tracked retry after the limit expires
-      if (cachedUsage) broadcastUsage();
-      if (retryTimer) clearTimeout(retryTimer);
-      const waitMs = Math.max(1000, rateLimitUntil - Date.now());
-      retryTimer = setTimeout(() => { retryTimer = null; doSync(); }, waitMs + 1000);
+      // This account's token is throttled. Keep its cached usage exactly as it
+      // is, publish the backoff so its tab can say so, and retry once when the
+      // window expires — the other accounts are untouched.
+      if (ctx.rateLimitUntil < Date.now()) {
+        ctx.rateLimitUntil = Date.now() + DEFAULT_RATE_LIMIT_BACKOFF_MS;
+      }
+      saveCachedUsage(ctx); // persist the backoff so a restart respects it
+      broadcastUsage();
+      updateTrayTooltip();
+      if (ctx.retryTimer) clearTimeout(ctx.retryTimer);
+      const waitMs = Math.max(1000, ctx.rateLimitUntil - Date.now());
+      ctx.retryTimer = setTimeout(() => { ctx.retryTimer = null; doSync(ctx); }, waitMs + 1000);
       return;
     }
 
-    cachedToken = null;
+    ctx.cachedToken = null;
 
     // Auth errors: no token, expired session, or API auth rejection
     const isAuthError = safeMsg.indexOf('OAuth') >= 0
@@ -2498,16 +2993,20 @@ async function doSync() {
       // silently. The refresh path (refreshAccessToken / handleAuthFailure) will emit
       // sync-error only if refresh truly fails. This prevents the setup overlay from
       // flashing every time the access token expires while Claude CLI isn't running.
-      handleAuthFailure();
+      handleAuthFailure(ctx);
       return;
     }
 
+    ctx.lastError = safeMsg;
+
     // Genuine API failure — keep cached data, schedule retry
-    if (cachedUsage) {
+    if (ctx.cachedUsage) {
       broadcastUsage();
       updateTrayTooltip();
-      scheduleNetworkRetry();
+      scheduleNetworkRetry(ctx);
     } else {
+      broadcastUsage();
+      if (ctx.id !== activeAccountId) return;
       if (win && !win.isDestroyed()) win.webContents.send('sync-error', safeMsg);
       if (dashWin && !dashWin.isDestroyed()) dashWin.webContents.send('sync-error', safeMsg);
     }
@@ -2536,13 +3035,26 @@ function getTrayIcon() {
 
 function updateTrayTooltip() {
   if (!tray) return;
-  if (cachedUsage) {
-    tray.setToolTip(
-      `Claude Meter - Session: ${cachedUsage.session.pct}% | Week: ${cachedUsage.weekAll.pct}%`
-    );
-  } else {
-    tray.setToolTip('Claude Meter');
+  // One line per account: "Name 5h 83% · 7d 37%"
+  const lines = [];
+  for (const ctx of enabledAccounts()) {
+    const limitedMin = ctx.rateLimitUntil > Date.now()
+      ? Math.max(1, Math.round((ctx.rateLimitUntil - Date.now()) / 60000))
+      : 0;
+    const cliTag = isCliActive(ctx) ? ' [CLI]' : '';
+    if (ctx.needsLogin) {
+      lines.push(`${ctx.name}${cliTag} — sign-in needed`);
+    } else if (ctx.cachedUsage) {
+      let line = `${ctx.name}${cliTag} 5h ${ctx.cachedUsage.session.pct}% · 7d ${ctx.cachedUsage.weekAll.pct}%`;
+      if (limitedMin) line += ` (rate limited, retrying in ${limitedMin}m)`;
+      lines.push(line);
+    } else if (limitedMin) {
+      lines.push(`${ctx.name} — rate limited, retrying in ${limitedMin}m`);
+    } else {
+      lines.push(`${ctx.name} — no data yet`);
+    }
   }
+  tray.setToolTip(lines.length > 0 ? 'Claude Meter\n' + lines.join('\n') : 'Claude Meter');
 }
 
 // --- Linux desktop integration ---
@@ -2641,7 +3153,7 @@ function createWindow() {
     minHeight: 200,
     skipTaskbar: true,
     alwaysOnTop: false,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     show: false,
     icon: getWindowIcon(),
     webPreferences: {
@@ -2653,6 +3165,7 @@ function createWindow() {
       allowRunningInsecureContent: false,
     },
   });
+  applyLinuxPopupTransparency(win);
 
   win.loadFile('index.html');
 
@@ -2745,6 +3258,8 @@ function createWindow() {
   } else {
     win.on('will-move', () => startWidgetDragPoll());
   }
+  // Linux never emits will-move/moved/resized - synthesise them from move/resize.
+  enableLinuxWindowEvents(win);
 
   win.on('moved', () => {
     stopWidgetDragPoll();
@@ -2836,21 +3351,23 @@ function toggleWindow() {
     const panels = [notesWin, calWin, tasksWin].filter(w => w && !w.isDestroyed() && w.isVisible());
 
     if (widgetReady) {
-      // Cascade hide: panels first, then widget with animation
+      // Start the widget fade immediately; panels cascade alongside it rather
+      // than before it. Previously the fade only began after the whole cascade,
+      // making hide cost 150ms with no panels and 300ms with three - all of it
+      // setTimeout, not work. It also kept toggleAnimating true that whole time,
+      // which swallowed a quick second Ctrl+\.
+      if (win && !win.isDestroyed()) {
+        try { win.webContents.send('toggle-animate', 'out'); } catch { /* ignore */ }
+      }
       let delay = 0;
       for (const p of panels) {
         setTimeout(() => { if (p && !p.isDestroyed()) p.hide(); }, delay);
-        delay += 50;
+        delay += 20;
       }
-      setTimeout(() => {
-        if (win && !win.isDestroyed()) {
-          try { win.webContents.send('toggle-animate', 'out'); } catch { /* ignore */ }
-        }
-      }, delay);
       setTimeout(() => {
         toggleAnimating = false;
         if (win && !win.isDestroyed()) win.hide();
-      }, delay + 150);
+      }, Math.max(delay, 90));
     } else {
       // Not ready yet — just hide instantly
       for (const p of panels) { if (p && !p.isDestroyed()) p.hide(); }
@@ -2946,12 +3463,12 @@ function toggleWindow() {
     setTimeout(resolveOverlaps, 400);
     // Push all cached data so UI is never empty
     if (win && !win.isDestroyed()) {
-      if (cachedUsage) win.webContents.send('usage-update', cachedUsage);
-      if (usageHistory.length > 0) win.webContents.send('history-update', usageHistory);
+      win.webContents.send('usage-update', buildUsagePayload());
+      // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
       win.webContents.send('pomo-update', { state: pomoState, seconds: pomoSeconds, total: pomoTotal });
     }
     // Sync on open — hits API if data is >60s old (MIN_SYNC_INTERVAL)
-    syncIfStale();
+    syncAllAccounts(false);
     tryShowDigestOnOpen();
     if (trayHasAlert) {
       trayHasAlert = false;
@@ -3004,7 +3521,7 @@ function openDashboard(tab) {
     minWidth: 700,
     minHeight: 500,
     frame: false,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     icon: getWindowIcon(),
     webPreferences: {
       preload: path.join(__dirname, 'dashboard-preload.js'),
@@ -3015,6 +3532,7 @@ function openDashboard(tab) {
     },
   });
 
+  applyLinuxPopupTransparency(dashWin);
   dashWin.loadFile('dashboard.html');
 
   dashWin.webContents.on('will-navigate', (e, url) => {
@@ -3023,8 +3541,9 @@ function openDashboard(tab) {
   dashWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   dashWin.webContents.on('did-finish-load', () => {
-    if (cachedUsage) dashWin.webContents.send('usage-update', cachedUsage);
-    if (usageHistory.length > 0) dashWin.webContents.send('history-update', usageHistory);
+    dashWin.webContents.send('usage-update', buildUsagePayload());
+    const hist = activeHistory();
+    if (hist.length > 0) dashWin.webContents.send('history-update', hist);
     if (lastUpdateResult && lastUpdateResult.hasUpdate) {
       dashWin.webContents.send('update-available', lastUpdateResult);
     }
@@ -3050,6 +3569,112 @@ function GLASS_OPTS_FN() {
   return process.platform === 'win32'
     ? { backgroundMaterial: 'mica', backgroundColor: winBg }
     : { backgroundColor: winBg };
+}
+
+// Ctrl+\ speed: relaunching the whole Electron binary just to hit the
+// 'second-instance' path costs ~1s (new process, V8 boot, socket handshake).
+// A tiny unix socket lets the shortcut toggle in single-digit ms instead.
+function startToggleSocket() {
+  if (process.platform !== 'linux') return;
+  try {
+    const net = require('net');
+    const sockPath = path.join(os.tmpdir(), 'claude-meter-' + (process.getuid ? process.getuid() : 0) + '.sock');
+    try { fs.unlinkSync(sockPath); } catch { /* not there */ }
+    const server = net.createServer((c) => {
+      c.on('data', () => {
+        if (win && !win.isDestroyed()) {
+          const wasVisible = win.isVisible();
+          toggleWindow();
+          if (!wasVisible) win.focus();
+        }
+      });
+      c.on('error', () => {});
+    });
+    server.on('error', (e) => console.log('[toggle-socket] ' + e.message));
+    server.listen(sockPath, () => console.log('[toggle-socket] listening on ' + sockPath));
+    app.on('will-quit', () => { try { server.close(); fs.unlinkSync(sockPath); } catch { /* ignore */ } });
+  } catch (e) { console.log('[toggle-socket] failed ' + e); }
+}
+
+// --- Linux window shape ---
+// Linux has no Mica, so a frameless window paints an opaque rectangle that
+// masks the CSS border-radius: every window reads as a hard square block.
+// POPUP_GLASS_OPTS_FN makes the window genuinely transparent; this file's
+// companion helper then reshapes the document inside it, because a transparent
+// window on its own only exposes whatever the page paints.
+const LINUX_WIN_RADIUS = '12px';
+
+// Documents whose own markup already paints a rounded, opaque card (.popup)
+// filling the window. Only the body behind it has to be cleared.
+const LINUX_CARD_DOCS = new Set(['popup', 'pomo-popup', 'meeting-popup']);
+
+// Documents where BODY itself is the visual surface: there is no outer card,
+// every one of them declares `body { background: var(--bg) }`.
+const LINUX_SURFACE_DOCS = new Set([
+  'index', 'dashboard', 'calendar', 'tasks', 'notes', 'capture', 'add-event',
+]);
+
+// Clearing the body background is not enough for the surface documents:
+//  - CSS background propagation. With a transparent root the BODY background is
+//    painted onto the canvas across the whole viewport, so `border-radius` on
+//    body has no visual effect. The surface has to live on a separate layer -
+//    a fixed pseudo-element - which does honour its own radius.
+//  - Full-bleed children (dashboard's .sidebar/.titlebar, notes' .nbar,
+//    capture's .bar) paint their own opaque background right into the corners
+//    and would square the window off again. body has to CLIP them, and it only
+//    can once html stops propagating body's overflow to the viewport: while the
+//    root is `overflow: visible` the used value on body becomes visible too.
+//  - Specificity. dashboard/calendar/tasks/add-event carry a late
+//    `body { background: var(--bg) !important }` theme override, so `body` on
+//    its own is not enough to beat it - `html body` is.
+// The fixed pseudo-element escapes body's clip (body is no containing block for
+// fixed boxes), so it still covers the whole window and rounds itself.
+const LINUX_SURFACE_CSS =
+  ':root{background:transparent !important;background-color:transparent !important;' +
+  'overflow:hidden !important}' +
+  'html body{background:transparent !important;background-color:transparent !important;' +
+  'border-radius:' + LINUX_WIN_RADIUS + ';overflow:hidden}' +
+  'html body::before{content:"";position:fixed;inset:0;z-index:-1;' +
+  'background:var(--bg);border-radius:' + LINUX_WIN_RADIUS + ';}';
+
+// Per-document top-ups for surface documents that draw a hard frame of their
+// own. Their border is painted on the element box (background propagation does
+// not apply to borders), so it keeps square corners unless it is rounded too.
+// capture.html puts that border on body, which LINUX_SURFACE_CSS already
+// rounds; notes.html puts it on #app, which fills body exactly.
+const LINUX_SURFACE_EXTRA_CSS = {
+  notes: 'html body #app{border-radius:' + LINUX_WIN_RADIUS + ';}',
+};
+
+function applyLinuxPopupTransparency(win) {
+  if (process.platform !== 'linux' || !win || win.isDestroyed()) return;
+  win.webContents.on('did-finish-load', () => {
+    try {
+      const u = win.webContents.getURL() || '';
+      console.log('[linux-shape] did-finish-load url=' + u + ' transparent=' + (typeof win.isTransparent === 'function' ? win.isTransparent() : 'n/a'));
+      // Match the document name only - some windows load with a query string
+      // (notes.html?mode=app).
+      const doc = (/([^/\\?#]+)\.html(?:[?#]|$)/.exec(u) || ['', ''])[1].toLowerCase();
+      if (LINUX_CARD_DOCS.has(doc)) {
+        win.webContents.insertCSS(
+          'html,body{background:transparent !important;background-color:transparent !important}'
+        ).then(() => console.log('[linux-shape] popup css applied doc=' + doc)).catch((e) => console.log('[linux-shape] popup css FAILED ' + e));
+        return;
+      }
+      if (!LINUX_SURFACE_DOCS.has(doc)) {
+        console.log('[linux-shape] no rule for doc=' + doc + ' - left opaque');
+        return;
+      }
+      win.webContents.insertCSS(
+        LINUX_SURFACE_CSS + (LINUX_SURFACE_EXTRA_CSS[doc] || '')
+      ).then(() => console.log('[linux-shape] main css applied doc=' + doc)).catch((e) => console.log('[linux-shape] main css FAILED ' + e));
+    } catch (e) { console.log('[linux-shape] threw ' + e); }
+  });
+}
+
+function POPUP_GLASS_OPTS_FN() {
+  if (process.platform !== 'linux') return GLASS_OPTS_FN();
+  return { transparent: true, backgroundColor: '#00000000', hasShadow: false };
 }
 
 // --- Note export (Markdown normalize + PDF) ---
@@ -3408,6 +4033,71 @@ function getSnappedBounds(anchorBounds, side, snapW, snapH) {
   else if (side === 'bottom') b = { x: anchorBounds.x, y: anchorBounds.y + anchorBounds.height + SNAP_GAP, width: anchorBounds.width, height: snapH };
   else return null;
   return clampToWorkArea(b);
+}
+
+// --- Linux window-event shim ------------------------------------------------
+// Electron emits 'will-move', 'moved' and 'resized' only on Windows and macOS
+// (the BrowserWindow docs annotate them _macOS_ _Windows_). On Linux only
+// 'move' and 'resize' fire, so every snap handler wired to will-move/moved was
+// dead code there - which is why panels never snapped on Linux.
+//
+// Verified on Electron 33.4.11 / Ubuntu 24.04 / GNOME 46 (XWayland):
+//   * a WM-driven drag emits one 'move' per ConfigureNotify (~17ms apart at
+//     60Hz) and zero 'will-move' / 'moved';
+//   * setPosition/setBounds emit exactly one 'move', SYNCHRONOUSLY inside the
+//     call with no async echo - which is what makes the guard below exact.
+const DRAG_IDLE_MS = 150; // quiet period that closes a synthesised drag
+const linuxEventShimmed = new WeakSet();
+
+function enableLinuxWindowEvents(w) {
+  if (process.platform !== 'linux' || !w || w.isDestroyed()) return;
+  if (linuxEventShimmed.has(w)) return;
+  linuxEventShimmed.add(w);
+
+  // Our own repositioning (group drag, snap animation, edge magnet) also emits
+  // 'move'. Without this guard a panel would read being moved BY the widget as
+  // the user dragging it, and fight the group drag with its own snap.
+  let programmatic = 0;
+  for (const method of ['setPosition', 'setBounds', 'setContentBounds', 'setSize', 'setContentSize']) {
+    if (typeof w[method] !== 'function') continue;
+    const original = w[method].bind(w);
+    w[method] = (...args) => {
+      programmatic++;
+      try { return original(...args); } finally { programmatic--; }
+    };
+  }
+
+  let dragging = false;
+  let moveIdle = null;
+  let resizeIdle = null;
+
+  w.on('move', () => {
+    if (programmatic > 0) return;
+    if (!dragging) {
+      dragging = true;
+      try { w.emit('will-move', { preventDefault() {} }, w.getBounds()); } catch { /* ignore */ }
+    }
+    if (moveIdle) clearTimeout(moveIdle);
+    moveIdle = setTimeout(() => {
+      moveIdle = null;
+      dragging = false;
+      try { w.emit('moved'); } catch { /* ignore */ }
+    }, DRAG_IDLE_MS);
+  });
+
+  w.on('resize', () => {
+    if (programmatic > 0) return;
+    if (resizeIdle) clearTimeout(resizeIdle);
+    resizeIdle = setTimeout(() => {
+      resizeIdle = null;
+      try { w.emit('resized'); } catch { /* ignore */ }
+    }, DRAG_IDLE_MS);
+  });
+
+  w.on('closed', () => {
+    if (moveIdle) { clearTimeout(moveIdle); moveIdle = null; }
+    if (resizeIdle) { clearTimeout(resizeIdle); resizeIdle = null; }
+  });
 }
 
 // Module-level group drag (used by createDragSnapHandler and widget drag)
@@ -3797,13 +4487,14 @@ function openAddEventWindow(selectedDate) {
     y: Math.round(wa.y + (wa.height - eH) / 2),
     frame: false, resizable: false,
     skipTaskbar: true, alwaysOnTop: true,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     show: false, icon: getWindowIcon(),
     webPreferences: {
       preload: path.join(__dirname, 'add-event-preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
     },
   });
+  applyLinuxPopupTransparency(addEventWin);
   addEventWin.loadFile('add-event.html');
   addEventWin.once('ready-to-show', () => {
     if (addEventWin && !addEventWin.isDestroyed()) addEventWin.show();
@@ -3860,7 +4551,7 @@ function openNotesWindow(taskId, taskText) {
   notesWin = new BrowserWindow({
     width: bounds.width, height: bounds.height, x: bounds.x, y: bounds.y,
     frame: false, resizable: true, minWidth: 200, minHeight: 150,
-    skipTaskbar: true, alwaysOnTop: true, ...GLASS_OPTS_FN(),
+    skipTaskbar: true, alwaysOnTop: true, ...POPUP_GLASS_OPTS_FN(),
     show: false, icon: getWindowIcon(),
     webPreferences: {
       preload: path.join(__dirname, 'notes-preload.js'),
@@ -3868,6 +4559,7 @@ function openNotesWindow(taskId, taskText) {
       spellcheck: true,
     },
   });
+  applyLinuxPopupTransparency(notesWin);
   notesWin.webContents.session.setSpellCheckerLanguages(['en-US', 'bg']);
   notesWin.setAlwaysOnTop(false); // dynamic z-order like the widget
   notesWin.on('show', () => {
@@ -3916,6 +4608,7 @@ function openNotesWindow(taskId, taskText) {
   );
   notesWin.on('will-move', () => notesDragSnap.onWillMove());
   notesWin.on('moved', () => notesDragSnap.onMoved());
+  enableLinuxWindowEvents(notesWin);
 }
 
 // --- Standalone Notes app window ---
@@ -3964,7 +4657,7 @@ function openNotesAppWindow() {
   notesAppWin = new BrowserWindow({
     width: bounds.width, height: bounds.height, x: bounds.x, y: bounds.y,
     frame: false, resizable: true, minWidth: 420, minHeight: 320,
-    skipTaskbar: false, alwaysOnTop: false, ...GLASS_OPTS_FN(),
+    skipTaskbar: false, alwaysOnTop: false, ...POPUP_GLASS_OPTS_FN(),
     show: false, icon: getAssetPath('notes-icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'notes-preload.js'),
@@ -3972,6 +4665,7 @@ function openNotesAppWindow() {
       spellcheck: true,
     },
   });
+  applyLinuxPopupTransparency(notesAppWin);
   notesAppWin.webContents.session.setSpellCheckerLanguages(['en-US', 'bg']);
 
   // Own taskbar identity on Windows: separate group + custom icon, pinnable.
@@ -4015,6 +4709,7 @@ function openNotesAppWindow() {
 
   notesAppWin.on('moved', saveNotesAppBounds);
   notesAppWin.on('resized', saveNotesAppBounds);
+  enableLinuxWindowEvents(notesAppWin);
   notesAppWin.on('closed', () => { notesAppWin = null; });
 }
 
@@ -4030,13 +4725,14 @@ function openQuickTaskCapture() {
     x: Math.round(workArea.x + (workArea.width - cw) / 2),
     y: Math.round(workArea.y + workArea.height * 0.18),
     frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true,
-    ...GLASS_OPTS_FN(), show: false, icon: getAssetPath('icon.png'),
+    ...POPUP_GLASS_OPTS_FN(), show: false, icon: getAssetPath('icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'capture-preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
       spellcheck: true,
     },
   });
+  applyLinuxPopupTransparency(captureWin);
   captureWin.loadFile('capture.html');
   captureWin.once('ready-to-show', () => {
     if (captureWin && !captureWin.isDestroyed()) { captureWin.show(); captureWin.focus(); }
@@ -4084,7 +4780,7 @@ function openCalendarWindow() {
     minHeight: 280,
     skipTaskbar: true,
     alwaysOnTop: true,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     show: false,
     icon: getWindowIcon(),
     webPreferences: {
@@ -4096,6 +4792,7 @@ function openCalendarWindow() {
     },
   });
 
+  applyLinuxPopupTransparency(calWin);
   calWin.setAlwaysOnTop(false); // dynamic z-order like the widget
   calWin.on('show', () => {
     calWin.moveTop();
@@ -4124,6 +4821,7 @@ function openCalendarWindow() {
   );
   calWin.on('will-move', () => calDragSnap.onWillMove());
   calWin.on('moved', () => calDragSnap.onMoved());
+  enableLinuxWindowEvents(calWin);
 }
 
 function openTasksWindow() {
@@ -4167,7 +4865,7 @@ function openTasksWindow() {
     minHeight: 200,
     skipTaskbar: true,
     alwaysOnTop: true,
-    ...GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(),
     show: false,
     icon: getWindowIcon(),
     webPreferences: {
@@ -4179,6 +4877,7 @@ function openTasksWindow() {
     },
   });
 
+  applyLinuxPopupTransparency(tasksWin);
   tasksWin.setAlwaysOnTop(false); // dynamic z-order like the widget
   tasksWin.on('show', () => {
     tasksWin.moveTop();
@@ -4211,6 +4910,7 @@ function openTasksWindow() {
   );
   tasksWin.on('will-move', () => tasksDragSnap.onWillMove());
   tasksWin.on('moved', () => { tasksDragSnap.onMoved(); saveTasksBounds(); });
+  enableLinuxWindowEvents(tasksWin);
 
   tasksWin.on('closed', () => {
     saveTasksBounds();
@@ -4288,13 +4988,18 @@ if (!gotLock) {
   app.on('second-instance', () => {
     // If user tries to open another instance, show the window
     if (win) {
-      if (!win.isVisible()) toggleWindow();
-      win.focus();
+      // On Wayland Electron cannot grab a global hotkey, so Ctrl+\\ is a GNOME
+      // custom shortcut that relaunches this app. Treat a second instance as the
+      // hotkey press itself, so the same key closes it again.
+      const wasVisible = win.isVisible();
+      toggleWindow();
+      if (!wasVisible) win.focus();
     }
   });
 }
 
 app.whenReady().then(() => {
+  startToggleSocket();
   // Ensure data directory exists
   try { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); } catch { /* ignore */ }
 
@@ -4304,13 +5009,24 @@ app.whenReady().then(() => {
   calendarEvents = loadCalendarEvents();
   gcalAccounts = loadGcalConfig();
   streakData = loadStreak();
-  cachedUsage = loadCachedUsage();
-  usageHistory = loadHistory();
+  // Discover/merge accounts, then hydrate each one's cached usage + history
+  initAccounts();
+  for (const ctx of Object.values(accountCtx)) {
+    loadAccountState(ctx);
+    ctx.history = loadHistory(ctx);
+  }
+  saveSettings();
   loadPomoState();
   // Resume pomo timer if it was running
   if (pomoState === 'running' || pomoState === 'break') {
     pomoInterval = setInterval(pomoTick, 1000);
   }
+  startCliMarkerWatcher();
+  // Pick up accounts logged in (or out) while the app is running.
+  const discoveryTimer = setInterval(
+    () => rediscoverAccounts('poll'), ACCOUNT_DISCOVERY_INTERVAL_MS
+  );
+  cleanupTimers.push(discoveryTimer);
   startClaudeStatusPoller();
   scheduleReminders();
   scheduleDailyDigest();
@@ -4362,8 +5078,30 @@ app.whenReady().then(() => {
 
   ipcMain.on('request-sync', (event) => {
     if (!isLocalSender(event)) return;
-    rateLimitUntil = 0; // manual refresh always forces through
-    doSync();
+    rediscoverAccounts('manual'); // a manual refresh also picks up new logins
+    syncAllAccounts(true); // manual refresh: bypass the freshness check, keep 429 backoffs
+  });
+
+  ipcMain.handle('get-accounts', (event) => {
+    if (!isLocalSender(event)) return { accounts: [], activeAccountId: null };
+    return buildUsagePayload();
+  });
+
+  ipcMain.handle('set-active-account', (event, id) => {
+    if (!isLocalSender(event)) return { success: false };
+    if (typeof id !== 'string' || !accountCtx[id]) return { success: false };
+    const entry = accountList.find((a) => a.id === id);
+    if (!entry || entry.enabled === false) return { success: false };
+    if (activeAccountId !== id) {
+      activeAccountId = id;
+      saveSettings();
+      const ctx = accountCtx[id];
+      updateTrayTooltip();
+      if (ctx.cachedUsage) updateTrayBadge(ctx.cachedUsage);
+      broadcastUsage();
+      syncIfStale(ctx);
+    }
+    return { success: true, activeAccountId };
   });
   ipcMain.on('minimize-to-tray', (event) => {
     if (!isLocalSender(event)) return;
@@ -4407,7 +5145,10 @@ app.whenReady().then(() => {
 
   // Auth status check for first-launch onboarding
   ipcMain.handle('check-auth-status', () => {
-    const token = getAccessToken();
+    // The overlay is about the active account — any other account's expiry is
+    // reported on its own tab instead.
+    const ctx = getActiveCtx();
+    const token = ctx ? getAccessToken(ctx) : null;
     // Check if claude CLI is in PATH
     let cliInstalled = false;
     try {
@@ -4419,7 +5160,7 @@ app.whenReady().then(() => {
     return {
       authenticated: !!token,
       claudeCodeInstalled: cliInstalled,
-      credentialsExist: fs.existsSync(CREDS_FILE),
+      credentialsExist: !!ctx && fs.existsSync(ctx.credsFile),
     };
   });
 
@@ -4446,24 +5187,28 @@ app.whenReady().then(() => {
       });
       child.unref();
 
-      // Watch for credentials change (works for both first sign-in and re-sign-in)
+      // Watch for credentials change (works for both first sign-in and re-sign-in).
+      // `claude auth login` writes to the active account's config dir.
+      const authCtx = getActiveCtx();
       if (reAuthWatcher) { reAuthWatcher.close(); reAuthWatcher = null; }
       try {
-        fs.mkdirSync(CLAUDE_DIR, { recursive: true });
-        reAuthWatcher = fs.watch(CLAUDE_DIR, (_, filename) => {
-          if (filename === '.credentials.json') {
-            cachedToken = null;
-            tokenLastRead = 0;
-            const token = getAccessToken(true);
+        const watchDir = authCtx ? authCtx.dir : CLAUDE_DIR;
+        fs.mkdirSync(watchDir, { recursive: true });
+        reAuthWatcher = fs.watch(watchDir, (_, filename) => {
+          if (filename === '.credentials.json' && authCtx) {
+            authCtx.cachedToken = null;
+            authCtx.tokenLastRead = 0;
+            const token = getAccessToken(authCtx, true);
             if (token) {
-              signedOut = false;
+              authCtx.signedOut = false;
+              authCtx.needsLogin = false;
               if (win && !win.isDestroyed()) {
                 win.webContents.send('auth-status-changed', { authenticated: true });
               }
               if (dashWin && !dashWin.isDestroyed()) {
                 dashWin.webContents.send('auth-status-changed', { authenticated: true });
               }
-              doSync();
+              doSync(authCtx);
               if (reAuthWatcher) { reAuthWatcher.close(); reAuthWatcher = null; }
             }
           }
@@ -4505,29 +5250,43 @@ app.whenReady().then(() => {
     }
   });
 
-  // Watch for credentials file to appear (first-time setup + re-auth)
+  // Watch every account whose credentials are missing/unusable, so a sign-in in
+  // any config dir is picked up without restarting the app.
+  function closeCredsWatchers() {
+    for (const w of credsWatchers) { try { w.close(); } catch { /* ignore */ } }
+    credsWatchers = [];
+  }
+
   function watchForCredentials() {
-    if (credsWatcher) { try { credsWatcher.close(); } catch {} credsWatcher = null; }
-    if (getAccessToken()) return;
-    try {
-      fs.mkdirSync(CLAUDE_DIR, { recursive: true });
-      credsWatcher = fs.watch(CLAUDE_DIR, (_, filename) => {
-        if (filename === '.credentials.json') {
-          const token = getAccessToken(true);
-          if (token) {
-            signedOut = false;
+    closeCredsWatchers();
+    for (const ctx of enabledAccounts()) {
+      if (getAccessToken(ctx)) continue;
+      try {
+        fs.mkdirSync(ctx.dir, { recursive: true });
+      } catch { continue; }
+      try {
+        const watcher = fs.watch(ctx.dir, (_, filename) => {
+          if (filename !== '.credentials.json') return;
+          const token = getAccessToken(ctx, true);
+          if (!token) return;
+          ctx.signedOut = false;
+          ctx.needsLogin = false;
+          ctx.lastError = null;
+          if (ctx.id === activeAccountId) {
             if (win && !win.isDestroyed()) {
               win.webContents.send('auth-status-changed', { authenticated: true });
             }
             if (dashWin && !dashWin.isDestroyed()) {
               dashWin.webContents.send('auth-status-changed', { authenticated: true });
             }
-            doSync();
-            if (credsWatcher) { try { credsWatcher.close(); } catch {} credsWatcher = null; }
           }
-        }
-      });
-    } catch { /* ignore watch errors */ }
+          doSync(ctx);
+          try { watcher.close(); } catch { /* ignore */ }
+          credsWatchers = credsWatchers.filter((w) => w !== watcher);
+        });
+        credsWatchers.push(watcher);
+      } catch { /* ignore watch errors */ }
+    }
   }
   watchForCredentials();
 
@@ -4543,11 +5302,12 @@ app.whenReady().then(() => {
   ipcMain.on('dashboard-request-data', (event) => {
     if (!isLocalSender(event)) return;
     if (dashWin && !dashWin.isDestroyed()) {
-      if (cachedUsage) dashWin.webContents.send('usage-update', cachedUsage);
-      if (usageHistory.length > 0) dashWin.webContents.send('history-update', usageHistory);
+      dashWin.webContents.send('usage-update', buildUsagePayload());
+      const hist = activeHistory();
+      if (hist.length > 0) dashWin.webContents.send('history-update', hist);
       if (claudeStatus) dashWin.webContents.send('claude-status-update', claudeStatus);
     }
-    syncIfStale();
+    syncAllAccounts(false);
   });
 
   ipcMain.handle('get-claude-status', (event) => {
@@ -4619,9 +5379,14 @@ app.whenReady().then(() => {
 
   ipcMain.handle('sign-out', async (event) => {
     if (!isLocalSender(event)) return { success: false, error: 'Unauthorized' };
-    cachedToken = null;
-    tokenLastRead = 0;
-    signedOut = true;
+    // Signs out the active account only — other accounts keep syncing.
+    const ctx = getActiveCtx();
+    if (ctx) {
+      ctx.cachedToken = null;
+      ctx.tokenLastRead = 0;
+      ctx.signedOut = true;
+      ctx.needsLogin = true;
+    }
     // Notify all windows
     if (win && !win.isDestroyed()) {
       win.webContents.send('auth-status-changed', { authenticated: false });
@@ -5327,8 +6092,8 @@ app.whenReady().then(() => {
   win.webContents.on('did-finish-load', () => {
     widgetReady = true;
     // Always send cached data immediately so bars are never empty
-    if (cachedUsage) win.webContents.send('usage-update', cachedUsage);
-    if (usageHistory.length > 0) win.webContents.send('history-update', usageHistory);
+    win.webContents.send('usage-update', buildUsagePayload());
+    // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
     // Send badge counts
     const pendingCount = tasks.filter((t) => !t.done).length;
     const today = new Date().toISOString().slice(0, 10);
@@ -5338,14 +6103,16 @@ app.whenReady().then(() => {
     if (streakData.current > 0) win.webContents.send('streak-update', streakData);
     // Send pomo state
     win.webContents.send('pomo-update', { state: pomoState, seconds: pomoSeconds, total: pomoTotal });
-    // Try syncing fresh data — if token is null (mid-refresh), retry in 5s
-    const token = getAccessToken();
-    if (token && !syncing) {
-      syncIfStale();
+    // Try syncing fresh data — if the active token is null (mid-refresh), retry in 5s
+    const activeCtx = getActiveCtx();
+    const token = activeCtx ? getAccessToken(activeCtx) : null;
+    if (token && !anySyncing()) {
+      syncAllAccounts(false);
     } else if (!token) {
       setTimeout(() => {
-        const retryToken = getAccessToken();
-        if (retryToken && !syncing) doSync();
+        const ctx = getActiveCtx();
+        const retryToken = ctx ? getAccessToken(ctx) : null;
+        if (retryToken && !anySyncing()) syncAllAccounts(false);
       }, 5000);
     }
     // Re-send cached update result so renderer never misses it
@@ -5364,19 +6131,18 @@ app.whenReady().then(() => {
   // Auto-refresh usage every 3 minutes — fires even when widget is hidden
   // This keeps cached data fresh so the UI doesn't show stale data on next show
   const autoRefreshInterval = setInterval(() => {
-    syncIfStale();
+    syncAllAccounts(false);
   }, 3 * 60 * 1000);
   cleanupTimers.push(autoRefreshInterval);
 
   // Aggressive token refresh: check every 5 min, refresh if within 1 hour of expiry
   const tokenRefreshInterval = setInterval(() => {
-    try {
-      const creds = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8'));
-      const oauth = creds.claudeAiOauth;
+    for (const ctx of enabledAccounts()) {
+      const oauth = readOauthCreds(ctx);
       if (oauth && oauth.expiresAt && oauth.expiresAt < Date.now() + REFRESH_WINDOW_MS && oauth.refreshToken) {
-        refreshAccessToken(CREDS_FILE, oauth.refreshToken);
+        refreshAccessToken(ctx, oauth.refreshToken);
       }
-    } catch { /* ignore */ }
+    }
   }, 5 * 60 * 1000);
   cleanupTimers.push(tokenRefreshInterval);
 
@@ -5384,35 +6150,36 @@ app.whenReady().then(() => {
 
   // --- Power monitor: handle sleep/wake ---
   powerMonitor.on('suspend', () => {
-    if (activeRequest) {
-      try { activeRequest.destroy(); } catch { /* ignore */ }
-      activeRequest = null;
+    for (const ctx of Object.values(accountCtx)) {
+      if (ctx.activeRequest) {
+        try { ctx.activeRequest.destroy(); } catch { /* ignore */ }
+        ctx.activeRequest = null;
+      }
+      ctx.syncing = false;
+      ctx.syncStartedAt = 0;
     }
-    syncing = false;
-    syncStartedAt = 0;
   });
 
   powerMonitor.on('resume', () => {
-    syncing = false;
-    syncStartedAt = 0;
-    activeRequest = null;
-    cachedToken = null;
-    tokenLastRead = 0;
-    isRefreshing = false;
-    refreshRetryCount = 0;
-    if (refreshRetryTimer) { clearTimeout(refreshRetryTimer); refreshRetryTimer = null; }
-    clearRetryTimer();
+    for (const ctx of Object.values(accountCtx)) {
+      ctx.syncing = false;
+      ctx.syncStartedAt = 0;
+      ctx.activeRequest = null;
+      ctx.cachedToken = null;
+      ctx.tokenLastRead = 0;
+      ctx.isRefreshing = false;
+      ctx.refreshRetryCount = 0;
+      if (ctx.refreshRetryTimer) { clearTimeout(ctx.refreshRetryTimer); ctx.refreshRetryTimer = null; }
+      clearRetryTimer(ctx);
 
-    // Proactively refresh token on wake (it may have expired during sleep)
-    try {
-      const creds = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8'));
-      const oauth = creds.claudeAiOauth;
+      // Proactively refresh token on wake (it may have expired during sleep)
+      const oauth = readOauthCreds(ctx);
       if (oauth && oauth.refreshToken) {
-        refreshAccessToken(CREDS_FILE, oauth.refreshToken);
+        refreshAccessToken(ctx, oauth.refreshToken);
       }
-    } catch { /* ignore */ }
+    }
 
-    setTimeout(() => doSync(), 3000);
+    setTimeout(() => syncAllAccounts(true), 3000);
     setTimeout(() => scheduleReminders(), 5000);
   });
 
@@ -5434,14 +6201,16 @@ app.on('will-quit', () => {
   if (fileWatcher) { try { fileWatcher.close(); } catch {} }
   for (const w of linuxSubWatchers) { try { w.close(); } catch {} }
   linuxSubWatchers = [];
-  if (credsWatcher) { try { credsWatcher.close(); } catch {} credsWatcher = null; }
+  for (const w of credsWatchers) { try { w.close(); } catch {} }
+  credsWatchers = [];
+  if (cliMarkerWatcher) { try { cliMarkerWatcher.close(); } catch {} cliMarkerWatcher = null; }
+  if (cliMarkerDebounce) { clearTimeout(cliMarkerDebounce); cliMarkerDebounce = null; }
   if (fileChangeTimer) { clearTimeout(fileChangeTimer); fileChangeTimer = null; }
-  clearRetryTimer();
+  for (const id of Object.keys(accountCtx)) destroyAccountCtx(id);
   if (boundsDebounce) { clearTimeout(boundsDebounce); boundsDebounce = null; }
   if (pomoInterval) { clearInterval(pomoInterval); pomoInterval = null; }
   if (pomoSaveDebounce) { clearTimeout(pomoSaveDebounce); pomoSaveDebounce = null; }
   savePomoState();
-  if (refreshRetryTimer) { clearTimeout(refreshRetryTimer); refreshRetryTimer = null; }
   if (gcalSyncTimer) { clearInterval(gcalSyncTimer); gcalSyncTimer = null; }
   // Clear reminder timers
   for (const key of Object.keys(reminderTimers)) {

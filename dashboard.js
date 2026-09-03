@@ -1,6 +1,9 @@
 /* Dashboard renderer — safe DOM only (no innerHTML) */
 
-var usageData = null;
+var usageData = null;      // the ACTIVE account's usage — drives planner + chart
+var accountsData = [];     // every enabled account, from the usage-update payload
+var activeAccountId = null;
+var cliLauncherName = 'Claude Code';
 var historyData = [];
 var chartDays = 7;
 var alertThresholds = { session: 80, weekAll: 90, weekSonnet: 90 };
@@ -112,32 +115,90 @@ function buildUsageCard(label, data) {
   return card;
 }
 
-function renderOverview() {
-  var container = document.getElementById('overviewCards');
-  while (container.firstChild) container.removeChild(container.firstChild);
-
-  if (!usageData) {
-    container.appendChild(el('div', 'usage-card', 'Waiting for data...'));
-    return;
-  }
-
-  container.appendChild(buildUsageCard('Session (5h window)', usageData.session));
-  container.appendChild(buildUsageCard('Weekly — All Models', usageData.weekAll));
-  container.appendChild(buildUsageCard('Weekly — Sonnet', usageData.weekSonnet));
+// The four usage cards for one account's usage object, appended to `target`.
+function appendUsageCards(target, usage) {
+  target.appendChild(buildUsageCard('Session (5h window)', usage.session));
+  target.appendChild(buildUsageCard('Weekly — All Models', usage.weekAll));
+  target.appendChild(buildUsageCard('Weekly — Sonnet', usage.weekSonnet));
 
   // Extra usage card — same bar style as other metrics
-  if (usageData.extraUsage) {
-    if (usageData.extraUsage.enabled) {
-      var util = Number(usageData.extraUsage.utilization);
+  if (usage.extraUsage) {
+    if (usage.extraUsage.enabled) {
+      var util = Number(usage.extraUsage.utilization);
       var extraPct = Number.isFinite(util) ? Math.min(100, Math.max(0, Math.round(util))) : 0;
-      container.appendChild(buildUsageCard('Extra Usage', { pct: extraPct, resetsAt: null }));
+      target.appendChild(buildUsageCard('Extra Usage', { pct: extraPct, resetsAt: null }));
     } else {
       var extraCard = el('div', 'usage-card');
       extraCard.appendChild(el('div', 'card-label', 'Extra Usage'));
       extraCard.appendChild(el('div', 'card-meta', 'Not enabled'));
-      container.appendChild(extraCard);
+      target.appendChild(extraCard);
     }
   }
+}
+
+function buildAccountGroup(acc) {
+  var group = el('div', 'account-group' + (acc.id === activeAccountId ? ' active' : ''));
+
+  var head = el('div', 'account-group-head');
+  var nameRow = el('div', 'account-group-name', acc.name || acc.id);
+  if (acc.cliActive) {
+    var cliTag = el('span', 'account-group-cli', 'CLI');
+    cliTag.title = cliLauncherName + ' is running on this account';
+    nameRow.appendChild(document.createTextNode(' '));
+    nameRow.appendChild(cliTag);
+  }
+  head.appendChild(nameRow);
+  if (acc.email) head.appendChild(el('div', 'account-group-email', acc.email));
+  group.appendChild(head);
+
+  var limitedMs = acc.rateLimitedUntil ? acc.rateLimitedUntil - Date.now() : 0;
+  var limitedMins = limitedMs > 0 ? Math.max(1, Math.round(limitedMs / 60000)) : 0;
+
+  if (acc.needsLogin) {
+    group.appendChild(el('div', 'account-group-warn',
+      'Sign-in needed — run: CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login'));
+  } else if (acc.error) {
+    group.appendChild(el('div', 'account-group-warn', acc.error));
+  } else if (limitedMins) {
+    // Throttled, not broken — the cards below still show the last good numbers.
+    group.appendChild(el('div', 'account-group-note',
+      'Rate limited · retrying in ' + limitedMins + 'm'));
+  }
+
+  var cards = el('div', 'account-group-cards');
+  if (acc.usage) {
+    appendUsageCards(cards, acc.usage);
+  } else {
+    var empty = el('div', 'usage-card');
+    empty.appendChild(el('div', 'card-label', 'Usage'));
+    empty.appendChild(el('div', 'card-meta', limitedMins ? 'Rate limited — no data yet' : 'No data yet'));
+    cards.appendChild(empty);
+  }
+  group.appendChild(cards);
+  return group;
+}
+
+function renderOverview() {
+  var container = document.getElementById('overviewCards');
+  while (container.firstChild) container.removeChild(container.firstChild);
+
+  // Two or more accounts: one titled card group each, laid out in a grid.
+  if (accountsData.length > 1) {
+    container.classList.add('multi');
+    for (var i = 0; i < accountsData.length; i++) {
+      container.appendChild(buildAccountGroup(accountsData[i]));
+    }
+    renderPlanner();
+    return;
+  }
+
+  // Single account: exactly the layout it has always had.
+  container.classList.remove('multi');
+  if (!usageData) {
+    container.appendChild(el('div', 'usage-card', 'Waiting for data...'));
+    return;
+  }
+  appendUsageCards(container, usageData);
 
   // Session planner
   renderPlanner();
@@ -2189,8 +2250,27 @@ function renderStatusTab() {
 
 // --- IPC handlers ---
 
-window.dashboardAPI.onUsageUpdate(function(data) {
-  usageData = data;
+window.dashboardAPI.onUsageUpdate(function(payload) {
+  if (payload && Array.isArray(payload.accounts)) {
+    accountsData = payload.accounts;
+    if (typeof payload.cliLauncher === 'string' && payload.cliLauncher) {
+      cliLauncherName = payload.cliLauncher;
+    }
+    activeAccountId = payload.activeAccountId
+      || (accountsData[0] ? accountsData[0].id : null);
+    var active = null;
+    for (var i = 0; i < accountsData.length; i++) {
+      if (accountsData[i].id === activeAccountId) active = accountsData[i];
+    }
+    if (!active && accountsData.length > 0) active = accountsData[0];
+    if (active && active.usage) usageData = active.usage;
+  } else if (payload && payload.session) {
+    // Defensive: a bare usage object (pre-multi-account payload)
+    accountsData = [];
+    usageData = payload;
+  } else {
+    return;
+  }
   renderOverview();
 });
 
@@ -2347,20 +2427,36 @@ window.dashboardAPI.onSyncError(function(msg) {
 
 // Update countdowns every 10 seconds (lightweight text patch, no DOM rebuild)
 setInterval(function() {
-  if (!usageData) return;
+  if (!usageData && accountsData.length === 0) return;
   updateDashboardTimers();
 }, 10000);
 
-function updateDashboardTimers() {
-  // Patch countdown text in overview cards
-  var metaSpans = document.querySelectorAll('#overviewCards .card-meta');
-  var sources = [usageData.session, usageData.weekAll, usageData.weekSonnet];
+function patchCardCountdowns(metaSpans, sources) {
   for (var i = 0; i < metaSpans.length && i < sources.length; i++) {
     var spans = metaSpans[i].querySelectorAll('span');
     if (spans.length >= 2 && sources[i]) {
       spans[1].textContent = formatCountdown(sources[i].resetsAt);
     }
   }
+}
+
+function updateDashboardTimers() {
+  // Patch countdown text in overview cards — per account group when there is
+  // more than one, so a group never shows another account's reset time.
+  var groups = document.querySelectorAll('#overviewCards .account-group');
+  if (groups.length > 0) {
+    for (var g = 0; g < groups.length && g < accountsData.length; g++) {
+      var u = accountsData[g].usage;
+      if (!u) continue;
+      patchCardCountdowns(groups[g].querySelectorAll('.card-meta'), [u.session, u.weekAll, u.weekSonnet]);
+    }
+    return;
+  }
+  if (!usageData) return;
+  patchCardCountdowns(
+    document.querySelectorAll('#overviewCards .card-meta'),
+    [usageData.session, usageData.weekAll, usageData.weekSonnet]
+  );
 }
 
 // Redraw chart on window resize (debounced to avoid flicker)

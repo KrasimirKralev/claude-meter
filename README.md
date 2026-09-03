@@ -66,6 +66,7 @@ If you're not logged into Claude Code, the usage bars will be empty.
 
 ## Features
 
+- **Multiple accounts** — log each Claude account into its own `CLAUDE_CONFIG_DIR` (`~/.claude-<name>`) and the widget shows a tab per account with a live status dot; click to switch, each polled independently with its own rate-limit backoff.
 - **Usage meters** — current session, weekly (all models), Fable-only, each as a segmented bar with reset countdown.
 - **Extra-usage strip** — how much pay-as-you-go credit you've spent this month vs your limit, color-coded (teal → yellow at 80% → red at 100%). Auto-hidden if you don't have extra usage enabled.
 - **Calendar** — local events + optional read-only Google Calendar sync (see below). Meetings with a Meet/Zoom/Teams link show a 🎥 marker — click to **join directly**.

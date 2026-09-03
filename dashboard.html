@@ -287,6 +287,73 @@
     flex-direction: column;
     gap: 16px;
   }
+  /* Multi-account: one titled group per account, 2 columns narrow / 4 wide */
+  .overview-cards.multi {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+  @media (min-width: 1180px) {
+    .overview-cards.multi { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+  .account-group {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .account-group.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .account-group-head {
+    margin-bottom: 10px;
+    min-width: 0;
+  }
+  .account-group-name {
+    font-size: 14px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .account-group.active .account-group-name { color: var(--accent); }
+  .account-group-email {
+    font-size: 11px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .account-group-warn {
+    font-size: 11px;
+    color: var(--red);
+    margin-bottom: 10px;
+    word-break: break-word;
+  }
+  .account-group-cli {
+    display: inline-block;
+    vertical-align: middle;
+    background: var(--text);
+    color: var(--surface);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .account-group-note {
+    font-size: 11px;
+    color: var(--yellow);
+    margin-bottom: 10px;
+    word-break: break-word;
+  }
+  .account-group-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .account-group .usage-card { padding: 12px 14px; }
   .usage-card {
     background: var(--surface);
     border: 1px solid var(--border);

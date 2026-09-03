@@ -82,7 +82,7 @@
     color: #fff; text-transform: uppercase;
   }
   .dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; border: 1.5px solid #fff; }
-  .dot.live { background: var(--green); animation: pulse 2.5s ease-in-out infinite; }
+  .dot.live { background: var(--green); animation: pulse 2.5s ease-in-out 3; }
   .dot.syncing { background: var(--yellow); animation: pulse 0.6s ease-in-out infinite; }
   .dot.stale { background: #555; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
@@ -94,7 +94,7 @@
   }
   .sync-status.live { background: var(--green); color: #fff; }
   .sync-status.syncing { background: var(--yellow); color: var(--ink); }
-  .sync-status .mini-dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: pulse 1.5s ease-in-out infinite; }
+  .sync-status .mini-dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: pulse 1.5s ease-in-out 3; }
   .streak-badge {
     display: inline-flex; align-items: center; gap: 2px;
     font-size: 9px; font-weight: 900;
@@ -287,6 +287,80 @@
   }
 
   /* ---------- Usage rows: white cards + block meters ---------- */
+  /* ---------- Account tabs (multi-account) ---------- */
+  .account-tabs {
+    flex: 0 0 auto;
+    display: none;
+    gap: 8px;
+  }
+  .account-tabs.visible { display: flex; }
+  .account-tab {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    padding: 6px 4px;
+    background: var(--surface);
+    color: var(--ink);
+    border: 2px solid var(--ink);
+    border-radius: 8px;
+    box-shadow: 2.5px 2.5px 0 var(--ink);
+    font-size: 9px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    text-align: center;
+    cursor: pointer;
+    transition: transform 0.14s var(--pop), box-shadow 0.14s var(--pop), background 0.14s var(--pop);
+  }
+  .account-tab:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .account-tab.active { background: var(--yellow); }
+  /* The label clips, not the tab — an overflow:hidden tab would eat the dot. */
+  .account-tab-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-width: 0;
+  }
+  .account-tab-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Claude Code is currently running on this account (from active-account.json) */
+  .account-tab-cli {
+    flex: 0 0 auto;
+    background: var(--ink);
+    color: var(--surface);
+    border-radius: 3px;
+    padding: 1px 3px;
+    font-size: 7px;
+    letter-spacing: 0.5px;
+  }
+  .account-tab-dot {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 2px solid var(--ink);
+    background: var(--text-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 6px;
+    line-height: 1;
+    color: #fff;
+  }
+  .account-tab-dot.ok { background: var(--green); }
+  .account-tab-dot.warn { background: var(--yellow); }
+  .account-tab-dot.crit { background: var(--red); }
+  .account-tab-dot.alert { background: var(--red); }
+  .account-tab-dot.limited { background: var(--yellow); }
+  /* Throttled by the API, not broken: dashed edge, cached numbers stay put. */
+  .account-tab.rate-limited { border-style: dashed; }
+
   .usage-rows {
     flex: 0 0 auto;
     display: flex;
@@ -594,7 +668,7 @@
     100% { box-shadow: none; }
   }
   .widget.fade-in { animation: widgetIn 0.22s var(--pop) forwards; }
-  .widget.fade-out { animation: widgetOut 0.15s cubic-bezier(0.4, 0, 1, 1) forwards; }
+  .widget.fade-out { animation: widgetOut 0.09s cubic-bezier(0.4, 0, 1, 1) forwards; }
   @keyframes widgetIn {
     0% { opacity: 0; transform: translateX(24px) scale(0.96); }
     100% { opacity: 1; transform: translateX(0) scale(1); }
@@ -665,6 +739,8 @@
       <button class="win-btn close" id="closeBtn" title="Hide all panels"></button>
     </div>
   </div>
+
+  <div class="account-tabs" id="accountTabs"></div>
 
   <div class="setup-overlay" id="setupOverlay">
     <div class="setup-icon">&#x1F50C;</div>

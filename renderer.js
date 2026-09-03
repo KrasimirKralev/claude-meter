@@ -2,6 +2,14 @@ var usageData = null;
 var calendarOpen = false;
 var animatingPcts = { session: 0, weekAll: 0, weekSonnet: 0 };
 var lastSyncError = null; // persists error message until next successful sync
+var accountsData = [];    // one entry per enabled account, from the usage-update payload
+var activeAccountId = null;
+// The account the user just clicked. A usage-update already in flight still
+// carries the previous active id, and must not undo the click.
+var pendingAccountId = null;
+var pendingAccountTimer = null;
+// Name the CLI launcher reports for itself; falls back to the product name.
+var cliLauncherName = 'Claude Code';
 
 function createElement(tag, cls, text) {
   var el = document.createElement(tag);
@@ -152,6 +160,157 @@ function renderExtraUsage(eu) {
   if (strip) strip.title = 'Extra usage this month: ' + usedStr + (limStr ? ' of ' + limStr : '') + ' (' + pct + '%)';
 }
 
+// --- Account tabs ---
+
+function getActiveAccount() {
+  for (var i = 0; i < accountsData.length; i++) {
+    if (accountsData[i].id === activeAccountId) return accountsData[i];
+  }
+  return accountsData.length > 0 ? accountsData[0] : null;
+}
+
+function clearPendingAccount() {
+  pendingAccountId = null;
+  if (pendingAccountTimer) { clearTimeout(pendingAccountTimer); pendingAccountTimer = null; }
+}
+
+// Minutes until this account's own rate-limit window expires, 0 if it is fine.
+function accountLimitedMins(acc) {
+  if (!acc.rateLimitedUntil) return 0;
+  var diff = acc.rateLimitedUntil - Date.now();
+  return diff > 0 ? Math.max(1, Math.round(diff / 60000)) : 0;
+}
+
+// The dot uses the meters' own thresholds so a tab can never disagree with the
+// bar it stands for.
+function getAccountDotClass(acc) {
+  if (acc.needsLogin || acc.error) return 'alert';
+  if (!acc.usage || !acc.usage.session) return accountLimitedMins(acc) ? 'limited' : '';
+  var cls = getBarClass(acc.usage.session.pct);
+  if (cls === 'danger') return 'crit';
+  if (cls === 'warning') return 'warn';
+  return 'ok';
+}
+
+function buildAccountTab(acc) {
+  var limitedMins = accountLimitedMins(acc);
+  var cls = 'account-tab';
+  if (acc.id === activeAccountId) cls += ' active';
+  if (limitedMins) cls += ' rate-limited';
+  var tab = createElement('div', cls);
+
+  var label = createElement('span', 'account-tab-label');
+  label.appendChild(createElement('span', 'account-tab-name', acc.name || acc.id));
+  if (acc.cliActive) {
+    var cliTag = createElement('span', 'account-tab-cli', 'CLI');
+    cliTag.title = cliLauncherName + ' is running on this account';
+    label.appendChild(cliTag);
+  }
+  tab.appendChild(label);
+
+  var dotCls = getAccountDotClass(acc);
+  var dot = createElement('span', 'account-tab-dot' + (dotCls ? ' ' + dotCls : ''));
+  if (dotCls === 'alert') {
+    dot.textContent = '!';
+    tab.title = acc.needsLogin
+      ? 'Run: CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login'
+      : acc.error;
+  } else {
+    tab.title = acc.name + (acc.email ? ' · ' + acc.email : '')
+      + (limitedMins ? ' — rate limited · retrying in ' + limitedMins + 'm' : '');
+  }
+  tab.appendChild(dot);
+
+  tab.addEventListener('click', function() {
+    if (acc.id === activeAccountId) return;
+    activeAccountId = acc.id;
+    clearPendingAccount();
+    pendingAccountId = acc.id;
+    // Safety net: never pin the choice for longer than one sync round.
+    pendingAccountTimer = setTimeout(clearPendingAccount, 8000);
+    if (window.electronAPI.setActiveAccount) {
+      window.electronAPI.setActiveAccount(acc.id).then(function(res) {
+        if (!res || !res.success) clearPendingAccount();
+      }, clearPendingAccount);
+    }
+    // Re-render from the payload we already have — switching never refetches.
+    showActiveAccountUsage();
+  });
+
+  return tab;
+}
+
+function renderAccountTabs() {
+  var row = document.getElementById('accountTabs');
+  if (!row) return;
+  while (row.firstChild) row.removeChild(row.firstChild);
+  // A single account looks exactly as it always did — no tab row at all.
+  if (accountsData.length < 2) {
+    row.classList.remove('visible');
+    return;
+  }
+  row.classList.add('visible');
+  for (var i = 0; i < accountsData.length; i++) {
+    row.appendChild(buildAccountTab(accountsData[i]));
+  }
+}
+
+// Why the active account has no numbers to show, in one short line.
+function accountStatusText(acc) {
+  if (!acc) return 'No account';
+  var limited = accountLimitedMins(acc);
+  if (acc.needsLogin) return acc.name + ': sign-in needed';
+  if (limited) return acc.name + ': rate limited · retrying in ' + limited + 'm';
+  if (acc.error) return acc.name + ': ' + acc.error;
+  return acc.name + ': waiting for first sync';
+}
+
+// Paint the meters, timers and footer for whichever account is active.
+function showActiveAccountUsage() {
+  renderAccountTabs();
+  var active = getActiveAccount();
+  var data = active ? active.usage : null;
+  if (!data) {
+    // Never leave another account's numbers under this account's tab — clear
+    // the meters and say why they are empty.
+    usageData = null;
+    lastSyncError = accountStatusText(active);
+    renderAll();
+    setSyncStatus('stale');
+    if (typeof reportMinHeight === 'function') reportMinHeight();
+    return;
+  }
+  var oldData = usageData;
+  usageData = data;
+  // A rate-limited account keeps showing its last good numbers, labelled.
+  var limitedMins = accountLimitedMins(active);
+  lastSyncError = limitedMins
+    ? 'Rate limited · retrying in ' + limitedMins + 'm'
+    : null;
+  hideSetupOverlay();
+  renderAll();
+  setSyncStatus(limitedMins ? 'stale' : 'live');
+
+  // Animate percentage changes
+  if (oldData) {
+    var keys = ['session', 'weekAll', 'weekSonnet'];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var oldPct = oldData[k] ? oldData[k].pct : 0;
+      var newPct = data[k] ? data[k].pct : 0;
+      if (oldPct !== newPct) {
+        animateNumbers(oldPct, newPct, k, 600);
+        var rowId = k === 'session' ? 'sessionRow' : (k === 'weekAll' ? 'weekAllRow' : 'weekSonnetRow');
+        var barEl = document.getElementById(rowId);
+        if (barEl) {
+          var meter = barEl.querySelector('.segs') || barEl.querySelector('.bar-fill');
+          if (meter) { meter.classList.remove('bar-pulse'); void meter.offsetWidth; meter.classList.add('bar-pulse'); }
+        }
+      }
+    }
+  }
+}
+
 function renderAll() {
   var data = usageData;
   if (!data) {
@@ -224,6 +383,8 @@ function setSyncStatus(status) {
     badge.appendChild(createElement('span', 'mini-dot'));
     badge.appendChild(document.createTextNode(' SYNCING'));
   } else if (status === 'live') {
+    dot.className = 'dot';
+    void dot.offsetWidth;   // reflow: restarts the finite pulse on each sync
     dot.className = 'dot live';
     badge.className = 'sync-status live';
     badge.textContent = '';
@@ -256,33 +417,30 @@ document.querySelector('.header').addEventListener('dblclick', function(e) {
   window.electronAPI.toggleCompact(document.body.classList.contains('compact'));
 });
 
-// Listen for usage updates from main process
-window.electronAPI.onUsageUpdate(function(data) {
-  var oldData = usageData;
-  usageData = data;
-  lastSyncError = null; // clear error on successful sync
-  hideSetupOverlay();
-  renderAll();
-  setSyncStatus('live');
-
-  // Animate percentage changes
-  if (oldData) {
-    var keys = ['session', 'weekAll', 'weekSonnet'];
-    for (var i = 0; i < keys.length; i++) {
-      var k = keys[i];
-      var oldPct = oldData[k] ? oldData[k].pct : 0;
-      var newPct = data[k] ? data[k].pct : 0;
-      if (oldPct !== newPct) {
-        animateNumbers(oldPct, newPct, k, 600);
-        var rowId = k === 'session' ? 'sessionRow' : (k === 'weekAll' ? 'weekAllRow' : 'weekSonnetRow');
-        var barEl = document.getElementById(rowId);
-        if (barEl) {
-          var meter = barEl.querySelector('.segs') || barEl.querySelector('.bar-fill');
-          if (meter) { meter.classList.remove('bar-pulse'); void meter.offsetWidth; meter.classList.add('bar-pulse'); }
-        }
-      }
+// Listen for usage updates from main process. The payload carries every
+// enabled account plus which one is active; the meters show the active one.
+window.electronAPI.onUsageUpdate(function(payload) {
+  if (payload && Array.isArray(payload.accounts)) {
+    accountsData = payload.accounts;
+    if (typeof payload.cliLauncher === 'string' && payload.cliLauncher) {
+      cliLauncherName = payload.cliLauncher;
     }
+    if (pendingAccountId && payload.activeAccountId !== pendingAccountId) {
+      // Main has not applied the click yet — hold the user's choice.
+      activeAccountId = pendingAccountId;
+    } else {
+      clearPendingAccount();
+      activeAccountId = payload.activeAccountId
+        || (accountsData[0] ? accountsData[0].id : null);
+    }
+  } else if (payload && payload.session) {
+    // Defensive: a bare usage object (pre-multi-account payload)
+    accountsData = [{ id: 'default', name: '', email: null, usage: payload, error: null, needsLogin: false }];
+    activeAccountId = 'default';
+  } else {
+    return;
   }
+  showActiveAccountUsage();
 });
 
 window.electronAPI.onSyncStart(function() {

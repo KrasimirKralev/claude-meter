@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   signOut: () => ipcRenderer.invoke('sign-out'),
   checkAuthStatus: () => ipcRenderer.invoke('check-auth-status'),
   launchAuthLogin: () => ipcRenderer.invoke('launch-auth-login'),
+  getAccounts: () => ipcRenderer.invoke('get-accounts'),
+  setActiveAccount: (id) => ipcRenderer.invoke('set-active-account', id),
   onAuthStatusChanged: (cb) => {
     if (authStatusHandler) ipcRenderer.removeListener('auth-status-changed', authStatusHandler);
     authStatusHandler = (_e, data) => cb(data);
