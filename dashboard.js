@@ -119,7 +119,9 @@ function buildUsageCard(label, data) {
 function appendUsageCards(target, usage) {
   target.appendChild(buildUsageCard('Session (5h window)', usage.session));
   target.appendChild(buildUsageCard('Weekly — All Models', usage.weekAll));
-  target.appendChild(buildUsageCard('Weekly — Sonnet', usage.weekSonnet));
+  // The scoped weekly bucket is named after whatever model the API reports (Fable, Sonnet…)
+  var scopedModel = (usage.weekSonnet && usage.weekSonnet.model) ? usage.weekSonnet.model : 'Sonnet';
+  target.appendChild(buildUsageCard('Weekly — ' + scopedModel, usage.weekSonnet));
 
   // Extra usage card — same bar style as other metrics
   if (usage.extraUsage) {

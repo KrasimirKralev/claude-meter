@@ -2712,6 +2712,7 @@ function buildUsage(data) {
       pct: clampPct(scoped.percent),
       resetsAt: scoped.resets_at,
       label: 'Current week (' + modelName + ' only)',
+      model: modelName,
     };
   } else if (data.seven_day_sonnet) {
     // Legacy fallback for accounts still reporting the fixed Sonnet bucket
@@ -2719,6 +2720,7 @@ function buildUsage(data) {
       pct: clampPct(data.seven_day_sonnet.utilization),
       resetsAt: data.seven_day_sonnet.resets_at,
       label: 'Current week (Sonnet only)',
+      model: 'Sonnet',
     };
   }
   if (data.extra_usage) {
