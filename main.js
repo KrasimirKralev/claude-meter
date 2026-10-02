@@ -2427,6 +2427,9 @@ function getAccessToken(ctx, forceRefresh) {
 // other account records needsLogin so the accounts strip can flag it quietly.
 function reportAuthExpired(ctx) {
   ctx.needsLogin = true;
+  // The login line stays red only while this exact credentials file is in
+  // place; a new login (a new file) clears it at the next minute check.
+  ctx.needsLoginMtime = credsMtime(ctx.credsFile);
   ctx.lastError = 'OAuth session expired — please re-authenticate';
   if (ctx.id !== activeAccountId) { broadcastUsage(); return; }
   if (win && !win.isDestroyed()) {
@@ -2749,6 +2752,8 @@ function buildUsage(data) {
 // account plus which one is active. Renderers pick the active entry for the
 // main meters and may render the rest alongside.
 function buildUsagePayload() {
+  const now = Date.now();
+  const env = currentLoginEnv(now);
   return {
     accounts: enabledAccounts().map((ctx) => ({
       id: ctx.id,
@@ -2763,6 +2768,8 @@ function buildUsagePayload() {
       cliActive: isCliActive(ctx),
       error: ctx.lastError,
       needsLogin: !!ctx.needsLogin,
+      // When this login runs out, as token-free display strings.
+      login: loginInfoFor(ctx, now, env),
     })),
     activeAccountId: activeAccountId,
     cliLauncher: cliLauncherName(),
@@ -2771,6 +2778,7 @@ function buildUsagePayload() {
 
 function broadcastUsage() {
   const payload = buildUsagePayload();
+  lastLoginSig = loginLib.loginSignature(payload.accounts.map((a) => a.login));
   if (win && !win.isDestroyed()) {
     win.webContents.send('usage-update', payload);
     // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
@@ -2779,6 +2787,70 @@ function broadcastUsage() {
     dashWin.webContents.send('usage-update', payload);
     dashWin.webContents.send('history-update', activeHistory());
   }
+}
+
+// --- Login expiry ---
+// A login lives until its refresh token's hard expiry (~30 days after the
+// login; a refresh never extends it). Every payload carries one token-free line
+// per account, read from its credentials file, and checkLogins() re-reads them
+// once a minute so a new day, an amber/red turn or a fresh login shows up
+// without waiting for the next sync.
+const loginLib = require('./login-expiry');
+// Written by the clx launcher, when installed: its per-account `auth` verdict.
+const CLX_USAGE_CACHE_FILE = path.join(CLAUDE_DIR, 'cc-usage-cache.json');
+const LOGIN_ENV_TTL_MS = 30 * 1000;
+let loginEnv = { at: 0, cmLogin: false, clx: null };
+let lastLoginSig = '';
+
+function credsMtime(file) {
+  try { return fs.statSync(file).mtimeMs; } catch { return 0; }
+}
+
+// Re-probed every 30 s rather than once: cm-login or clx can appear (or go)
+// while the app runs.
+function currentLoginEnv(now) {
+  if (now - loginEnv.at < LOGIN_ENV_TTL_MS) return loginEnv;
+  let clx = null;
+  try {
+    clx = JSON.parse(fs.readFileSync(CLX_USAGE_CACHE_FILE, 'utf-8'));
+  } catch { /* optional - without clx the credentials file alone decides */ }
+  loginEnv = { at: now, cmLogin: loginLib.findCmLogin(process.env.PATH, os.homedir()), clx };
+  return loginEnv;
+}
+
+function loginInfoFor(ctx, now, env) {
+  const read = loginLib.readCredsFacts(ctx.credsFile);
+  let rejected = null;
+  if (ctx.signedOut) {
+    rejected = 'signed out';
+  } else if (ctx.needsLogin && (!ctx.needsLoginMtime || ctx.needsLoginMtime === read.mtimeMs)) {
+    // The server refused this login and no new one has landed since.
+    rejected = 'sign-in rejected';
+  } else {
+    rejected = loginLib.clxVerdict(env.clx, ctx.dir, read.mtimeMs);
+  }
+  return loginLib.describeLogin(read, now, {
+    rejected,
+    command: loginLib.loginCommand({ dir: ctx.dir, email: ctx.email, cmLogin: env.cmLogin }),
+  });
+}
+
+function checkLogins() {
+  const now = Date.now();
+  for (const ctx of enabledAccounts()) {
+    // A new login landed on an account flagged as needing one: sync it now so
+    // the flag clears together with the line, not at the next 3-minute round.
+    if (!ctx.needsLogin || ctx.signedOut) continue;
+    const mtime = credsMtime(ctx.credsFile);
+    if (!mtime || mtime === ctx.needsLoginMtime || mtime === ctx.loginKickMtime) continue;
+    ctx.loginKickMtime = mtime; // one kick per new file
+    ctx.cachedToken = null;
+    ctx.tokenLastRead = 0;
+    doSync(ctx);
+  }
+  const env = currentLoginEnv(now);
+  const sig = loginLib.loginSignature(enabledAccounts().map((ctx) => loginInfoFor(ctx, now, env)));
+  if (sig !== lastLoginSig) broadcastUsage();
 }
 
 // --- Claude official status page ---
@@ -5025,9 +5097,10 @@ app.whenReady().then(() => {
   }
   startCliMarkerWatcher();
   // Pick up accounts logged in (or out) while the app is running.
-  const discoveryTimer = setInterval(
-    () => rediscoverAccounts('poll'), ACCOUNT_DISCOVERY_INTERVAL_MS
-  );
+  const discoveryTimer = setInterval(() => {
+    rediscoverAccounts('poll');
+    checkLogins();
+  }, ACCOUNT_DISCOVERY_INTERVAL_MS);
   cleanupTimers.push(discoveryTimer);
   startClaudeStatusPoller();
   scheduleReminders();

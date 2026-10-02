@@ -151,14 +151,28 @@ function buildAccountGroup(acc) {
   }
   head.appendChild(nameRow);
   if (acc.email) head.appendChild(el('div', 'account-group-email', acc.email));
+  // When this login runs out (ready-made strings from main, login-expiry.js).
+  var login = acc.login;
+  var loginOut = !!(login && login.state === 'out');
+  if (login && login.text) {
+    var loginCls = 'account-group-login' + (login.state === 'warn' || loginOut ? ' ' + login.state : '');
+    var loginLine = el('div', loginCls);
+    loginLine.appendChild(el('span', 'account-group-login-dot'));
+    loginLine.appendChild(el('span', null, login.text));
+    loginLine.title = login.detail;
+    head.appendChild(loginLine);
+  }
   group.appendChild(head);
 
   var limitedMs = acc.rateLimitedUntil ? acc.rateLimitedUntil - Date.now() : 0;
   var limitedMins = limitedMs > 0 ? Math.max(1, Math.round(limitedMs / 60000)) : 0;
 
   if (acc.needsLogin) {
-    group.appendChild(el('div', 'account-group-warn',
-      'Sign-in needed — run: CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login'));
+    // A red login line above already says it, with the command.
+    if (!loginOut) {
+      group.appendChild(el('div', 'account-group-warn', 'Sign-in needed — run: '
+        + ((login && login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login')));
+    }
   } else if (acc.error) {
     group.appendChild(el('div', 'account-group-warn', acc.error));
   } else if (limitedMins) {

@@ -181,10 +181,46 @@ function accountLimitedMins(acc) {
   return diff > 0 ? Math.max(1, Math.round(diff / 60000)) : 0;
 }
 
+// Main ships each login's expiry as ready-made strings (login-expiry.js).
+function loginState(acc) {
+  return (acc && acc.login && acc.login.state) || '';
+}
+
+function isLoggedOut(acc) {
+  return !!acc && (acc.needsLogin || loginState(acc) === 'out');
+}
+
+// The tab's second line: "Login until 01 Nov · 30 d". The lead-in is the part
+// that gives way when the tab is narrow; the date and days never do.
+function buildTabLoginLine(login) {
+  var line = createElement('span', 'account-tab-login');
+  if (login.state === 'out') {
+    line.appendChild(createElement('span', 'account-tab-login-val out', login.short));
+    return line;
+  }
+  line.appendChild(createElement('span', 'account-tab-login-pre', 'Login until'));
+  line.appendChild(createElement('span', 'account-tab-login-val' + (login.state === 'warn' ? ' warn' : ''), login.short));
+  return line;
+}
+
+// The active account's own login line, under the tabs: always when there are
+// no tabs to carry it, otherwise only when it needs action (amber or red).
+function renderLoginStrip(acc) {
+  var strip = document.getElementById('loginStrip');
+  if (!strip) return;
+  var login = acc ? acc.login : null;
+  var state = loginState(acc);
+  var tabsShown = accountsData.length > 1;
+  var show = !!(login && login.text) && (!tabsShown || state === 'warn' || state === 'out');
+  strip.className = 'login-strip' + (show ? ' visible' : '') + (state === 'warn' || state === 'out' ? ' ' + state : '');
+  document.getElementById('loginStripText').textContent = show ? login.text : '';
+  strip.title = show ? login.detail : '';
+}
+
 // The dot uses the meters' own thresholds so a tab can never disagree with the
 // bar it stands for.
 function getAccountDotClass(acc) {
-  if (acc.needsLogin || acc.error) return 'alert';
+  if (isLoggedOut(acc) || acc.error) return 'alert';
   if (!acc.usage || !acc.usage.session) return accountLimitedMins(acc) ? 'limited' : '';
   var cls = getBarClass(acc.usage.session.pct);
   if (cls === 'danger') return 'crit';
@@ -207,17 +243,24 @@ function buildAccountTab(acc) {
     label.appendChild(cliTag);
   }
   tab.appendChild(label);
+  var login = acc.login;
+  if (login && login.short) tab.appendChild(buildTabLoginLine(login));
 
   var dotCls = getAccountDotClass(acc);
   var dot = createElement('span', 'account-tab-dot' + (dotCls ? ' ' + dotCls : ''));
   if (dotCls === 'alert') {
     dot.textContent = '!';
-    tab.title = acc.needsLogin
-      ? 'Run: CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login'
-      : acc.error;
+    if (isLoggedOut(acc)) {
+      tab.title = (login && login.state === 'out')
+        ? login.detail
+        : 'Run: ' + ((login && login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login');
+    } else {
+      tab.title = acc.error;
+    }
   } else {
     tab.title = acc.name + (acc.email ? ' · ' + acc.email : '')
-      + (limitedMins ? ' — rate limited · retrying in ' + limitedMins + 'm' : '');
+      + (limitedMins ? ' — rate limited · retrying in ' + limitedMins + 'm' : '')
+      + (login && login.detail ? '\n' + login.detail : '');
   }
   tab.appendChild(dot);
 
@@ -259,7 +302,7 @@ function renderAccountTabs() {
 function accountStatusText(acc) {
   if (!acc) return 'No account';
   var limited = accountLimitedMins(acc);
-  if (acc.needsLogin) return acc.name + ': sign-in needed';
+  if (isLoggedOut(acc)) return acc.name + ': logged out';
   if (limited) return acc.name + ': rate limited · retrying in ' + limited + 'm';
   if (acc.error) return acc.name + ': ' + acc.error;
   return acc.name + ': waiting for first sync';
@@ -269,6 +312,7 @@ function accountStatusText(acc) {
 function showActiveAccountUsage() {
   renderAccountTabs();
   var active = getActiveAccount();
+  renderLoginStrip(active);
   var data = active ? active.usage : null;
   if (!data) {
     // Never leave another account's numbers under this account's tab — clear

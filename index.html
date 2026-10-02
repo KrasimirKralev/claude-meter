@@ -360,6 +360,76 @@
   .account-tab-dot.limited { background: var(--yellow); }
   /* Throttled by the API, not broken: dashed edge, cached numbers stay put. */
   .account-tab.rate-limited { border-style: dashed; }
+  /* Second line: when this login runs out. The lead-in gives way first. */
+  .account-tab-login {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 3px;
+    margin-top: 3px;
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: 7.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    line-height: 1.2;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .account-tab.active .account-tab-login { color: var(--ink); }
+  .account-tab-login-pre {
+    flex: 0 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .widget.narrow .account-tab-login-pre { display: none; }
+  .account-tab-login-val { flex: 0 0 auto; white-space: nowrap; }
+  .account-tab-login-val.warn,
+  .account-tab-login-val.out {
+    padding: 0 3px;
+    border: 1.5px solid var(--ink);
+    border-radius: 3px;
+    font-weight: 900;
+  }
+  .account-tab-login-val.warn { background: var(--yellow); color: var(--ink); }
+  .account-tab-login-val.out { background: var(--red); color: #fff; }
+
+  /* The active account's login line - amber/red, or always with one account */
+  .login-strip {
+    display: none;
+    align-items: center;
+    gap: 7px;
+    flex-shrink: 0;
+    padding: 6px 10px;
+    background: var(--surface);
+    border: 2px solid var(--ink);
+    border-radius: var(--r-sm);
+    box-shadow: var(--shadow-sm);
+  }
+  .login-strip.visible { display: flex; }
+  .login-strip.warn { background: #fff8e0; }
+  .login-strip.out { background: #ffecec; }
+  .login-strip-dot {
+    width: 7px; height: 7px; flex-shrink: 0;
+    border-radius: 2px;
+    border: 1.5px solid var(--ink);
+    background: var(--green);
+  }
+  .login-strip.warn .login-strip-dot { background: var(--yellow); }
+  .login-strip.out .login-strip-dot { background: var(--red); }
+  .login-strip-text {
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    font-weight: 800;
+    color: var(--ink);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+  .widget.very-tight .login-strip { padding: 4px 9px; }
 
   .usage-rows {
     flex: 0 0 auto;
@@ -741,6 +811,11 @@
   </div>
 
   <div class="account-tabs" id="accountTabs"></div>
+
+  <div class="login-strip" id="loginStrip">
+    <span class="login-strip-dot" aria-hidden="true"></span>
+    <span class="login-strip-text" id="loginStripText"></span>
+  </div>
 
   <div class="setup-overlay" id="setupOverlay">
     <div class="setup-icon">&#x1F50C;</div>

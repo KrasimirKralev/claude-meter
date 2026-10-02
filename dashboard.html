@@ -331,6 +331,29 @@
     margin-bottom: 10px;
     word-break: break-word;
   }
+  /* When this account's login runs out: dot + one line, amber/red near the end */
+  .account-group-login {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    word-break: break-word;
+    font-variant-numeric: tabular-nums;
+  }
+  .account-group-login.warn { color: var(--text); font-weight: 700; }
+  .account-group-login.out { color: var(--red); font-weight: 700; }
+  .account-group-login-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    border: 1.5px solid var(--text);
+    background: var(--green);
+  }
+  .account-group-login.warn .account-group-login-dot { background: var(--yellow); }
+  .account-group-login.out .account-group-login-dot { background: var(--red); }
   .account-group-cli {
     display: inline-block;
     vertical-align: middle;
