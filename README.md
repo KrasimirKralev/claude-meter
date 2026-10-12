@@ -4,18 +4,17 @@
   <a href="https://github.com/KrasimirKralev/claude-meter/stargazers"><img src="https://img.shields.io/github/stars/KrasimirKralev/claude-meter?style=for-the-badge&logo=github&color=ffc900&labelColor=111" alt="Stars"></a>
   <a href="https://github.com/KrasimirKralev/claude-meter/releases/latest"><img src="https://img.shields.io/github/v/release/KrasimirKralev/claude-meter?style=for-the-badge&color=ff90e8&labelColor=111" alt="Latest release"></a>
   <a href="https://github.com/KrasimirKralev/claude-meter/releases/latest"><img src="https://img.shields.io/github/downloads/KrasimirKralev/claude-meter/total?style=for-the-badge&color=23a094&labelColor=111" alt="Downloads"></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-9ee7c8?style=for-the-badge&labelColor=111" alt="Platforms">
+  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20from%20source-9ee7c8?style=for-the-badge&labelColor=111" alt="Platforms: macOS, Linux from source">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/KrasimirKralev/claude-meter?style=for-the-badge&color=e5484d&labelColor=111" alt="License"></a>
 </p>
 
 A desktop widget that tracks your **Claude usage** in real time — current session, weekly (all models), Fable-only, and pay-as-you-go **extra-usage spend** — with a built-in planner: **calendar** (with optional Google Calendar sync), **tasks**, **notes** (markdown editor), and **habit tracking**. Pop-brutalist UI, always-on-top, snap-to-edge.
 
-<p align="center">
-  <img src="assets/screenshot-widget.png" alt="Claude Meter widget" width="340">
-</p>
+> **Unofficial; not affiliated with Anthropic.** Claude Meter is an independent open-source tool that reads the login
+> [Claude Code](https://claude.com/claude-code) already keeps on your machine.
 
 <p align="center">
-  <b>⭐ If Claude Meter saves you a glance at the usage page, drop a star — it's the whole reason it's free and open.</b>
+  <img src="assets/screenshot-widget.png" alt="Claude Meter widget" width="340">
 </p>
 
 ## Screenshots
@@ -26,6 +25,14 @@ A desktop widget that tracks your **Claude usage** in real time — current sess
 | Usage overview, 7-day history, and the full planner. | Split markdown editor with live preview, tables → inline bars, and click-to-copy fields. |
 
 ---
+
+## Platforms
+
+| Platform | Status |
+|----------|--------|
+| macOS (Apple Silicon and Intel) | Released: unsigned DMGs on the [Releases](../../releases/latest) page, built by CI. |
+| Linux | Runs from source (see [Build from source](#build-from-source)). No packaged build yet. |
+| Windows | Untested. The app has not been verified on Windows, and no installer is published. |
 
 ## Download (macOS)
 
@@ -57,8 +64,9 @@ then open it normally. After the first open it launches like any other app.
 
 Claude Meter reads your usage from the **Claude Code** credentials on your machine
 (`~/.claude/.credentials.json`). So you need [Claude Code](https://claude.com/claude-code)
-installed and logged in (`claude` on your PATH). No API key is stored by this app —
-it reuses the OAuth token Claude Code already has.
+installed and logged in (`claude` on your PATH). The app has no API key of its own —
+it reuses the OAuth token Claude Code already has. When that token is close to expiring,
+the app refreshes it with Anthropic and writes the new token back to the same file.
 
 If you're not logged into Claude Code, the usage bars will be empty.
 
@@ -120,23 +128,26 @@ Only dependency is Electron + Chart.js (no native modules).
 
 ```bash
 npm install
-npm start              # run in dev
-npm run build:mac      # macOS DMG   (must run on macOS)
-npm run build:win      # Windows installer
-npm run build:linux    # Linux AppImage
+npm start              # run from source (macOS, Linux)
+npm run build:mac      # macOS DMGs (must run on macOS)
 ```
+
+`npm run build:linux` (AppImage) and `npm run build:win` (NSIS installer) are defined in `package.json`,
+but neither runs in CI and no Linux or Windows package has been released.
 
 ### macOS builds via CI
 
 macOS DMGs must be produced **on macOS**. This repo's GitHub Actions workflow
 ([`.github/workflows/build-mac.yml`](.github/workflows/build-mac.yml)) builds both
-arm64 and x64 DMGs on every push to `main` and publishes them to a Release — no Mac required to ship.
+arm64 and x64 DMGs on every push to `main` (docs-only changes are skipped) and publishes them to a Release — no Mac
+required to ship.
 
 ---
 
 ## Tech
 
-Electron 33 · Chart.js · vanilla JS (no framework). All rendering is safe-DOM (no `innerHTML`), credentials never leave your machine.
+Electron 33 · Chart.js · vanilla JS (no framework). All rendering is safe-DOM (no `innerHTML`). Your Claude Code
+token is only ever sent to Anthropic (the usage endpoint and its token refresh).
 
 ## Contributing
 
@@ -144,15 +155,10 @@ PRs welcome — bugfixes, new widgets, themes, extra integrations. Thanks to eve
 
 - [@GeorgiK77](https://github.com/GeorgiK77) — quick-task global shortcut
 
-## Star history
+If Claude Meter is useful to you, a star helps other people find it.
 
-If this is useful to you, a ⭐ genuinely helps other people find it:
-
-<p align="center">
-  <a href="https://star-history.com/#KrasimirKralev/claude-meter&Date">
-    <img src="https://api.star-history.com/svg?repos=KrasimirKralev/claude-meter&type=Date" alt="Star History Chart" width="600">
-  </a>
-</p>
+More from [@KrasimirKralev](https://github.com/KrasimirKralev): [Harvest Hollow](https://github.com/KrasimirKralev/harvest-hollow),
+a cozy 3D farming game for two that runs in the browser.
 
 ## License
 
