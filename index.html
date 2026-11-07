@@ -6,10 +6,12 @@
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self';">
 <title>Claude Meter</title>
+<link rel="stylesheet" href="assets/fonts/inter.css">
 <style>
   /* ============================================================
-     CLAUDE METER — POP BRUTALIST
-     Hard ink borders, offset shadows, candy chips, block meters.
+     CLAUDE METER: POP BRUTALIST, REBUILT
+     Ink borders and candy colours, spent on what matters: every
+     account in one board, a yellow row for the active one.
      ============================================================ */
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
@@ -19,12 +21,22 @@
     --border: #111111;
     --ink: #111111;
     --text: #111111;
-    --text-dim: #6f6a5e;
+    --text-dim: #5f5a4f;
     --accent: #ff90e8;   /* candy pink */
     --green: #23a094;    /* teal */
     --yellow: #ffc900;   /* taxi yellow */
     --red: #e5484d;
+    --crit-text: #c8232b;
     --bar-bg: #ffffff;
+    --hover: rgba(17, 17, 17, 0.06);
+
+    /* Fixed in every theme: these sit on the black bar or on a candy colour. */
+    --bar: #111111;
+    --bar-ink: #ffffff;
+    --bar-dim: #b9b5a8;
+    --bar-hover: #2c2c2c;
+    --on-candy: #111111;
+    --on-yellow-dim: #3a3205;
 
     --bw: 2.5px;                    /* border weight */
     --shadow: 4px 4px 0 var(--ink);
@@ -36,6 +48,7 @@
   }
   body {
     font-family: Inter, system-ui, 'Segoe UI', Roboto, sans-serif;
+    font-variant-numeric: tabular-nums lining-nums;
     background: var(--bg);
     color: var(--text);
     height: 100vh;
@@ -45,130 +58,204 @@
     flex-direction: column;
     -webkit-font-smoothing: antialiased;
   }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  ul { list-style: none; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
   .widget {
-    padding: 10px 12px;
     display: flex;
     flex-direction: column;
     height: 100%;
     overflow: hidden;
-    gap: 8px;
-  }
-  .widget.tight { gap: 7px; padding: 9px 11px; }
-  .widget.very-tight { gap: 5px; padding: 8px 10px; }
-
-  /* ---------- Card base ---------- */
-  .brut-card {
-    background: var(--surface);
     border: var(--bw) solid var(--ink);
-    border-radius: var(--r);
-    box-shadow: var(--shadow);
+    border-radius: 14px;
+    position: relative;
   }
 
   /* ---------- Header: ink bar ---------- */
   .header {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 10px;
     flex-shrink: 0;
-    background: var(--ink);
-    color: #fff;
-    border-radius: var(--r);
-    padding: 9px 12px;
+    height: 40px;
+    padding: 0 8px 0 14px;
+    background: var(--bar);
+    color: var(--bar-ink);
   }
-  .header-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
-  .header-icons { display: flex; align-items: center; gap: 4px; margin-left: auto; }
-  .title {
-    font-size: 12px; font-weight: 900; letter-spacing: 0.6px;
-    color: #fff; text-transform: uppercase;
-  }
-  .dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; border: 1.5px solid #fff; }
-  .dot.live { background: var(--green); animation: pulse 2.5s ease-in-out 3; }
-  .dot.syncing { background: var(--yellow); animation: pulse 0.6s ease-in-out infinite; }
-  .dot.stale { background: #555; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
-  .sync-status {
-    font-size: 7px; font-weight: 900;
-    letter-spacing: 1.4px; text-transform: uppercase;
-    display: flex; align-items: center; gap: 3px;
-    padding: 2px 6px; border-radius: 4px;
-  }
-  .sync-status.live { background: var(--green); color: #fff; }
-  .sync-status.syncing { background: var(--yellow); color: var(--ink); }
-  .sync-status .mini-dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: pulse 1.5s ease-in-out 3; }
+  .title { font-size: 12.5px; font-weight: 900; letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap; }
+  .dot, .sync-status { display: none; }
+  .footer-hint { font-size: 12px; color: var(--bar-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .footer-hint.stale { color: #e6c15a; }
+  .footer-hint.error { color: #ff9c9c; }
   .streak-badge {
     display: inline-flex; align-items: center; gap: 2px;
-    font-size: 9px; font-weight: 900;
-    color: var(--ink);
-    background: var(--yellow);
-    border-radius: 4px;
-    padding: 2px 6px;
-    cursor: pointer;
+    font-size: 11px; font-weight: 800;
+    color: var(--on-candy); background: var(--yellow);
+    border-radius: 5px; padding: 1px 6px;
+    cursor: pointer; flex-shrink: 0;
   }
-  .streak-badge .streak-fire { font-size: 10px; }
-  .window-controls { display: flex; gap: 5px; margin-left: 8px; flex-shrink: 0; }
+  .streak-badge .streak-fire { font-size: 11px; }
+  .window-controls { display: flex; gap: 2px; margin-left: auto; flex-shrink: 0; }
   .win-btn {
-    width: 11px; height: 11px; border-radius: 3px;
-    border: 1.5px solid #fff; cursor: pointer; opacity: 0.7;
-    transition: all 0.12s; background: transparent;
+    width: 28px; height: 28px; display: grid; place-items: center;
+    border-radius: 6px; color: var(--bar-dim);
   }
-  .win-btn:hover { opacity: 1; transform: scale(1.15); }
-  .win-btn.minimize { background: var(--yellow); }
-  .win-btn.close { background: var(--red); }
-  .dash-btn {
-    width: 24px; height: 24px; border: none; border-radius: 6px;
-    background: transparent; color: rgba(255,255,255,0.75);
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    padding: 0; flex-shrink: 0;
-    transition: all 0.14s var(--pop);
-    position: relative;
-  }
-  .dash-btn:hover { background: #fff; color: var(--ink); transform: rotate(-6deg) scale(1.1); }
-  .dash-btn:active { transform: scale(0.9); }
-  .dash-btn svg { width: 14px; height: 14px; pointer-events: none; }
-  .icon-badge {
-    position: absolute;
-    top: -4px; right: -4px;
-    min-width: 13px; height: 13px;
-    border-radius: 4px;
-    background: var(--yellow);
-    border: 1.5px solid var(--ink);
-    color: var(--ink);
-    font-size: 7px; font-weight: 900;
-    display: flex; align-items: center; justify-content: center;
-    padding: 0 2px;
-    pointer-events: none;
-    animation: badgePop 0.3s var(--pop);
-  }
-  .icon-badge:empty, .icon-badge.hidden { display: none; }
-  @keyframes badgePop { 0% { transform: scale(0); } 100% { transform: scale(1); } }
+  .win-btn:hover { background: var(--bar-hover); color: var(--bar-ink); }
+  .win-btn:focus-visible { outline-color: var(--bar-ink); outline-offset: -2px; }
+  .win-btn svg { width: 16px; height: 16px; pointer-events: none; }
+  .refresh-btn.spinning svg { animation: spin 0.5s linear 2; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-  /* ---------- Pomodoro ring ---------- */
+  /* ---------- The answer ---------- */
+  .answer { padding: 8px 14px; font-size: 14px; color: var(--text-dim); flex-shrink: 0; }
+  .answer b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- Account board ---------- */
+  .accts {
+    margin: 0 10px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border: var(--bw) solid var(--ink);
+    border-radius: var(--r);
+    overflow: hidden;
+  }
+  .accts:empty { display: none; }
+  .acct {
+    display: grid;
+    grid-template-columns: 30px 180px 1fr 62px;
+    column-gap: 10px;
+    align-items: center;
+    min-height: 60px;
+    padding: 6px 8px;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .acct + .acct { border-top: 2px solid var(--ink); }
+  .acct:hover { background: var(--hover); }
+  .acct:focus-visible { outline-offset: -4px; }
+  .acct.active, .acct.active:hover { background: var(--yellow); color: var(--on-candy); }
+  /* Throttled by the API, not broken: the numbers stay, slightly faded. */
+  .acct.rate-limited .meters { opacity: 0.6; }
+  .bullet {
+    width: 26px; height: 26px; display: grid; place-items: center;
+    border: 2px solid var(--on-candy); border-radius: 7px;
+    font-weight: 900; font-size: 13px; color: var(--on-candy);
+  }
+  .b-0 { background: var(--green); }
+  .b-1 { background: #ffc900; }
+  .b-2 { background: #ff90e8; }
+  .b-3 { background: #ffffff; }
+  .who { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .name { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 800; min-width: 0; }
+  .name-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .name em {
+    flex-shrink: 0; font-style: normal; font-size: 11px; font-weight: 700;
+    padding: 1px 6px; border-radius: 5px;
+    background: var(--ink); color: var(--surface);
+  }
+  .acct.active .name em { background: var(--on-candy); color: #ffffff; }
+  .reset { font-size: 12px; line-height: 1.25; color: var(--text-dim); min-height: 15px; }
+  .acct.active .reset, .acct.active .sub, .acct.active .pct small { color: var(--on-yellow-dim); }
+  .reset strong { color: var(--crit-text); font-weight: 700; }
+  .acct.active .reset strong { color: #8f1218; }
+  .meters { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .sub { display: grid; grid-template-columns: minmax(62px, auto) 1fr; align-items: center; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+  .sub > span:first-child { padding-right: 4px; }
+  .pct { text-align: right; line-height: 1; white-space: nowrap; }
+  .pct b { font-size: 24px; font-weight: 900; }
+  .pct small { font-size: 12px; font-weight: 600; margin-left: 1px; color: var(--text-dim); }
+  .crit .pct b, .crit .pct small { color: var(--crit-text); }
+  .acct.active.crit .pct b, .acct.active.crit .pct small { color: #8f1218; }
+
+  /* The 12 cells, the same meter as on the phone and watch. */
+  .cells { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; height: 13px; }
+  .cells.s { height: 7px; gap: 2px; }
+  .cells u { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 4px; text-decoration: none; }
+  .cells.s u { border-width: 1px; border-radius: 2px; }
+  .cells u.on { background: var(--green); }
+  .cells.warm u.on { background: var(--yellow); }
+  .cells.hot u.on { background: var(--red); }
+  .acct.active .cells u { background: #ffffff; border-color: var(--on-candy); }
+  .acct.active .cells u.on { background: var(--on-candy); }
+  .acct.active .cells.hot u.on { background: #c8232b; }
+  .bar-pulse { animation: barPulse 0.5s ease-out; }
+  @keyframes barPulse { 0% { filter: brightness(1.35); } 100% { filter: brightness(1); } }
+
+  /* ---------- Extra usage: only when an account has it on ---------- */
+  .usage-rows { flex-shrink: 0; margin: 8px 10px 0; }
+  .extra-section { flex-shrink: 0; }
+  .extra-strip {
+    display: flex; align-items: center; gap: 9px;
+    background: var(--surface); border: 2px solid var(--ink);
+    border-radius: 9px; padding: 6px 11px; cursor: pointer;
+  }
+  .extra-strip:hover { background: var(--surface2); }
+  .extra-strip .es-ic { font-size: 13px; line-height: 1; flex-shrink: 0; }
+  .extra-strip .es-lbl { font-size: 12px; font-weight: 700; color: var(--text-dim); flex-shrink: 0; }
+  .extra-strip .es-amt { font-weight: 800; font-size: 13px; color: var(--ink); flex-shrink: 0; }
+  .extra-strip .es-track { flex: 1; min-width: 26px; height: 8px; border: 2px solid var(--ink); border-radius: 999px; background: var(--bar-bg); overflow: hidden; }
+  .extra-strip .es-fill { height: 100%; width: 0%; background: var(--green); transition: width 0.7s var(--pop); }
+  .extra-strip .es-fill.warn { background: var(--yellow); }
+  .extra-strip .es-fill.crit { background: var(--red); }
+  .extra-strip .es-pct { font-weight: 800; font-size: 12px; color: var(--ink); flex-shrink: 0; min-width: 30px; text-align: right; }
+  .usage-rows:not(:has(.extra-section:not([style*="none"]))) { display: none; }
+
+  /* ---------- Today ---------- */
+  .today { padding: 8px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+  .next-line { display: flex; gap: 4px; font-size: 13px; min-width: 0; color: var(--ink); }
+  .next-event { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+  .next-event:hover, .tasks-left:hover { text-decoration: underline; }
+  .next-event b { font-weight: 700; }
+  .next-event .more { color: var(--text-dim); font-weight: 600; }
+  .tasks-left { color: var(--text-dim); flex-shrink: 0; white-space: nowrap; }
+  .widget-habits { display: flex; align-items: center; gap: 6px; min-height: 26px; flex-wrap: wrap; }
+  .widget-habits-today { display: contents; }
+  .widget-habits-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 26px; padding: 0 10px;
+    border: 2px solid var(--ink); border-radius: 99px;
+    background: var(--surface); color: var(--ink);
+    font-size: 12px; font-weight: 600; white-space: nowrap;
+  }
+  button.widget-habits-badge:hover { background: var(--surface2); }
+  .widget-habits-badge.on { background: var(--green); color: var(--on-candy); }
+  .widget-habits-badge.auto { cursor: default; }
+  .widget-habits-ring {
+    width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+    border: 1.5px solid currentColor;
+    background: conic-gradient(currentColor var(--p, 0%), transparent 0);
+  }
+  .habits-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .relax-meta { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+  .relax-meta:empty { display: none; }
+  .relax-now-btn { height: 26px; padding: 0 8px; font-size: 12px; font-weight: 600; color: var(--text-dim); border-radius: 99px; white-space: nowrap; }
+  .relax-now-btn:hover { color: var(--ink); background: var(--hover); }
+
+  /* ---------- Focus timer ---------- */
   .pomo-ring-wrap {
     position: relative;
-    width: 22px; height: 22px;
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 26px; padding: 0 6px;
+    border-radius: 99px;
     cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim);
+    font-size: 12px; font-weight: 600; white-space: nowrap;
   }
-  .pomo-ring-svg { width: 22px; height: 22px; transform: rotate(-90deg); pointer-events: none; }
-  .pomo-ring-bg { fill: none; stroke: rgba(255,255,255,0.25); stroke-width: 3; }
-  .pomo-ring-fill { fill: none; stroke: var(--green); stroke-width: 3.5; stroke-linecap: butt; transition: stroke-dashoffset 1s linear; }
-  .pomo-ring-fill.break { stroke: var(--yellow); }
-  .pomo-ring-fill.idle { stroke: rgba(255,255,255,0.4); stroke-width: 2.5; }
+  .pomo-ring-wrap:hover { color: var(--ink); background: var(--hover); }
+  .pomo-ring-svg { width: 14px; height: 14px; transform: rotate(-90deg); pointer-events: none; }
+  .pomo-ring-bg { fill: none; stroke: currentColor; opacity: 0.25; stroke-width: 3; }
+  .pomo-ring-fill { fill: none; stroke: var(--green); stroke-width: 4; stroke-linecap: butt; transition: stroke-dashoffset 1s linear; }
+  .pomo-ring-fill.break { stroke: #c78d00; }
+  .pomo-ring-fill.idle { stroke: currentColor; stroke-width: 3; }
   .pomo-ring-fill.running { stroke: var(--green); }
-  .pomo-ring-text {
-    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 7px; font-weight: 900; color: rgba(255,255,255,0.8);
-    font-family: var(--mono);
-    pointer-events: none;
-  }
-  .pomo-ring-text.active { color: #fff; }
-  .pomo-ring-text.break { color: var(--yellow); }
+  .pomo-ring-text { pointer-events: none; }
+  .pomo-ring-text.active { color: var(--ink); }
+  .pomo-ring-text.break { color: var(--ink); }
   .pomo-tooltip {
     display: none;
     position: absolute;
-    top: 32px; left: 50%; transform: translateX(-50%);
+    bottom: 32px; right: 0;
     background: var(--surface);
     border: var(--bw) solid var(--ink);
     border-radius: var(--r-sm);
@@ -178,29 +265,27 @@
     z-index: 100;
     min-width: 134px;
     color: var(--ink);
+    cursor: default;
   }
   .pomo-tooltip.open { display: block; animation: tooltipIn 0.18s var(--pop); }
   @keyframes tooltipIn {
-    0% { opacity: 0; transform: translateX(-50%) translateY(-6px) scale(0.9); }
-    100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+    0% { opacity: 0; transform: translateY(6px) scale(0.9); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
   }
-  .pomo-tooltip-time { font-size: 22px; font-weight: 900; text-align: center; font-family: var(--mono); color: var(--ink); letter-spacing: 0; }
+  .pomo-tooltip-time { font-size: 22px; font-weight: 900; text-align: center; color: var(--ink); }
   .pomo-tooltip-time.active { color: var(--green); }
   .pomo-tooltip-time.break { color: #c78d00; }
-  .pomo-tooltip-label { font-size: 8px; font-weight: 900; text-align: center; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1.4px; margin-top: 2px; margin-bottom: 8px; }
+  .pomo-tooltip-label { font-size: 11px; font-weight: 700; text-align: center; color: var(--text-dim); margin-top: 2px; margin-bottom: 8px; }
   .pomo-tooltip-btns { display: flex; gap: 6px; }
   .pomo-tooltip-btn {
-    flex: 1; padding: 6px 0; font-size: 9px; font-weight: 900;
+    flex: 1; padding: 6px 0; font-size: 12px; font-weight: 800;
     border: 2px solid var(--ink); border-radius: 6px;
     background: var(--surface); color: var(--ink);
-    cursor: pointer; font-family: inherit; text-align: center;
-    box-shadow: var(--shadow-sm);
-    transition: all 0.12s var(--pop);
-    text-transform: uppercase; letter-spacing: 0.6px;
+    text-align: center;
   }
-  .pomo-tooltip-btn.primary { background: var(--green); color: #fff; }
-  .pomo-tooltip-btn:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
-  .pomo-tooltip-btn:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
+  .pomo-tooltip-btn.primary { background: var(--green); color: var(--on-candy); }
+  .pomo-tooltip-btn:hover { background: var(--surface2); }
+  .pomo-tooltip-btn.primary:hover { background: var(--green); filter: brightness(1.08); }
 
   /* ---------- Pomodoro celebration ---------- */
   .pomo-celebration {
@@ -209,8 +294,8 @@
     top: 0; left: 0; right: 0;
     padding: 12px 14px;
     background: var(--green);
-    color: #fff;
-    font-size: 12px;
+    color: var(--on-candy);
+    font-size: 13px;
     font-weight: 900;
     text-align: center;
     z-index: 200;
@@ -219,448 +304,74 @@
   }
   .pomo-celebration.visible { display: block; animation: celebSlide 0.4s var(--pop); }
   @keyframes celebSlide { 0% { transform: translateY(-100%); } 100% { transform: translateY(0); } }
-  .pomo-celebration .celeb-text { position: relative; z-index: 2; text-transform: uppercase; letter-spacing: 0.5px; }
-  .pomo-celebration .celeb-sub { font-size: 9px; font-weight: 700; opacity: 0.9; margin-top: 2px; }
+  .pomo-celebration .celeb-text { position: relative; z-index: 2; }
+  .pomo-celebration .celeb-sub { font-size: 12px; font-weight: 700; margin-top: 2px; }
   .confetti-container { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; overflow: hidden; }
-  .confetti { position: absolute; width: 6px; height: 6px; border: 1.5px solid var(--ink); top: -10px; animation: confettiFall 2s ease-in forwards; }
+  .confetti { position: absolute; width: 6px; height: 6px; border: 1.5px solid var(--on-candy); top: -10px; animation: confettiFall 2s ease-in forwards; }
   @keyframes confettiFall {
     0% { transform: translateY(0) rotate(0deg); opacity: 1; }
     100% { transform: translateY(120px) rotate(720deg); opacity: 0; }
   }
-  .bar-pulse { animation: barPulse 0.5s ease-out; }
-  @keyframes barPulse { 0% { filter: brightness(1.35); } 100% { filter: brightness(1); } }
 
-  /* ---------- Habits: pink sticker card ---------- */
-  .widget-habits {
-    background: var(--accent);
-    border: var(--bw) solid var(--ink);
-    border-radius: var(--r);
-    box-shadow: var(--shadow);
-    padding: 8px 12px;
+  /* ---------- Dock ---------- */
+  .dock {
+    display: flex;
+    height: 48px;
     flex-shrink: 0;
-    cursor: pointer;
-    transition: all 0.14s var(--pop);
-  }
-  .widget-habits:hover { transform: translate(-1px,-1px); box-shadow: 5.5px 5.5px 0 var(--ink); }
-  .widget-habits:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
-  .widget-habits-row { display: flex; align-items: center; gap: 8px; }
-  .widget-habits-row + .widget-habits-row { margin-top: 8px; }
-  .widget-habits-label {
-    font-size: 9px; font-weight: 900;
-    text-transform: uppercase; letter-spacing: 1.6px;
-    color: var(--ink);
-  }
-  .widget-habits-today { display: inline-flex; gap: 6px; flex-wrap: wrap; }
-  .widget-habits-badge {
-    display: inline-flex; align-items: center; gap: 5px;
-    padding: 5px 10px;
-    border: 2px solid var(--ink);
-    border-radius: var(--r-sm);
-    font-size: 10px; font-weight: 900;
-    text-transform: uppercase; letter-spacing: 0.4px;
+    border-top: var(--bw) solid var(--ink);
     background: var(--surface);
-    color: var(--ink);
-    box-shadow: var(--shadow-sm);
-    cursor: pointer;
-    user-select: none;
-    transition: all 0.12s var(--pop);
-    line-height: 1;
+    margin-top: auto;
   }
-  .widget-habits-badge:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
-  .widget-habits-badge:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
-  .widget-habits-badge.on { background: var(--yellow); }
-  .widget-habits-checkbox {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 13px; height: 13px;
-    border-radius: 3px;
-    border: 2px solid var(--ink);
-    font-size: 10px; font-weight: 900;
-    line-height: 1;
-    background: var(--surface);
+  .dock button {
+    flex: 1; min-width: 0;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    font-size: 12.5px; font-weight: 800; color: var(--ink);
   }
-  .widget-habits-badge.on .widget-habits-checkbox { background: var(--ink); color: var(--yellow); }
-  /* Relax ticks itself at 4/4: a ring that fills with the day's breaks, never pressed. */
-  .widget-habits-badge.auto { cursor: default; }
-  .widget-habits-badge.auto:hover,
-  .widget-habits-badge.auto:active { transform: none; box-shadow: var(--shadow-sm); }
-  .widget-habits:has(.widget-habits-badge.auto:active) { transform: none; box-shadow: var(--shadow); }
-  .widget-habits-ring { border-radius: 50%; background: conic-gradient(var(--ink) var(--p, 0%), var(--surface) 0); }
-  .widget-habits-todayhint {
-    font-size: 8px; font-weight: 900;
-    text-transform: uppercase; letter-spacing: 1.2px;
-    color: var(--ink); opacity: 0.55;
-    margin-left: auto;
-  }
-
-  /* Relax meter: the habits card's second line, built from the widget's own
-     parts - the usage rows' block segments and the pomodoro's button. */
-  .widget-relax-row { min-width: 0; }
-  .relax-segs { display: inline-flex; gap: 3px; width: 62px; flex-shrink: 0; }
-  .relax-segs .seg { height: 11px; }
-  .relax-meta {
-    font-family: var(--mono); font-size: 9px; font-weight: 900;
-    text-transform: uppercase; letter-spacing: 0.4px;
-    font-variant-numeric: tabular-nums;
-    color: var(--ink);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    min-width: 0;
-  }
-  .relax-now-btn {
-    margin-left: auto; flex-shrink: 0;
-    padding: 5px 9px; font-size: 9px; font-weight: 900;
-    border: 2px solid var(--ink); border-radius: 6px;
-    background: var(--green); color: #fff;
-    cursor: pointer; font-family: inherit; text-align: center;
-    box-shadow: var(--shadow-sm);
-    transition: all 0.12s var(--pop);
-    text-transform: uppercase; letter-spacing: 0.6px;
-    line-height: 1;
-  }
-  .relax-now-btn:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
-  .relax-now-btn:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
-  .relax-now-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-  .relax-now-btn[hidden] { display: none; }
-
-  /* ---------- Usage rows: white cards + block meters ---------- */
-  /* ---------- Account tabs (multi-account) ---------- */
-  .account-tabs {
-    flex: 0 0 auto;
-    display: none;
-    gap: 8px;
-  }
-  .account-tabs.visible { display: flex; }
-  .account-tab {
-    position: relative;
-    flex: 1;
-    min-width: 0;
-    padding: 6px 4px;
-    background: var(--surface);
-    color: var(--ink);
-    border: 2px solid var(--ink);
-    border-radius: 8px;
-    box-shadow: 2.5px 2.5px 0 var(--ink);
-    font-size: 9px;
-    font-weight: 900;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    text-align: center;
-    cursor: pointer;
-    transition: transform 0.14s var(--pop), box-shadow 0.14s var(--pop), background 0.14s var(--pop);
-  }
-  .account-tab:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
-  .account-tab.active { background: var(--yellow); }
-  /* The label clips, not the tab — an overflow:hidden tab would eat the dot. */
-  .account-tab-label {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    min-width: 0;
-  }
-  .account-tab-name {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  /* Claude Code is currently running on this account (from active-account.json) */
-  .account-tab-cli {
-    flex: 0 0 auto;
-    background: var(--ink);
-    color: var(--surface);
-    border-radius: 3px;
-    padding: 1px 3px;
-    font-size: 7px;
-    letter-spacing: 0.5px;
-  }
-  .account-tab-dot {
-    position: absolute;
-    top: -5px;
-    right: -5px;
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    border: 2px solid var(--ink);
-    background: var(--text-dim);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 6px;
-    line-height: 1;
-    color: #fff;
-  }
-  .account-tab-dot.ok { background: var(--green); }
-  .account-tab-dot.warn { background: var(--yellow); }
-  .account-tab-dot.crit { background: var(--red); }
-  .account-tab-dot.alert { background: var(--red); }
-  .account-tab-dot.limited { background: var(--yellow); }
-  /* Throttled by the API, not broken: dashed edge, cached numbers stay put. */
-  .account-tab.rate-limited { border-style: dashed; }
-  /* Second line: when this login runs out. The lead-in gives way first. */
-  .account-tab-login {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 3px;
-    margin-top: 3px;
-    min-width: 0;
-    font-family: var(--mono);
-    font-size: 7.5px;
-    font-weight: 700;
-    letter-spacing: 0.3px;
-    line-height: 1.2;
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
-  .account-tab.active .account-tab-login { color: var(--ink); }
-  .account-tab-login-pre {
-    flex: 0 1 auto;
-    min-width: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .widget.narrow .account-tab-login-pre { display: none; }
-  .account-tab-login-val { flex: 0 0 auto; white-space: nowrap; }
-  .account-tab-login-val.warn,
-  .account-tab-login-val.out {
-    padding: 0 3px;
-    border: 1.5px solid var(--ink);
-    border-radius: 3px;
-    font-weight: 900;
-  }
-  .account-tab-login-val.warn { background: var(--yellow); color: var(--ink); }
-  .account-tab-login-val.out { background: var(--red); color: #fff; }
-
-  /* The active account's login line - amber/red, or always with one account */
-  .login-strip {
-    display: none;
-    align-items: center;
-    gap: 7px;
-    flex-shrink: 0;
-    padding: 6px 10px;
-    background: var(--surface);
-    border: 2px solid var(--ink);
-    border-radius: var(--r-sm);
-    box-shadow: var(--shadow-sm);
-  }
-  .login-strip.visible { display: flex; }
-  .login-strip.warn { background: #fff8e0; }
-  .login-strip.out { background: #ffecec; }
-  .login-strip-dot {
-    width: 7px; height: 7px; flex-shrink: 0;
-    border-radius: 2px;
-    border: 1.5px solid var(--ink);
-    background: var(--green);
-  }
-  .login-strip.warn .login-strip-dot { background: var(--yellow); }
-  .login-strip.out .login-strip-dot { background: var(--red); }
-  .login-strip-text {
-    min-width: 0;
-    font-family: var(--mono);
-    font-size: 9.5px;
-    font-weight: 800;
-    color: var(--ink);
-    line-height: 1.35;
-    overflow-wrap: anywhere;
-    font-variant-numeric: tabular-nums;
-  }
-  .widget.very-tight .login-strip { padding: 4px 9px; }
-
-  .usage-rows {
-    flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .widget.tight .usage-rows { gap: 7px; }
-  .usage-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .widget.tight .usage-section { gap: 7px; }
-  /* Natural-height cards — never squeeze content into clipping */
-  .usage-row {
-    flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    padding: 8px 12px;
-    background: var(--surface);
-    border: var(--bw) solid var(--ink);
-    border-radius: var(--r);
-    box-shadow: var(--shadow);
-    transition: all 0.14s var(--pop);
-    overflow: hidden;
-  }
-  .usage-row:hover { transform: translate(-1px,-1px); box-shadow: 5.5px 5.5px 0 var(--ink); }
-  .usage-row:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
-  .usage-row.state-warning { background: #fff8e0; }
-  .usage-row.state-danger { background: #ffecec; }
-  .usage-label {
-    font-size: 10px; font-weight: 900;
-    margin-bottom: 6px;
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    line-height: 1.1;
-  }
-  .usage-label-text {
-    color: var(--ink);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    font-size: 9px;
-  }
-  .bar-pct {
-    font-size: 16px; font-weight: 900;
-    font-family: var(--mono);
-    min-width: 34px; text-align: right;
-    color: var(--ink) !important;
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.5px;
-  }
-  .bar-container { display: flex; align-items: center; }
-  /* Legacy track/fill kept as fallback (renderer now builds .segs) */
-  .bar-track { flex: 1; height: 12px; background: var(--surface2); border: 2px solid var(--ink); border-radius: 5px; overflow: hidden; }
-  .bar-fill { height: 100%; background: var(--green); min-width: 2px; transition: width 0.6s var(--pop); }
-  .bar-fill.warning { background: var(--yellow); }
-  .bar-fill.danger { background: var(--red); }
-  /* Block segments */
-  .segs { display: flex; gap: 4px; flex: 1; }
-  .seg {
-    flex: 1; height: 12px;
-    border: 2px solid var(--ink);
-    border-radius: 4px;
-    background: var(--surface2);
-    transition: background 0.25s ease;
-  }
-  .seg.f { background: var(--green); }
-  .seg.fy { background: var(--yellow); }
-  .seg.fr { background: var(--red); }
-  .reset-info {
-    font-size: 8.5px; color: var(--text-dim);
-    margin-top: 5px;
-    font-family: var(--mono);
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-  }
-  .widget.tight .reset-info { display: none; }
-  .widget.tight .usage-row { padding: 7px 11px; }
-  .widget.tight .usage-label { margin-bottom: 5px; }
-  .widget.tight .seg { height: 10px; }
-  .widget.very-tight .usage-row { padding: 5px 10px; box-shadow: var(--shadow-sm); }
-  .widget.very-tight .seg { height: 8px; border-width: 1.5px; }
-  .widget.very-tight .bar-pct { font-size: 13px; }
-  .extra-section { flex-shrink: 0; }
-  /* Extra usage — inline strip (spend this month) */
-  .extra-strip {
-    display: flex; align-items: center; gap: 9px;
-    background: var(--surface); border: 2px solid var(--ink);
-    border-radius: 9px; box-shadow: var(--shadow-sm);
-    padding: 6px 11px; cursor: pointer;
-    transition: transform 0.12s var(--pop), box-shadow 0.12s var(--pop);
-  }
-  .extra-strip:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
-  .extra-strip:active { transform: translate(1px,1px); box-shadow: 1px 1px 0 var(--ink); }
-  .extra-strip .es-ic { font-size: 13px; line-height: 1; flex-shrink: 0; }
-  .extra-strip .es-lbl { font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); flex-shrink: 0; }
-  .extra-strip .es-amt { font-family: var(--mono); font-weight: 900; font-size: 13px; color: var(--ink); flex-shrink: 0; font-variant-numeric: tabular-nums; }
-  .extra-strip .es-track { flex: 1; min-width: 26px; height: 8px; border: 2px solid var(--ink); border-radius: 999px; background: var(--bar-bg); overflow: hidden; }
-  .extra-strip .es-fill { height: 100%; width: 0%; background: var(--teal); border-right: 2px solid var(--ink); transition: width 0.7s var(--pop); }
-  .extra-strip .es-fill.warn { background: var(--yellow); }
-  .extra-strip .es-fill.crit { background: var(--red); }
-  .extra-strip .es-pct { font-family: var(--mono); font-weight: 900; font-size: 11px; color: var(--ink); flex-shrink: 0; min-width: 30px; text-align: right; }
-  .widget.tight .extra-strip { padding: 5px 9px; }
-  .widget.very-tight .extra-strip .es-lbl { display: none; }
-
-  /* ---------- Calendar card ---------- */
-  .widget-calendar {
-    display: none;
-    padding: 10px 13px;
-    background: var(--surface);
-    border: var(--bw) solid var(--ink);
-    border-radius: var(--r);
-    box-shadow: var(--shadow);
-    /* Flexible region: absorbs leftover height, scrolls its events if short */
-    flex: 1 1 auto;
-    min-height: 56px;
-    overflow-y: auto;
-  }
-  .widget-calendar.visible { display: block; }
-  .widget.very-tight .widget-calendar { display: none; }
-  .widget-calendar-header {
-    display: inline-block;
-    font-size: 8px; font-weight: 900; letter-spacing: 1.6px;
-    text-transform: uppercase;
-    color: #fff; background: var(--ink);
-    padding: 3px 8px; border-radius: 4px;
-    margin-bottom: 6px;
-  }
-  .widget-cal-event {
-    display: flex; align-items: center; gap: 8px;
-    padding: 3px 2px; font-size: 11px; color: var(--ink);
-    font-weight: 600;
-    border-radius: 6px;
-    transition: background 0.12s ease;
-  }
-  .widget-cal-event:hover { background: var(--surface2); }
-  .widget-cal-dot { width: 7px; height: 7px; border-radius: 2px; border: 1.5px solid var(--ink); flex-shrink: 0; }
-  .widget-cal-time {
-    font-size: 8.5px; color: var(--ink); min-width: 38px; flex-shrink: 0;
-    font-family: var(--mono); font-weight: 900;
-    text-transform: uppercase;
-  }
-  .widget-cal-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dock button + button { border-left: 2px solid var(--ink); }
+  .dock button:hover { background: var(--surface2); }
+  .dock button:focus-visible { outline-offset: -4px; }
+  .dock .primary { background: var(--accent); color: var(--on-candy); }
+  .dock .primary:hover { background: var(--accent); filter: brightness(1.05); }
+  .dock svg { width: 18px; height: 18px; flex-shrink: 0; pointer-events: none; }
 
   /* ---------- Banners ---------- */
   .overdue-banner {
     display: none;
+    margin: 0 10px 8px;
     padding: 8px 12px;
     background: var(--red);
-    border: var(--bw) solid var(--ink);
+    border: 2px solid var(--ink);
     border-radius: var(--r-sm);
-    box-shadow: var(--shadow-sm);
     flex-shrink: 0;
     cursor: pointer;
-    color: #fff;
-    transition: all 0.14s var(--pop);
+    color: var(--on-candy);
   }
-  .overdue-banner:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
   .overdue-banner.visible { display: flex; align-items: center; gap: 8px; animation: bannerIn 0.3s var(--pop); }
   @keyframes bannerIn { 0% { opacity: 0; transform: translateY(-8px) scale(0.96); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
   .overdue-banner-icon { font-size: 13px; flex-shrink: 0; }
-  .overdue-banner-text { flex: 1; font-size: 10px; font-weight: 900; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .overdue-banner-time { font-size: 9px; color: rgba(255,255,255,0.8); font-family: var(--mono); font-weight: 700; flex-shrink: 0; }
-  .overdue-banner-close {
-    font-size: 10px; color: #fff; background: none; border: none;
-    cursor: pointer; padding: 2px 4px; border-radius: 3px; flex-shrink: 0;
-    font-weight: 900;
-  }
-  .overdue-banner-close:hover { background: rgba(0,0,0,0.25); }
+  .overdue-banner-text { flex: 1; font-size: 13px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .overdue-banner-time { font-size: 12px; font-weight: 700; flex-shrink: 0; }
+  .overdue-banner-close { font-size: 12px; padding: 2px 4px; border-radius: 3px; flex-shrink: 0; font-weight: 900; }
+  .overdue-banner-close:hover { background: rgba(0,0,0,0.2); }
 
   .claude-status-banner {
     display: none; flex-direction: column; gap: 3px;
+    margin: 0 10px 8px;
     padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer;
-    border: var(--bw) solid var(--ink);
-    box-shadow: var(--shadow-sm);
+    border: 2px solid var(--ink);
     background: var(--surface);
-    transition: all 0.14s var(--pop);
     flex-shrink: 0;
   }
-  .claude-status-banner:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
   .claude-status-banner.minor { background: #fff8e0; }
   .claude-status-banner.major, .claude-status-banner.critical { background: #ffecec; }
   .claude-status-banner.visible { display: flex; animation: bannerIn 0.3s var(--pop); }
   .claude-status-banner-row1 { display: flex; align-items: center; gap: 6px; }
-  .claude-status-banner-dot { width: 7px; height: 7px; border-radius: 2px; border: 1.5px solid var(--ink); flex-shrink: 0; animation: pulse 2s infinite; }
+  .claude-status-banner-dot { width: 8px; height: 8px; border-radius: 2px; border: 1.5px solid #111; flex-shrink: 0; }
   .claude-status-banner.minor .claude-status-banner-dot { background: var(--yellow); }
   .claude-status-banner.major .claude-status-banner-dot,
   .claude-status-banner.critical .claude-status-banner-dot { background: var(--red); }
-  .claude-status-banner-name { font-size: 11px; font-weight: 900; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
-  .claude-status-banner-row2 { font-size: 9.5px; color: var(--text-dim); padding-left: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  .claude-status-banner-name { font-size: 13px; font-weight: 800; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #111; }
+  .claude-status-banner-row2 { font-size: 12px; color: #4f4a3f; padding-left: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 
   /* ---------- Setup overlay ---------- */
   .setup-overlay {
@@ -674,96 +385,42 @@
     min-height: 0;
   }
   .setup-overlay.visible { display: flex; }
+  .widget.setup .answer, .widget.setup .accts, .widget.setup .usage-rows, .widget.setup .today, .widget.setup .dock { display: none; }
   .setup-overlay .setup-icon { font-size: 34px; margin-bottom: 12px; }
-  .setup-overlay .setup-title { font-size: 15px; font-weight: 900; margin-bottom: 6px; color: var(--ink); text-transform: uppercase; letter-spacing: 0.5px; }
-  .setup-overlay .setup-desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.6; margin-bottom: 16px; font-weight: 600; }
-  .setup-overlay .setup-steps { text-align: left; font-size: 10px; color: var(--text-dim); line-height: 2; margin-bottom: 14px; }
-  .setup-overlay .setup-steps .step-num {
-    display: inline-block; width: 17px; height: 17px; border-radius: 5px;
-    background: var(--yellow); border: 2px solid var(--ink); color: var(--ink);
-    font-size: 9px; font-weight: 900; text-align: center; line-height: 14px; margin-right: 5px;
-  }
+  .setup-overlay .setup-title { font-size: 16px; font-weight: 900; margin-bottom: 6px; color: var(--ink); }
+  .setup-overlay .setup-desc { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 16px; font-weight: 600; }
   .setup-overlay .setup-btn {
-    padding: 10px 28px; font-size: 12px; font-weight: 900; border-radius: var(--r-sm);
+    padding: 10px 28px; font-size: 13px; font-weight: 900; border-radius: var(--r-sm);
     border: var(--bw) solid var(--ink);
-    background: var(--green); color: #fff; cursor: pointer;
+    background: var(--green); color: var(--on-candy);
     box-shadow: var(--shadow);
-    transition: all 0.14s var(--pop);
     margin-bottom: 12px;
-    text-transform: uppercase; letter-spacing: 1px;
-    font-family: inherit;
   }
-  .setup-overlay .setup-btn:hover { transform: translate(-1px,-1px); box-shadow: 5.5px 5.5px 0 var(--ink); }
-  .setup-overlay .setup-btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
-  .setup-overlay .setup-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: var(--shadow); }
-  .setup-overlay .setup-install-link {
-    font-size: 9.5px; color: var(--ink); text-decoration: underline; cursor: pointer;
-    font-weight: 800; background: none; border: none; font-family: inherit;
-  }
-  .setup-overlay .setup-install-link:hover { color: var(--green); }
-  .setup-overlay .setup-waiting { font-size: 9.5px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; font-weight: 700; }
-  .setup-overlay .setup-waiting .dot { width: 6px; height: 6px; border-radius: 2px; border: 1.5px solid var(--ink); background: var(--yellow); animation: pulse 1.5s infinite; }
+  .setup-overlay .setup-btn:hover { filter: brightness(1.08); }
+  .setup-overlay .setup-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .setup-overlay .setup-install-link { font-size: 12px; color: var(--ink); text-decoration: underline; font-weight: 700; }
+  .setup-overlay .setup-waiting { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; font-weight: 700; }
+  .setup-overlay .setup-waiting .dot { display: block; width: 7px; height: 7px; border-radius: 2px; border: 1.5px solid var(--ink); background: var(--yellow); }
 
-  /* ---------- Footer ---------- */
-  .footer {
-    margin-top: auto;
-    display: flex; justify-content: space-between; align-items: center;
-    flex-shrink: 0;
-    padding: 2px 2px 0;
-  }
-  .footer-left { display: flex; align-items: center; gap: 7px; }
-  .footer-hint {
-    font-size: 8.5px; color: var(--text-dim);
-    font-family: var(--mono);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    opacity: 0;
-    transition: opacity 0.2s;
-  }
-  .footer-hint.syncing { opacity: 0.85; }
-  .footer-hint.stale { color: #a07800; opacity: 1; }
-  .footer-hint.error { color: var(--red); opacity: 1; }
-  .refresh-btn {
-    width: 22px; height: 22px;
-    border: 2px solid var(--ink); border-radius: 6px;
-    background: var(--surface); color: var(--ink);
-    cursor: pointer;
-    font-size: 12px; font-weight: 900;
-    display: flex; align-items: center; justify-content: center;
-    box-shadow: var(--shadow-sm);
-    transition: all 0.12s var(--pop);
-    padding: 0;
-  }
-  .refresh-btn:hover { transform: translate(-1px,-1px) rotate(45deg); box-shadow: 3.5px 3.5px 0 var(--ink); }
-  .refresh-btn:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
-  .refresh-btn.spinning { animation: spin 0.8s linear infinite; }
-  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  /* ---------- Update button: only when there is one ---------- */
+  .footer { flex-shrink: 0; display: flex; justify-content: center; }
   .footer-update-btn {
     display: none;
+    margin-bottom: 8px;
     padding: 5px 12px;
-    font-size: 9px;
-    font-weight: 900;
-    letter-spacing: 0.6px;
+    font-size: 12px;
+    font-weight: 800;
     border: 2px solid var(--ink);
     border-radius: 6px;
     background: var(--accent);
-    color: var(--ink);
-    cursor: pointer;
-    box-shadow: var(--shadow-sm);
-    transition: all 0.14s var(--pop);
-    font-family: inherit;
-    text-transform: uppercase;
+    color: var(--on-candy);
   }
-  .footer-update-btn:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
-  .footer-update-btn:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
-  .footer-update-btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+  .footer-update-btn:disabled { opacity: 0.55; cursor: not-allowed; }
   .footer-update-btn.visible { display: inline-block; }
   .footer-update-btn.downloading {
     background: linear-gradient(90deg, var(--green), var(--green)) no-repeat left, var(--surface);
     background-size: 0% 100%, 100% 100%;
     transition: background-size 0.4s ease;
-    color: var(--ink);
   }
 
   /* ---------- Effects ---------- */
@@ -783,20 +440,23 @@
     100% { opacity: 0; transform: translateX(24px) scale(0.96); }
   }
 
-  /* Compact mode */
-  body.compact .widget { padding: 8px 10px; gap: 6px; }
-  body.compact .header { padding: 7px 10px; }
-  body.compact .usage-row { padding: 6px 10px; box-shadow: var(--shadow-sm); }
-  body.compact .usage-label { font-size: 9px; margin-bottom: 4px; }
-  body.compact .seg { height: 9px; border-width: 1.5px; }
-  body.compact .bar-pct { font-size: 12px; }
-  body.compact .reset-info { display: none; }
-  body.compact .widget-habits { padding: 7px 10px; box-shadow: var(--shadow-sm); }
+  /* Compact mode: double-click the title bar. The meters alone. */
+  body.compact .answer, body.compact .sub, body.compact .today { display: none; }
+  body.compact .accts { margin-top: 8px; margin-bottom: 8px; }
+  body.compact .acct { min-height: 44px; }
+
+  /* Narrow window: meters drop under the name, and the dock keeps its icons. */
+  @media (max-width: 470px) {
+    .acct { grid-template-columns: 30px 1fr 54px; row-gap: 5px; padding-block: 8px; }
+    .meters { grid-column: 1 / -1; grid-row: 2; }
+    .dock button { font-size: 0; gap: 0; }
+  }
 
   @media (prefers-reduced-motion: reduce) {
     * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
   }
 
+  ::selection { background: var(--accent); color: #111; }
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--ink); border-radius: 3px; }
@@ -812,45 +472,19 @@
 
 <div class="widget">
   <div class="header">
-    <div class="header-left">
-      <span class="dot stale" id="statusDot"></span>
-      <span class="title">Claude Meter</span>
-      <span class="streak-badge" id="streakBadge" style="display:none;"><span class="streak-fire">&#x1F525;</span><span id="streakCount">0</span></span>
-      <span class="sync-status" id="syncStatus"></span>
-    </div>
-    <div class="header-icons">
-      <button class="dash-btn" id="dashBtn" title="Dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="square"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg></button>
-      <button class="dash-btn" id="tasksBtn" title="Tasks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="square"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 12.5l3 3 5.5-6.5"/></svg><span class="icon-badge hidden" id="tasksBadge"></span></button>
-      <button class="dash-btn" id="notesBtn" title="Notes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="square"><path d="M4 20.5l1.2-4.8L16.5 4.4a2.1 2.1 0 0 1 3 0l.6.6a2.1 2.1 0 0 1 0 3L8.8 19.3z"/><path d="M13.5 7.5l3.5 3.5"/></svg></button>
-      <div class="pomo-ring-wrap" id="pomoRing" title="Pomodoro">
-        <svg class="pomo-ring-svg" viewBox="0 0 28 28">
-          <circle class="pomo-ring-bg" cx="14" cy="14" r="11"/>
-          <circle class="pomo-ring-fill idle" id="pomoRingFill" cx="14" cy="14" r="11" stroke-dasharray="69.12" stroke-dashoffset="0"/>
-        </svg>
-        <div class="pomo-ring-text" id="pomoRingText">25</div>
-        <div class="pomo-tooltip" id="pomoTooltip">
-          <div class="pomo-tooltip-time" id="pomoTooltipTime">25:00</div>
-          <div class="pomo-tooltip-label" id="pomoTooltipLabel">Focus</div>
-          <div class="pomo-tooltip-btns">
-            <button class="pomo-tooltip-btn primary" id="pomoStartBtn">Start</button>
-            <button class="pomo-tooltip-btn" id="pomoResetBtn">Reset</button>
-          </div>
-        </div>
-      </div>
-      <button class="dash-btn" id="calendarBtn" title="Calendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="square"><rect x="3" y="5" width="18" height="16" rx="3"/><line x1="16.5" y1="2.5" x2="16.5" y2="7"/><line x1="7.5" y1="2.5" x2="7.5" y2="7"/><line x1="3" y1="10.5" x2="21" y2="10.5"/><rect x="7" y="14" width="4" height="3.5" rx="1" fill="currentColor" stroke="none"/></svg><span class="icon-badge hidden" id="calBadge"></span></button>
-    </div>
+    <span class="dot stale" id="statusDot"></span>
+    <span class="title">Claude Meter</span>
+    <span class="footer-hint" id="footerHint" role="status">Syncing...</span>
+    <span class="streak-badge" id="streakBadge" style="display:none;"><span class="streak-fire">&#x1F525;</span><span id="streakCount">0</span></span>
+    <span class="sync-status" id="syncStatus"></span>
     <div class="window-controls">
-      <button class="win-btn minimize" id="minimizeBtn" title="Minimize widget"></button>
-      <button class="win-btn close" id="closeBtn" title="Hide all panels"></button>
+      <button class="win-btn refresh-btn" id="refreshBtn" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6.3M20 5v6h-6"/></svg></button>
+      <button class="win-btn minimize" id="minimizeBtn" title="Minimize widget" aria-label="Minimize widget"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 12h12"/></svg></button>
+      <button class="win-btn close" id="closeBtn" title="Hide all panels" aria-label="Hide all panels"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
     </div>
   </div>
 
-  <div class="account-tabs" id="accountTabs"></div>
-
-  <div class="login-strip" id="loginStrip">
-    <span class="login-strip-dot" aria-hidden="true"></span>
-    <span class="login-strip-text" id="loginStripText"></span>
-  </div>
+  <p class="answer" id="answerLine" hidden></p>
 
   <div class="setup-overlay" id="setupOverlay">
     <div class="setup-icon">&#x1F50C;</div>
@@ -868,7 +502,7 @@
     <span class="overdue-banner-icon">&#x26A0;</span>
     <span class="overdue-banner-text" id="overdueBannerText"></span>
     <span class="overdue-banner-time" id="overdueBannerTime"></span>
-    <button class="overdue-banner-close" id="overdueBannerClose">&#x2715;</button>
+    <button class="overdue-banner-close" id="overdueBannerClose" aria-label="Dismiss">&#x2715;</button>
   </div>
 
   <div class="claude-status-banner" id="claudeStatusBanner" title="Click to open status.claude.com">
@@ -879,55 +513,63 @@
     <div class="claude-status-banner-row2" id="claudeStatusMeta"></div>
   </div>
 
-  <div class="widget-habits" id="widgetHabits" style="display:none;" title="Open Habits dashboard">
-    <div class="widget-habits-row" id="widgetHabitsToday">
-      <span class="widget-habits-label">Habits</span>
-      <span class="widget-habits-today" id="widgetHabitsTodayBadges"></span>
-      <span class="widget-habits-todayhint">today</span>
-    </div>
-    <div class="widget-habits-row widget-relax-row" id="widgetRelax" style="display:none;">
-      <span class="widget-habits-label">Relax</span>
-      <span class="relax-segs" id="relaxSegs" aria-hidden="true"></span>
-      <span class="relax-meta" id="relaxMeta"></span>
-      <button class="relax-now-btn" id="relaxNowBtn" title="Start a Relax break now">Relax now</button>
-    </div>
-  </div>
+  <ul class="accts" id="accountTabs" aria-label="Accounts"></ul>
 
   <div class="usage-rows" id="usageRows">
-    <div class="usage-section">
-      <div class="usage-row" id="sessionRow"></div>
-      <div class="usage-row" id="weekAllRow"></div>
-      <div class="usage-row" id="weekSonnetRow"></div>
-      <div id="otherLimitRows" style="display:contents"></div>
-    </div>
-
     <div class="extra-section" id="extraSection" style="display:none">
       <div class="extra-strip" id="extraStrip" title="Extra usage this month">
         <span class="es-ic">&#x26A1;</span>
         <span class="es-lbl">Extra</span>
-        <span class="es-amt" id="extraAmt">—</span>
+        <span class="es-amt" id="extraAmt">&mdash;</span>
         <div class="es-track"><div class="es-fill" id="extraFill"></div></div>
         <span class="es-pct" id="extraPct"></span>
       </div>
     </div>
   </div>
 
-  <div class="widget-calendar" id="widgetCalendar">
-    <div class="widget-calendar-header" id="widgetCalToday">Today</div>
-    <div id="widgetCalEvents"></div>
-    <div class="widget-calendar-header" id="widgetCalUpcoming" style="margin-top:8px;">Upcoming</div>
-    <div id="widgetCalUpcomingEvents"></div>
+  <div class="today">
+    <div class="next-line">
+      <button class="next-event" id="nextEvent"></button>
+      <button class="tasks-left" id="tasksLeft"></button>
+    </div>
+    <div class="widget-habits" id="widgetHabits" title="Open Habits dashboard">
+      <span class="widget-habits-today" id="widgetHabitsTodayBadges"></span>
+      <div class="habits-right">
+        <span class="relax-meta" id="relaxMeta"></span>
+        <button class="relax-now-btn" id="relaxNowBtn" hidden>Relax now</button>
+        <div class="pomo-ring-wrap" id="pomoRing" title="Focus timer">
+          <svg class="pomo-ring-svg" viewBox="0 0 28 28" aria-hidden="true">
+            <circle class="pomo-ring-bg" cx="14" cy="14" r="11"/>
+            <circle class="pomo-ring-fill idle" id="pomoRingFill" cx="14" cy="14" r="11" stroke-dasharray="69.12" stroke-dashoffset="0"/>
+          </svg>
+          <div class="pomo-ring-text" id="pomoRingText">Focus 25</div>
+          <div class="pomo-tooltip" id="pomoTooltip">
+            <div class="pomo-tooltip-time" id="pomoTooltipTime">25:00</div>
+            <div class="pomo-tooltip-label" id="pomoTooltipLabel">Focus</div>
+            <div class="pomo-tooltip-btns">
+              <button class="pomo-tooltip-btn primary" id="pomoStartBtn">Start</button>
+              <button class="pomo-tooltip-btn" id="pomoResetBtn">Reset</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="footer">
     <button class="footer-update-btn" id="updateBtn"></button>
-    <div class="footer-left">
-      <button class="refresh-btn" id="refreshBtn" title="Refresh now">&#x21bb;</button>
-      <span class="footer-hint" id="footerHint">Syncing...</span>
-    </div>
   </div>
+
+  <nav class="dock" aria-label="Open">
+    <button class="primary" id="mapsBtn" title="Maps" aria-label="Maps" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4c4.4 0 8 2.9 8 6.5S16.4 17 12 17c-.9 0-1.7-.1-2.5-.3L5 19.5l1.2-4C4.8 14.3 4 12.5 4 10.5 4 6.9 7.6 4 12 4Z"/></svg>Maps</button>
+    <button id="tasksBtn" title="Tasks" aria-label="Tasks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>Tasks</button>
+    <button id="notesBtn" title="Notes" aria-label="Notes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20l1-4L16 5a2.1 2.1 0 0 1 3 3L8 19l-4 1Z"/></svg>Notes</button>
+    <button id="calendarBtn" title="Calendar" aria-label="Calendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5.5" width="16" height="14.5" rx="3"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>Calendar</button>
+    <button id="dashBtn" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>Dashboard</button>
+  </nav>
 </div>
 
+<script src="widget-lib.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>

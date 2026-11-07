@@ -2085,7 +2085,7 @@ function showDailyDigest() {
 let currentTheme = 'brutal'; // 'brutal', 'karchx', 'dark', 'light', 'nord', 'dracula'
 const THEMES = {
   // brutal — pop brutalism: bone paper, ink borders, candy pink/teal/yellow
-  brutal: { bg: '#f0ede4', winBg: '#f0ede4', surface: '#ffffff', surface2: '#f7f3ea', border: '#111111', text: '#111111', textDim: '#6f6a5e', accent: '#ff90e8', green: '#23a094', red: '#e5484d', yellow: '#ffc900', barBg: '#ffffff' },
+  brutal: { bg: '#f0ede4', winBg: '#f0ede4', surface: '#ffffff', surface2: '#f7f3ea', border: '#111111', text: '#111111', textDim: '#5f5a4f', accent: '#ff90e8', green: '#23a094', red: '#e5484d', yellow: '#ffc900', barBg: '#ffffff' },
   // karchx — warm cream paper, deep aubergine accent (based on karchx.com)
   karchx: { bg: '#ece4d6', winBg: '#ece4d6', surface: '#f3ecde', surface2: '#ebe2cf', border: '#d4c8b3', text: '#1f1c18', textDim: '#6b5f54', accent: '#3b2a3a', green: '#4a7a4a', red: '#a83b3b', yellow: '#b88a2e', barBg: '#d9ccb3' },
   dark: { bg: 'rgba(12,12,18,0.85)', winBg: '#0c0c12', surface: '#13131d', surface2: '#1b1b28', border: '#2a2a3d', text: '#e2e2f0', textDim: '#7e7e98', accent: '#d4845a', green: '#4ade80', red: '#f87171', yellow: '#facc15', barBg: '#252538' },
