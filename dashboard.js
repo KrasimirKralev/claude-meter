@@ -372,7 +372,7 @@ function renderOverviewToday() {
     list.appendChild(li);
   };
   if (next) {
-    addRow(WL.eventTimeText(next, now), next.title, function() { showTab('calendar'); });
+    addRow(WL.eventTimeText(next, now), PlanLib.eventTitle(next), function() { showTab('calendar'); });
   } else {
     addRow('Nothing', 'coming up', function() { showTab('calendar'); });
   }
@@ -1119,7 +1119,8 @@ function renderAnalytics() {
   for (var hb = 0; hb < 24; hb++) {
     var average = hourCounts[hb] > 0 ? hourBuckets[hb] / hourCounts[hb] : 0;
     var pct = average / maxAvg * 100;
-    var bar = el('i', pct > 75 ? 'hot' : (pct > 50 ? 'warm' : null));
+    // Colour says how high that hour really runs. Height only compares the hours with each other.
+    var bar = el('i', average >= 85 ? 'hot' : (average >= 60 ? 'warm' : null));
     bar.style.height = Math.max(4, pct) + '%';
     bar.title = hb + ':00, ' + Math.round(average) + '% on average';
     bars.appendChild(bar);

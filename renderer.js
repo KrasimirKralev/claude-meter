@@ -929,11 +929,11 @@ function renderToday() {
   nextJoinLink = null;
   if (next) {
     nextEl.appendChild(createElement('b', null, WL.eventTimeText(next, now)));
-    nextEl.appendChild(document.createTextNode(' ' + next.title));
+    nextEl.appendChild(document.createTextNode(' ' + PlanLib.eventTitle(next)));
     var moreToday = upcoming.filter(function(evt) { return evt.date === today; }).length - 1;
     if (next.date === today && moreToday > 0) nextEl.appendChild(createElement('span', 'more', ' +' + moreToday));
     nextJoinLink = eventJoinLink(next);
-    nextEl.title = nextJoinLink ? 'Join meeting: ' + nextJoinLink : next.title;
+    nextEl.title = nextJoinLink ? 'Join meeting: ' + nextJoinLink : PlanLib.eventTitle(next);
   } else {
     nextEl.textContent = 'Nothing coming up';
     nextEl.title = 'Open the calendar';
