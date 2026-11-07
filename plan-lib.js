@@ -111,7 +111,7 @@
   }
 
   function reminderText(minutes) {
-    if (minutes === null || minutes === undefined) return '';
+    if (typeof minutes !== 'number') return '';
     if (minutes === 0) return 'Reminder at the time';
     return 'Reminder ' + durationText(minutes) + ' before';
   }

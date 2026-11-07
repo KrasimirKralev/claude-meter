@@ -93,7 +93,7 @@ function buildExtraUsage(data) {
   const eu = data.extra_usage;
   if (!eu || typeof eu !== 'object') return { enabled: false };
   const util = Number(eu.utilization);
-  const dec = Number.isFinite(Number(eu.decimal_places)) ? Number(eu.decimal_places) : 2;
+  const dec = eu.decimal_places !== null && Number.isFinite(Number(eu.decimal_places)) ? Number(eu.decimal_places) : 2;
   const num = (v) => (v !== null && v !== undefined && Number.isFinite(Number(v)) ? Number(v) : null);
   const extra = {
     enabled: !!eu.is_enabled,

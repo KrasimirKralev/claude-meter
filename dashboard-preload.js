@@ -88,7 +88,7 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   addCalendarEvent: (data) => ipcRenderer.invoke('calendar-add-event', data),
   updateCalendarEvent: (data) => ipcRenderer.invoke('calendar-update-event', data),
   toggleCalendarEvent: (id) => ipcRenderer.invoke('calendar-toggle-event', { id }),
-  deleteCalendarEvent: (id) => ipcRenderer.invoke('calendar-delete-event', { id }),
+  deleteCalendarEvent: (id, series) => ipcRenderer.invoke('calendar-delete-event', { id, series }),
   moveCalendarEvent: (id, newDate) => ipcRenderer.invoke('calendar-move-event', id, newDate),
   onCalendarUpdate: (cb) => {
     if (calendarUpdateHandler) ipcRenderer.removeListener('calendar-update', calendarUpdateHandler);

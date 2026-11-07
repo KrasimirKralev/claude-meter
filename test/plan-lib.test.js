@@ -73,6 +73,7 @@ test('durations and reminders read as words', () => {
   assert.strictEqual(P.durationText(60), '1h');
   assert.strictEqual(P.durationText(90), '1h 30m');
   assert.strictEqual(P.reminderText(null), '');
+  assert.strictEqual(P.reminderText(true), '');
   assert.strictEqual(P.reminderText(0), 'Reminder at the time');
   assert.strictEqual(P.reminderText(15), 'Reminder 15m before');
   assert.strictEqual(P.repeatText({ recurrence: 'biweekly' }), 'Every 2 weeks');

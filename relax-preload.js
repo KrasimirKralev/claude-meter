@@ -12,4 +12,5 @@ contextBridge.exposeInMainWorld('relaxAPI', {
   skip: () => ipcRenderer.send('relax-toast-skip'),
   later: () => ipcRenderer.send('relax-toast-later'),
   startNow: () => ipcRenderer.send('relax-toast-start'),
+  onThemeUpdate: (cb) => ipcRenderer.on('theme-update', (_e, data) => cb(data)),
 });

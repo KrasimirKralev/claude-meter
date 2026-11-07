@@ -101,6 +101,10 @@
       return Boolean(evt) && !evt.isGoogleEvent;
     }
 
+    function isRepeating(evt) {
+      return Boolean(evt.recurrence || evt.recurringParentId);
+    }
+
     function dropTarget(node, date) {
       node.addEventListener('dragover', function(e) {
         if (draggingId === null) return;
@@ -292,7 +296,27 @@
         });
         actions.appendChild(edit);
         var del = UI.iconButton('trash', 'Delete this event', 'danger');
-        del.addEventListener('click', function() { api.deleteEvent(evt.id); });
+        del.addEventListener('click', function() {
+          if (!isRepeating(evt)) {
+            api.deleteEvent(evt.id);
+            return;
+          }
+          // One date or all of them: only the person knows which they meant.
+          UI.clear(actions);
+          var one = el('button', 'btn small danger', 'This one');
+          var all = el('button', 'btn small danger', 'All repeats');
+          var keep = el('button', 'btn small bare', 'Keep');
+          one.type = 'button';
+          all.type = 'button';
+          keep.type = 'button';
+          one.addEventListener('click', function() { api.deleteEvent(evt.id); });
+          all.addEventListener('click', function() { api.deleteEvent(evt.id, true); });
+          keep.addEventListener('click', renderEvents);
+          actions.appendChild(one);
+          actions.appendChild(all);
+          actions.appendChild(keep);
+          one.focus();
+        });
         actions.appendChild(del);
       }
       row.appendChild(actions);
@@ -374,6 +398,17 @@
       }
       form.appendChild(moreRow);
 
+      var seriesBox = null;
+      if (evt && isRepeating(evt)) {
+        seriesBox = el('input');
+        seriesBox.type = 'checkbox';
+        seriesBox.checked = true;
+        var seriesLabel = el('label', 'pc-series');
+        seriesLabel.appendChild(seriesBox);
+        seriesLabel.appendChild(document.createTextNode('Change the upcoming repeats too'));
+        form.appendChild(seriesLabel);
+      }
+
       var colorRow = el('fieldset', 'pc-colors');
       colorRow.appendChild(el('legend', null, 'Colour'));
       var chosen = evt && COLORS.indexOf(evt.color) !== -1 ? evt.color : 'blue';
@@ -438,6 +473,7 @@
         var moveTo = data.date;
         if (evt) {
           data.id = evt.id;
+          data.wholeSeries = Boolean(seriesBox && seriesBox.checked);
           api.updateEvent(data);
         } else {
           data.recurrence = repeat.value || null;

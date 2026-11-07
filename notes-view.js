@@ -7,7 +7,7 @@ const { cleanBounds } = require('./maps-lib');
 
 const CORNER_RADIUS = 12;
 
-function createNotesView({ WebContentsView, ipcMain, getDashboard, getTheme, dirname }) {
+function createNotesView({ WebContentsView, ipcMain, getDashboard, getTheme, dirname, onCreated }) {
   let view = null;
   let owner = null;
   let bounds = null;
@@ -69,6 +69,7 @@ function createNotesView({ WebContentsView, ipcMain, getDashboard, getTheme, dir
       // This page has no reason to go anywhere else, not even to another file.
       contents.on('will-navigate', (event) => event.preventDefault());
       contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      if (onCreated) onCreated(contents);
       contents.on('did-finish-load', () => {
         if (view !== mine) return;
         ready = true;

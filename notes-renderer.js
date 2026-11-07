@@ -515,6 +515,9 @@ function scheduleRefresh() {
 function onEdit() {
   var note = getActiveNote();
   if (note && !currentTaskId) { note.text = md.value; }
+  if (md.value.length > NOTE_TEXT_MAX) {
+    showToast('This note is over ' + NOTE_TEXT_MAX.toLocaleString() + ' characters. Anything past that will not be saved.', true);
+  }
   scheduleRefresh();
   scheduleSave();
 }
@@ -678,6 +681,10 @@ function openArchive() {
       btn.type = 'button';
       btn.setAttribute('aria-label', 'Restore ' + noteName);
       btn.addEventListener('click', function() {
+        if (stickyNotes.length >= NOTES_MAX) {
+          showToast('The board is full at ' + NOTES_MAX + ' notes. Delete one to bring this back.', true);
+          return;
+        }
         stickyNotes.push({ id: note.id, title: note.title, text: note.text, color: note.color, createdAt: note.createdAt });
         window.notesAPI.restoreFromArchive(note.id);
         window.notesAPI.saveStickyNotes(stickyNotes);
@@ -695,7 +702,15 @@ function openArchive() {
 }
 
 /* ============ CRUD ============ */
+// The same limits main.js and the phone's sync keep to. Saying so beats dropping words later.
+var NOTES_MAX = 50;
+var NOTE_TEXT_MAX = 100000;
+
 function addNote() {
+  if (stickyNotes.length >= NOTES_MAX) {
+    showToast('The board is full at ' + NOTES_MAX + ' notes. Delete one to add another.', true);
+    return;
+  }
   var note = { id: genId(), title: '', text: '', color: 'default', createdAt: Date.now() };
   stickyNotes.push(note);
   window.notesAPI.saveStickyNotes(stickyNotes);

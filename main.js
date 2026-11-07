@@ -80,7 +80,7 @@ let fileWatcher = null;
 let fileChangeTimer = null;
 let dashWin = null;
 let lastAutoSync = 0;
-const MIN_SYNC_INTERVAL = 60000; // don't hit API more than once per minute (was 5min)
+const REMINDER_CHECK_MS = 5 * 60 * 1000;
 // Track all intervals/timers that need cleanup on quit
 const cleanupTimers = [];
 let credsWatchers = [];
@@ -225,7 +225,6 @@ function broadcastPomo(persistNow) {
   }
 }
 const STREAK_FILE = path.join(CLAUDE_DIR, 'usage-widget-streak.json'); // id → setTimeout handle
-let firedReminders = new Set(); // event IDs whose reminder already fired this session
 
 // --- Secondary account state ---
 // --- Pomodoro popup ---
@@ -265,7 +264,7 @@ function showPomoPopup(type) {
 
   pomoPopupWin.on('closed', () => { pomoPopupWin = null; });
   pomoPopupWin.once('ready-to-show', () => {
-    if (pomoPopupWin && !pomoPopupWin.isDestroyed()) pomoPopupWin.show();
+    if (pomoPopupWin && !pomoPopupWin.isDestroyed()) pomoPopupWin.showInactive();
   });
   pomoPopupWin.loadFile(path.join(__dirname, 'pomo-popup.html'));
 
@@ -292,6 +291,9 @@ const relaxMusic = require('./relax-music');
 const displayScale = require('./display-scale');
 const { createMapsFeature } = require('./maps-view');
 const { createNotesView } = require('./notes-view');
+const { readJsonOr, writeJsonAtomic } = require('./safe-file');
+const { parseSmartText } = require('./smart-text');
+const calendarLib = require('./calendar-lib');
 const RELAX_MUSIC_DIR = path.join(os.homedir(), 'Music', 'relax');
 const RELAX_MUSIC_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-music.json');
 const RELAX_TICK_MS = 5000;
@@ -477,6 +479,7 @@ function relaxShowHeadsUp(slot) {
   toast.loadFile(path.join(__dirname, 'relax-toast.html'));
   toast.webContents.once('did-finish-load', () => {
     if (toast.isDestroyed()) return;
+    sendCurrentTheme(toast);
     toast.webContents.send('relax-toast-data', {
       startsAt,
       minutes: relaxConfig.minutes,
@@ -1253,23 +1256,30 @@ function activeHistory() {
 // our backoff, or every launch would spend a request on a throttled token.
 function loadAccountState(ctx) {
   try {
-    if (fs.existsSync(ctx.dataFile)) {
-      const data = JSON.parse(fs.readFileSync(ctx.dataFile, 'utf-8'));
+    const data = readJsonOr(ctx.dataFile, null);
+    if (data) {
       ctx.cachedUsage = usageLib.normalizeCached(data.usage || null);
       const until = Number(data.rateLimitUntil);
       if (Number.isFinite(until) && until > Date.now()) ctx.rateLimitUntil = until;
+      if (data.lastAlertedStep && typeof data.lastAlertedStep === 'object') {
+        for (const key of Object.keys(ctx.lastAlertedStep)) {
+          if (Number.isInteger(data.lastAlertedStep[key])) ctx.lastAlertedStep[key] = data.lastAlertedStep[key];
+        }
+      }
     }
   } catch { /* ignore */ }
 }
 
 function saveCachedUsage(ctx) {
   try {
-    fs.writeFileSync(ctx.dataFile, JSON.stringify({
+    writeJsonAtomic(ctx.dataFile, {
       lastSync: Date.now(),
       usage: ctx.cachedUsage,
       rateLimitUntil: ctx.rateLimitUntil || 0,
-    }, null, 2));
-  } catch { /* ignore */ }
+      // An alert already shown stays shown across a restart.
+      lastAlertedStep: ctx.lastAlertedStep,
+    });
+  } catch (err) { console.error('[usage] save failed:', err.message); }
 }
 
 // --- Usage history (per account) ---
@@ -1332,8 +1342,8 @@ const SAFE_HOTKEY_RE = /^(Ctrl|Alt|Shift|Super|Cmd|Command)(\+(Ctrl|Alt|Shift|Su
 
 function loadSettings() {
   try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+    const data = readJsonOr(SETTINGS_FILE, null);
+    if (data) {
       if (data.hotkey && typeof data.hotkey === 'string'
         && data.hotkey.length <= 50 && SAFE_HOTKEY_RE.test(data.hotkey)) {
         currentHotkey = data.hotkey;
@@ -1384,9 +1394,7 @@ function saveSettings() {
         weekSonnet: ALERT_THRESHOLDS.weekSonnet,
       },
     };
-    if (currentTheme && currentTheme !== 'dark') {
-      obj.theme = currentTheme;
-    }
+    if (currentTheme) obj.theme = currentTheme;
     if (accountList.length > 0) {
       obj.accounts = accountList.map((a) => ({
         id: a.id, name: a.name, autoName: a.autoName, dir: a.dir, enabled: a.enabled !== false,
@@ -1394,7 +1402,7 @@ function saveSettings() {
       obj.activeAccountId = activeAccountId;
     }
     if (primaryAccountName) obj.primaryAccount = primaryAccountName;
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(obj, null, 2));
+    writeJsonAtomic(SETTINGS_FILE, obj);
   } catch (err) { console.error('[settings] Save failed:', err.message); }
 }
 
@@ -1402,8 +1410,8 @@ function saveSettings() {
 
 function loadTasks() {
   try {
-    if (fs.existsSync(TASKS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8'));
+    const data = readJsonOr(TASKS_FILE, null);
+    if (data) {
       return Array.isArray(data.tasks) ? data.tasks : [];
     }
   } catch { /* ignore */ }
@@ -1412,8 +1420,8 @@ function loadTasks() {
 
 function saveTasks() {
   try {
-    fs.writeFileSync(TASKS_FILE, JSON.stringify({ tasks }, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(TASKS_FILE, { tasks });
+  } catch (err) { console.error('[tasks] save failed:', err.message); }
 }
 
 // --- Habits persistence ---
@@ -1427,8 +1435,8 @@ function emptyHabits() {
 function loadHabits() {
   const out = emptyHabits();
   try {
-    if (fs.existsSync(HABITS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(HABITS_FILE, 'utf-8'));
+    const data = readJsonOr(HABITS_FILE, null);
+    if (data) {
       for (const kind of HABIT_KINDS) {
         if (Array.isArray(data[kind])) out[kind] = data[kind];
       }
@@ -1440,7 +1448,7 @@ function loadHabits() {
 // -> false when the file could not be written: the change is only in memory.
 function saveHabits() {
   try {
-    fs.writeFileSync(HABITS_FILE, JSON.stringify(habits, null, 2));
+    writeJsonAtomic(HABITS_FILE, habits);
     return true;
   } catch (err) {
     console.error('[habits] save failed:', err.message);
@@ -1514,8 +1522,8 @@ function broadcastTasks() {
 
 function loadCalendarEvents() {
   try {
-    if (fs.existsSync(CALENDAR_FILE)) {
-      const data = JSON.parse(fs.readFileSync(CALENDAR_FILE, 'utf-8'));
+    const data = readJsonOr(CALENDAR_FILE, null);
+    if (data) {
       if (data.version === 1 && Array.isArray(data.events)) {
         return data.events;
       }
@@ -1526,11 +1534,8 @@ function loadCalendarEvents() {
 
 function saveCalendarEvents() {
   try {
-    fs.writeFileSync(CALENDAR_FILE, JSON.stringify({
-      version: 1,
-      events: calendarEvents,
-    }, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(CALENDAR_FILE, { version: 1, events: calendarEvents });
+  } catch (err) { console.error('[calendar] save failed:', err.message); }
   // Every local change and every Google sync comes through here: keep the
   // phone hub's view of the calendar in step.
   writeCalendarFeed();
@@ -1540,8 +1545,8 @@ function saveCalendarEvents() {
 
 function loadGcalConfig() {
   try {
-    if (fs.existsSync(GCAL_CONFIG_FILE)) {
-      const data = JSON.parse(fs.readFileSync(GCAL_CONFIG_FILE, 'utf-8'));
+    const data = readJsonOr(GCAL_CONFIG_FILE, null);
+    if (data) {
       if (Array.isArray(data.accounts)) return data.accounts;
     }
   } catch { /* ignore */ }
@@ -1550,15 +1555,16 @@ function loadGcalConfig() {
 
 function saveGcalConfig() {
   try {
-    fs.writeFileSync(GCAL_CONFIG_FILE, JSON.stringify({
+    // It holds login tokens, so only its owner may read it.
+    writeJsonAtomic(GCAL_CONFIG_FILE, {
       accounts: gcalAccounts.map((a) => ({
         email: a.email,
         accessToken: a.accessToken,
         refreshToken: a.refreshToken,
         expiresAt: a.expiresAt,
       })),
-    }, null, 2));
-  } catch { /* ignore */ }
+    });
+  } catch (err) { console.error('[gcal] save failed:', err.message); }
 }
 
 // --- Google Calendar: OAuth2 flow ---
@@ -1706,7 +1712,8 @@ function fetchGcalUserEmail(accessToken) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: 'www.googleapis.com',
-      path: '/oauth2/v2/userinfo?fields=email',
+      // The calendar scope can't read the profile, but the main calendar's id is the address.
+      path: '/calendar/v3/calendars/primary?fields=id',
       method: 'GET',
       headers: { 'Authorization': 'Bearer ' + accessToken },
     }, (res) => {
@@ -1715,7 +1722,9 @@ function fetchGcalUserEmail(accessToken) {
       res.on('end', () => {
         try {
           const data = JSON.parse(body);
-          resolve(data.email || 'Unknown');
+          // A rejection gives the account a numbered name, so a second one can't replace it.
+          if (res.statusCode === 200 && data.id) resolve(data.id);
+          else reject(new Error('Failed to get email'));
         } catch { reject(new Error('Failed to get email')); }
       });
     });
@@ -1818,41 +1827,8 @@ async function fetchGcalEvents(account, retryCount) {
         }
         try {
           var data = JSON.parse(body);
-          var events = (data.items || []).map(function (item) {
-            var startDate, startTime = null, duration = null;
-            if (item.start.dateTime) {
-              // Convert to local time using Date object (handles timezone offsets)
-              var localStart = new Date(item.start.dateTime);
-              startDate = localStart.getFullYear() + '-'
-                + String(localStart.getMonth() + 1).padStart(2, '0') + '-'
-                + String(localStart.getDate()).padStart(2, '0');
-              startTime = String(localStart.getHours()).padStart(2, '0') + ':'
-                + String(localStart.getMinutes()).padStart(2, '0');
-              if (item.end && item.end.dateTime) {
-                var localEnd = new Date(item.end.dateTime);
-                duration = Math.round((localEnd.getTime() - localStart.getTime()) / 60000);
-              }
-            } else {
-              // All-day event — date only
-              startDate = (item.start.date || '').slice(0, 10);
-            }
-            return {
-              id: 'gcal:' + account.email + ':' + item.id,
-              title: item.summary || '(No title)',
-              date: startDate,
-              time: startTime,
-              duration: duration,
-              color: item.colorId ? googleColorMap(item.colorId) : '#4285f4',
-              reminder: true,
-              recurrence: null,
-              recurringParentId: null,
-              googleEventId: item.id,
-              googleAccount: account.email,
-              googleLink: item.htmlLink || null,
-              meetLink: extractMeetLink(item),
-              createdAt: Date.now(),
-              isGoogleEvent: true,
-            };
+          var events = (data.items || []).flatMap(function (item) {
+            return calendarLib.mapGoogleItem(item, account.email);
           });
           resolve(events);
         } catch (_e) { reject(new Error('Invalid Calendar response')); }
@@ -1862,25 +1838,6 @@ async function fetchGcalEvents(account, retryCount) {
     req.setTimeout(15000, function () { req.destroy(); reject(new Error('Timeout')); });
     req.end();
   });
-}
-
-// Extract the joinable meeting URL from a Google Calendar event:
-// Meet's hangoutLink → conferenceData video entry point → known-provider URL in location/description
-function extractMeetLink(item) {
-  if (item.hangoutLink) return item.hangoutLink;
-  const eps = item.conferenceData && item.conferenceData.entryPoints;
-  if (Array.isArray(eps)) {
-    const video = eps.find((e) => e && e.entryPointType === 'video' && e.uri);
-    if (video) return video.uri;
-  }
-  const RX = /https:\/\/[^\s<>"']*(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|teams\.live\.com|webex\.com|whereby\.com|meet\.jit\.si)[^\s<>"']*/i;
-  for (const field of [item.location, item.description]) {
-    if (typeof field === 'string') {
-      const m = field.match(RX);
-      if (m) return m[0];
-    }
-  }
-  return null;
 }
 
 // Any https URL in free text (lets local events carry a pasted meeting link in the title)
@@ -1893,17 +1850,21 @@ function eventJoinLink(evt) {
   return (evt && (evt.meetLink || firstUrlInText(evt.title))) || null;
 }
 
-function googleColorMap(colorId) {
-  // Google Calendar event color IDs → hex
-  const colors = {
-    '1': '#7986cb', '2': '#33b679', '3': '#8e24aa', '4': '#e67c73',
-    '5': '#f6bf26', '6': '#f4511e', '7': '#039be5', '8': '#616161',
-    '9': '#3f51b5', '10': '#0b8043', '11': '#d50000',
-  };
-  return colors[colorId] || '#4285f4';
-}
-
 // --- Google Calendar: sync logic ---
+
+// Accounts added before the address could be read are all called Unknown, so a second one would
+// replace the first. This puts the real address on them.
+async function nameUnknownGoogleAccount(account) {
+  if (account.email !== 'Unknown') return;
+  try {
+    if (account.expiresAt && account.expiresAt < Date.now()) await refreshGcalToken(account);
+    const email = await fetchGcalUserEmail(account.accessToken);
+    if (!gcalAccounts.some((a) => a.email === email)) {
+      account.email = email;
+      saveGcalConfig();
+    }
+  } catch { /* it keeps the old name, and the next sync tries again */ }
+}
 
 async function syncGoogleCalendars() {
   if (gcalAccounts.length === 0) return;
@@ -1913,6 +1874,7 @@ async function syncGoogleCalendars() {
 
   for (const account of gcalAccounts) {
     try {
+      await nameUnknownGoogleAccount(account);
       const events = await fetchGcalEvents(account);
       allGoogleEvents = allGoogleEvents.concat(events);
     } catch (err) {
@@ -1920,11 +1882,8 @@ async function syncGoogleCalendars() {
     }
   }
 
-  // Remove old Google events from local calendar
-  calendarEvents = calendarEvents.filter((e) => !e.isGoogleEvent);
-
-  // Add fresh Google events
-  calendarEvents = calendarEvents.concat(allGoogleEvents);
+  // An account that failed keeps its events: a dropped connection must not empty the calendar.
+  calendarEvents = calendarLib.mergeGoogleEvents(calendarEvents, allGoogleEvents, errors.map((e) => e.email));
 
   saveCalendarEvents();
   gcalLastSync = Date.now();
@@ -1950,42 +1909,31 @@ function startGcalSyncTimer() {
 
 // --- Streak tracking ---
 function loadStreak() {
-  try {
-    if (fs.existsSync(STREAK_FILE)) {
-      return JSON.parse(fs.readFileSync(STREAK_FILE, 'utf-8'));
-    }
-  } catch { /* ignore */ }
-  return { current: 0, lastDate: null };
+  return readJsonOr(STREAK_FILE, { current: 0, lastDate: null });
 }
 
 function saveStreak() {
   try {
-    fs.writeFileSync(STREAK_FILE, JSON.stringify(streakData, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(STREAK_FILE, streakData);
+  } catch (err) { console.error('[streak] save failed:', err.message); }
 }
 
+// Days in a row with at least one task finished.
 function updateStreak() {
-  const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-
-  // Check if all active tasks were completed today
-  const activeTasks = tasks.filter((t) => !t.done);
-  const completedToday = tasks.filter((t) => t.done && t.completedAt
-    && new Date(t.completedAt).toISOString().slice(0, 10) === today);
-
-  if (completedToday.length > 0 && activeTasks.length === 0) {
-    // All tasks done today
-    if (streakData.lastDate === yesterday || streakData.lastDate === today) {
-      if (streakData.lastDate !== today) streakData.current++;
-    } else {
-      streakData.current = 1;
-    }
+  const now = new Date();
+  const today = localDateStr(now);
+  const yesterday = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12));
+  const doneToday = tasks.some((t) => t.done && t.completedAt && localDateStr(new Date(t.completedAt)) === today);
+  const before = streakData.current;
+  if (doneToday && streakData.lastDate !== today) {
+    streakData.current = streakData.lastDate === yesterday ? streakData.current + 1 : 1;
     streakData.lastDate = today;
-  } else if (streakData.lastDate && streakData.lastDate !== today && streakData.lastDate !== yesterday) {
-    // Streak broken
+  } else if (!doneToday && streakData.lastDate && streakData.lastDate !== today && streakData.lastDate !== yesterday) {
     streakData.current = 0;
+  } else if (before === streakData.current) {
+    broadcastStreak();
+    return;
   }
-
   saveStreak();
   broadcastStreak();
 }
@@ -2004,10 +1952,13 @@ let digestShownToday = null; // date string of last shown digest
 function scheduleDailyDigest() {
   // Show 5 minutes after system wake from sleep
   powerMonitor.on('resume', () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateStr(new Date());
     if (digestShownToday !== today) {
       if (digestTimer) clearTimeout(digestTimer);
       digestTimer = setTimeout(() => {
+        digestTimer = null;
+        // Opening the widget in those five minutes may have shown it already.
+        if (digestShownToday === today) return;
         digestShownToday = today;
         showDailyDigest();
       }, 5 * 60 * 1000); // 5 minutes after wake
@@ -2017,16 +1968,21 @@ function scheduleDailyDigest() {
 
 // Called when widget is first shown each day
 function tryShowDigestOnOpen() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateStr(new Date());
   if (digestShownToday !== today) {
     digestShownToday = today;
+    if (digestTimer) { clearTimeout(digestTimer); digestTimer = null; }
     // Small delay so the widget finishes rendering first
     setTimeout(showDailyDigest, 3000);
   }
 }
 
 function showDailyDigest() {
-  const today = new Date().toISOString().slice(0, 10);
+  requestPopup({ open: openDailyDigest });
+}
+
+function openDailyDigest() {
+  const today = localDateStr(new Date());
   const todayEvents = calendarEvents.filter((e) => e.date === today);
   const pendingTasks = tasks.filter((t) => !t.done);
   const highPriority = pendingTasks.filter((t) => t.priority === 'high');
@@ -2069,7 +2025,7 @@ function showDailyDigest() {
       preload: path.join(__dirname, 'popup-preload.js') },
   });
   applyLinuxPopupTransparency(alertPopup);
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); }
   alertPopup.once('ready-to-show', () => { if (alertPopup && !alertPopup.isDestroyed()) alertPopup.showInactive(); });
   alertPopup.loadFile(path.join(__dirname, 'popup.html'));
   alertPopup.webContents.once('did-finish-load', () => {
@@ -2092,8 +2048,8 @@ const THEMES = {
   karchx: { bg: '#ece4d6', winBg: '#ece4d6', surface: '#f3ecde', surface2: '#ebe2cf', border: '#d4c8b3', text: '#1f1c18', textDim: '#6b5f54', accent: '#3b2a3a', green: '#4a7a4a', red: '#a83b3b', yellow: '#b88a2e', barBg: '#d9ccb3' },
   dark: { bg: 'rgba(12,12,18,0.85)', winBg: '#0c0c12', surface: '#13131d', surface2: '#1b1b28', border: '#2a2a3d', text: '#e2e2f0', textDim: '#7e7e98', accent: '#d4845a', green: '#4ade80', red: '#f87171', yellow: '#facc15', barBg: '#252538' },
   light: { bg: 'rgba(250,250,252,0.94)', winBg: '#fafafc', surface: '#ffffff', surface2: '#f3f4f6', border: '#d1d5db', text: '#111827', textDim: '#6b7280', accent: '#b45e35', green: '#16a34a', red: '#dc2626', yellow: '#ca8a04', barBg: '#e5e7eb' },
-  nord: { bg: 'rgba(46,52,64,0.88)', winBg: '#2e3440', surface: '#3b4252', surface2: '#434c5e', border: '#4c566a', text: '#eceff4', textDim: '#8892a8', accent: '#88c0d0', green: '#a3be8c', red: '#bf616a', yellow: '#ebcb8b', barBg: '#2e3440' },
-  dracula: { bg: 'rgba(40,42,54,0.88)', winBg: '#282a36', surface: '#44475a', surface2: '#50526a', border: '#6272a4', text: '#f8f8f2', textDim: '#9898b0', accent: '#bd93f9', green: '#50fa7b', red: '#ff5555', yellow: '#f1fa8c', barBg: '#282a36' },
+  nord: { bg: 'rgba(46,52,64,0.88)', winBg: '#2e3440', surface: '#3b4252', surface2: '#434c5e', border: '#4c566a', text: '#eceff4', textDim: '#c0c8d6', accent: '#88c0d0', green: '#a3be8c', red: '#bf616a', yellow: '#ebcb8b', barBg: '#2e3440' },
+  dracula: { bg: 'rgba(40,42,54,0.88)', winBg: '#282a36', surface: '#44475a', surface2: '#50526a', border: '#6272a4', text: '#f8f8f2', textDim: '#d0d0e0', accent: '#bd93f9', green: '#50fa7b', red: '#ff5555', yellow: '#f1fa8c', barBg: '#282a36' },
 };
 
 // Send the currently-selected theme to a single window. Use on did-finish-load
@@ -2109,7 +2065,7 @@ function sendCurrentTheme(targetWin) {
 function broadcastTheme() {
   const theme = THEMES[currentTheme] || THEMES.dark;
   const payload = { name: currentTheme, ...theme };
-  const allWins = [win, tasksWin, calWin, notesWin, notesAppWin, dashWin, alertPopup, pomoPopupWin];
+  const allWins = [win, tasksWin, calWin, notesWin, notesAppWin, dashWin, alertPopup, pomoPopupWin, captureWin, relaxHeadsUp && relaxHeadsUp.win];
   for (const w of allWins) {
     if (w && !w.isDestroyed()) {
       try { w.webContents.send('theme-update', payload); } catch { /* ignore */ }
@@ -2119,199 +2075,11 @@ function broadcastTheme() {
   if (notesView) notesView.themeChanged();
 }
 
-// --- Smart text parser: "Meeting with John tomorrow 3pm 1h" → { title, date, time, duration, priority } ---
-function parseSmartText(input) {
-  let text = input;
-  let date = null;
-  let time = null;
-  let duration = null;
-  let priority = 'medium';
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-  function fmtDate(d) {
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-  }
-
-  // Priority keywords
-  if (/\b(urgent|important|asap|critical|!{2,})\b/i.test(text)) {
-    priority = 'high';
-    text = text.replace(/\b(urgent|important|asap|critical)\b/gi, '').replace(/!{2,}/g, '');
-  }
-
-  // Relative dates: today, tomorrow, day after tomorrow
-  if (/\btoday\b/i.test(text)) {
-    date = fmtDate(today);
-    text = text.replace(/\btoday\b/gi, '');
-  } else if (/\btomorrow\b/i.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 1);
-    date = fmtDate(d);
-    text = text.replace(/\btomorrow\b/gi, '');
-  } else if (/\bday after tomorrow\b/i.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 2);
-    date = fmtDate(d);
-    text = text.replace(/\bday after tomorrow\b/gi, '');
-  }
-
-  // Bulgarian relative dates (no \b — doesn't work with Cyrillic)
-  if (!date && /(?:^|\s)днес(?:\s|$|,)/i.test(text)) {
-    date = fmtDate(today);
-    text = text.replace(/днес/gi, '');
-  } else if (!date && /(?:^|\s)утре(?:\s|$|,)/i.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 1);
-    date = fmtDate(d);
-    text = text.replace(/утре/gi, '');
-  } else if (!date && /(?:^|\s)вдругиден(?:\s|$|,)/i.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 2);
-    date = fmtDate(d);
-    text = text.replace(/вдругиден/gi, '');
-  }
-
-  // Day names: monday, tuesday... / понеделник, вторник...
-  const dayNamesEN = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const dayNamesBG = ['неделя', 'понеделник', 'вторник', 'сряда', 'четвъртък', 'петък', 'събота'];
-
-  if (!date) {
-    for (let di = 0; di < 7; di++) {
-      const reEN = new RegExp('\\b(next\\s+)?' + dayNamesEN[di] + '\\b', 'i');
-      const reBG = new RegExp('(?:^|\\s)(следващ[а-яА-Я]*\\s+)?' + dayNamesBG[di] + '(?:\\s|$|,)', 'i');
-      const matchEN = text.match(reEN);
-      const matchBG = text.match(reBG);
-      if (matchEN || matchBG) {
-        const isNext = (matchEN && matchEN[1]) || (matchBG && matchBG[1]);
-        const d = new Date(today);
-        let daysAhead = (di - d.getDay() + 7) % 7;
-        if (daysAhead === 0) daysAhead = 7;
-        if (isNext && daysAhead <= 7) daysAhead += 7;
-        d.setDate(d.getDate() + daysAhead);
-        date = fmtDate(d);
-        text = text.replace(matchEN ? matchEN[0] : matchBG[0], ' ');
-        break;
-      }
-    }
-  }
-
-  // "in X days/weeks"
-  if (!date) {
-    const inMatch = text.match(/\bin\s+(\d+)\s+(day|days|week|weeks)\b/i);
-    if (inMatch) {
-      const d = new Date(today);
-      const n = parseInt(inMatch[1], 10);
-      if (/week/i.test(inMatch[2])) d.setDate(d.getDate() + n * 7);
-      else d.setDate(d.getDate() + n);
-      date = fmtDate(d);
-      text = text.replace(inMatch[0], '');
-    }
-  }
-
-  // Explicit date: "March 25", "25 March", "3/25", "25.03", "2026-03-25"
-  if (!date) {
-    const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
-    const monthMatch = text.match(new RegExp('\\b(' + monthNames.join('|') + ')\\s+(\\d{1,2})\\b', 'i'));
-    const monthMatch2 = text.match(new RegExp('\\b(\\d{1,2})\\s+(' + monthNames.join('|') + ')\\b', 'i'));
-    const slashMatch = text.match(/\b(\d{1,2})[\/\.](\d{1,2})(?:[\/\.](\d{2,4}))?\b/);
-    const isoMatch = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
-
-    if (isoMatch) {
-      date = isoMatch[0];
-      text = text.replace(isoMatch[0], '');
-    } else if (monthMatch) {
-      const mi = monthNames.indexOf(monthMatch[1].toLowerCase());
-      const d = new Date(now.getFullYear(), mi, parseInt(monthMatch[2], 10));
-      if (d < today) d.setFullYear(d.getFullYear() + 1);
-      date = fmtDate(d);
-      text = text.replace(monthMatch[0], '');
-    } else if (monthMatch2) {
-      const mi = monthNames.indexOf(monthMatch2[2].toLowerCase());
-      const d = new Date(now.getFullYear(), mi, parseInt(monthMatch2[1], 10));
-      if (d < today) d.setFullYear(d.getFullYear() + 1);
-      date = fmtDate(d);
-      text = text.replace(monthMatch2[0], '');
-    } else if (slashMatch) {
-      const a = parseInt(slashMatch[1], 10);
-      const b = parseInt(slashMatch[2], 10);
-      const y = slashMatch[3] ? (slashMatch[3].length === 2 ? 2000 + parseInt(slashMatch[3], 10) : parseInt(slashMatch[3], 10)) : now.getFullYear();
-      // Detect DD/MM vs MM/DD: if first > 12, it's DD/MM
-      const d = a > 12 ? new Date(y, b - 1, a) : new Date(y, a - 1, b);
-      date = fmtDate(d);
-      text = text.replace(slashMatch[0], '');
-    }
-  }
-
-  // Time: "3pm", "3:30pm", "15:00", "at 3", "в 15:00", "в 10:00"
-  // Try explicit HH:MM first (most reliable)
-  const time24Match = text.match(/(?:^|\s)(?:at\s+|[вВ]\s+)?(\d{1,2}):(\d{2})(?:\s*(am|pm))?(?:\s|$|,)/i);
-  const time12Match = !time24Match ? text.match(/(?:^|\s)(?:at\s+|[вВ]\s+)?(\d{1,2})\s*(am|pm)(?:\s|$|,)/i) : null;
-  const timeM = time24Match || time12Match;
-  if (timeM) {
-    let h = parseInt(timeM[1], 10);
-    const m = time24Match ? parseInt(timeM[2], 10) : 0;
-    const ampm = time24Match ? (timeM[3] || '').toLowerCase() : timeM[2].toLowerCase();
-    if (ampm === 'pm' && h !== 12) h += 12;
-    if (ampm === 'am' && h === 12) h = 0;
-    if (h >= 0 && h <= 23) {
-      time = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
-      text = text.replace(timeM[0], ' ');
-    }
-  }
-
-  // Duration: "1h", "30m", "2 hours", "1.5h"
-  const durMatch = text.match(/(?:^|\s)(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minutes|час[а]?|мин)(?:\s|$|,)/i);
-  if (durMatch) {
-    const val = parseFloat(durMatch[1]);
-    const unit = durMatch[2].toLowerCase();
-    if (unit.charAt(0) === 'h' || unit.startsWith('час')) duration = Math.round(val * 60);
-    else duration = Math.round(val);
-    text = text.replace(durMatch[0], '');
-  }
-
-  // Clean up title — remove leftover prepositions
-  text = text.replace(/\bat\b/gi, '').replace(/\bon\b/gi, '');
-  text = text.replace(/(?:^|\s)в(?:\s|$)/gi, ' '); // Bulgarian "в" only as standalone word
-  text = text.replace(/^[\s,\-:]+|[\s,\-:]+$/g, '').replace(/\s{2,}/g, ' ').trim();
-
-  return { title: text || input.trim(), date, time, duration, priority };
-}
-
-function generateRecurringEvents(baseEvt) {
-  // Generate instances for the next 90 days
-  const startDate = new Date(baseEvt.date + 'T12:00');
-  const endDate = new Date(startDate.getTime() + 90 * 24 * 60 * 60 * 1000);
-  let current = new Date(startDate);
-  const increment = { daily: 1, weekly: 7, biweekly: 14, monthly: 0 };
-
-  while (true) {
-    if (baseEvt.recurrence === 'monthly') {
-      current.setMonth(current.getMonth() + 1);
-    } else {
-      current.setDate(current.getDate() + (increment[baseEvt.recurrence] || 7));
-    }
-    if (current > endDate) break;
-
-    const dateStr = current.getFullYear() + '-'
-      + String(current.getMonth() + 1).padStart(2, '0') + '-'
-      + String(current.getDate()).padStart(2, '0');
-    calendarEvents.push({
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      title: baseEvt.title,
-      date: dateStr,
-      time: baseEvt.time,
-      duration: baseEvt.duration,
-      color: baseEvt.color,
-      reminder: baseEvt.reminder,
-      recurrence: null, // instances don't recurse
-      recurringParentId: baseEvt.id,
-      googleEventId: null,
-      createdAt: Date.now(),
-    });
-  }
-}
-
 // Prune recurring instances older than 30 days to prevent unbounded growth
 function pruneOldRecurringEvents() {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const cutoffStr = localDateStr(cutoff);
   const before = calendarEvents.length;
   calendarEvents = calendarEvents.filter((e) =>
     !(e.recurringParentId && e.date < cutoffStr && !e.done)
@@ -2332,7 +2100,7 @@ function broadcastCalendar() {
     calWin.webContents.send('calendar-update', payload);
   }
   // Calendar badge: events today
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateStr(new Date());
   const todayCount = calendarEvents.filter((e) => e.date === today).length;
   if (win && !win.isDestroyed()) {
     win.webContents.send('badge-update', { calendar: todayCount });
@@ -2346,81 +2114,49 @@ function clearReminderTimers() {
   reminderTimers = {};
 }
 
-// Track which reminder stages have fired: { eventId: Set('15m', '5m', '0m', 'overdue') }
+// Which reminder stages have fired: { eventId: Set('15m', '10m', '0m', 'overdue') }
 let firedStages = {};
 
 function scheduleReminders() {
   clearReminderTimers();
   const now = Date.now();
+  const today = localDateStr(new Date(now));
 
-  // Prune fired reminders/stages for past events
-  for (const id of firedReminders) {
+  for (const id of Object.keys(firedStages)) {
     const evt = calendarEvents.find((e) => e.id === id);
-    if (!evt || new Date(evt.date + 'T23:59').getTime() < now) {
-      firedReminders.delete(id);
-      delete firedStages[id];
-    }
+    if (!evt || evt.date < today) delete firedStages[id];
   }
-  const maxAhead = 24 * 60 * 60 * 1000;
 
   for (const evt of calendarEvents) {
-    if (evt.done) continue;
-    if (!evt.date) continue;
+    const fired = firedStages[evt.id] || new Set();
+    const plan = calendarLib.planReminders(evt, now, fired);
+    for (const key of plan.forget) fired.add(key);
 
-    let eventTime;
-    if (evt.time) {
-      eventTime = new Date(evt.date + 'T' + evt.time).getTime();
-    } else {
-      eventTime = new Date(evt.date + 'T09:00').getTime();
-    }
-    if (isNaN(eventTime)) continue;
-    if (eventTime - now > maxAhead) continue;
-
-    // Escalating reminder stages (minutes before event)
-    const stages = [
-      { key: '15m', minsBefore: 15, body: 'In 15 minutes', silent: false, autoDismiss: 8000 },
-      { key: '10m', minsBefore: 10, body: 'In 10 minutes', silent: false, autoDismiss: 0 },  // stays open with countdown
-      { key: '0m',  minsBefore: 0,  body: 'Starting NOW', silent: false, autoDismiss: 0 },  // 0 = no auto-dismiss
-    ];
-
-    if (!firedStages[evt.id]) firedStages[evt.id] = new Set();
-    const fired = firedStages[evt.id];
-
-    for (const stage of stages) {
-      if (fired.has(stage.key)) continue;
-      const fireAt = eventTime - (stage.minsBefore * 60 * 1000);
-      const delay = fireAt - now;
-
-      if (delay < 0) {
-        // Should have fired already — fire now if event is within 30 min
-        if (now - eventTime < 30 * 60 * 1000) {
-          fired.add(stage.key);
-          fireReminder(evt, stage);
-        }
-        continue;
-      }
-
-      reminderTimers[evt.id + ':' + stage.key] = setTimeout(() => {
+    for (const { stage, delay } of plan.later) {
+      const timerKey = evt.id + ':' + stage.key;
+      reminderTimers[timerKey] = setTimeout(() => {
         fired.add(stage.key);
-        delete reminderTimers[evt.id + ':' + stage.key];
+        delete reminderTimers[timerKey];
         fireReminder(evt, stage);
       }, delay);
     }
-
-    // Overdue stage: fires 5 min after event time, sends banner to widget
-    if (!fired.has('overdue') && now > eventTime + 5 * 60 * 1000 && now - eventTime < 60 * 60 * 1000) {
+    if (plan.fireNow) {
+      fired.add(plan.fireNow.key);
+      fireReminder(evt, plan.fireNow);
+    } else if (plan.overdue) {
       fired.add('overdue');
-      // Send overdue banner to widget (even if hidden — it shows when opened)
+      // Send overdue banner to widget (even if hidden: it shows when opened)
       if (win && !win.isDestroyed()) {
         win.webContents.send('event-overdue', { id: evt.id, title: evt.title, time: evt.time });
       }
       new Notification({
         title: '\u26A0 OVERDUE: ' + evt.title,
-        body: 'Event was at ' + (evt.time || 'today') + ' — don\'t forget!',
+        body: 'Event was at ' + evt.time + ', don\'t forget!',
         silent: false,
         urgency: 'critical',
       }).show();
     }
+    if (fired.size > 0 || plan.later.length > 0) firedStages[evt.id] = fired;
   }
 }
 
@@ -2429,7 +2165,7 @@ function fireReminder(evt, stage) {
   const isUrgent = stage.key === '0m' || stage.key === '5m';
   new Notification({
     title: evt.title,
-    body: stage.body + (evt.time ? ' \u2014 ' + evt.time : ''),
+    body: stage.body + (evt.time ? ', ' + evt.time : ''),
     silent: !isUrgent,
     urgency: stage.key === '0m' ? 'critical' : 'normal',
   }).show();
@@ -2448,7 +2184,7 @@ function fireReminder(evt, stage) {
   }
 
   // 2. Popup window
-  showReminderPopup(evt, stage.autoDismiss, stage);
+  showReminderPopup(evt, stage);
 
   // 3. Flash tray icon
   if (tray) {
@@ -2472,7 +2208,54 @@ function fireReminder(evt, stage) {
   }
 }
 
-function showReminderPopup(evt, autoDismissMs, stage) {
+// One popup shows at a time. A new one waits its turn instead of closing a meeting someone hasn't seen,
+// and two usage alerts from the same sync no longer cancel each other.
+const POPUP_QUEUE_MAX = 6;
+const POPUP_GAP_MS = 300;
+let popupQueue = [];
+let popupShowing = null;
+
+function openQueuedPopup(entry) {
+  popupShowing = entry;
+  entry.open();
+}
+
+function requestPopup(entry) {
+  const open = alertPopup && !alertPopup.isDestroyed();
+  if (!open) {
+    openQueuedPopup(entry);
+    return;
+  }
+  const sameMeeting = entry.eventId && popupShowing && popupShowing.eventId === entry.eventId;
+  const overridesShowing = entry.eventId && !(popupShowing && popupShowing.sticky);
+  if (sameMeeting || overridesShowing) {
+    openQueuedPopup(entry);
+    return;
+  }
+  if (popupQueue.length < POPUP_QUEUE_MAX) popupQueue.push(entry);
+}
+
+function popupClosed() {
+  popupShowing = null;
+  popupQueue = popupQueue.filter((entry) => !entry.stillWanted || entry.stillWanted());
+  const next = popupQueue.shift();
+  if (next) setTimeout(() => openQueuedPopup(next), POPUP_GAP_MS);
+}
+
+function showReminderPopup(evt, stage) {
+  requestPopup({
+    eventId: evt.id,
+    // These stay open until dismissed, so nothing else may take their place.
+    sticky: stage.key === '0m' || stage.key === '10m' || stage.key === '5m',
+    stillWanted: () => {
+      const current = calendarEvents.find((e) => e.id === evt.id);
+      return Boolean(current) && !current.done;
+    },
+    open: () => openReminderPopup(evt, stage),
+  });
+}
+
+function openReminderPopup(evt, stage) {
   if (alertPopup && !alertPopup.isDestroyed()) {
     alertPopup.close();
     alertPopup = null;
@@ -2503,9 +2286,10 @@ function showReminderPopup(evt, autoDismissMs, stage) {
   });
   applyLinuxPopupTransparency(alertPopup);
 
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); }
   alertPopup.once('ready-to-show', () => {
-    if (alertPopup && !alertPopup.isDestroyed()) alertPopup.show();
+    // Without taking the keyboard: someone may be typing, and the keys must stay where they are.
+    if (alertPopup && !alertPopup.isDestroyed()) alertPopup.showInactive();
   });
   alertPopup.loadFile(path.join(__dirname, 'meeting-popup.html'));
 
@@ -2572,6 +2356,14 @@ function toggleTask(id) {
   task.completedAt = task.done ? Date.now() : null;
   saveTasks();
   broadcastTasks();
+  // A task's calendar event finishes with it, or its reminders would keep coming.
+  const linked = calendarEvents.filter((e) => e.linkedTaskId === id && Boolean(e.done) !== task.done);
+  if (linked.length > 0) {
+    for (const evt of linked) evt.done = task.done;
+    saveCalendarEvents();
+    broadcastCalendar();
+    scheduleReminders();
+  }
   return task;
 }
 
@@ -2579,6 +2371,12 @@ function deleteTask(id) {
   tasks = tasks.filter((t) => t.id !== id);
   saveTasks();
   broadcastTasks();
+  if (calendarEvents.some((e) => e.linkedTaskId === id)) {
+    calendarEvents = calendarEvents.filter((e) => e.linkedTaskId !== id);
+    saveCalendarEvents();
+    broadcastCalendar();
+    scheduleReminders();
+  }
 }
 
 function clearCompletedTasks() {
@@ -2612,26 +2410,65 @@ function renameTask(id, text) {
   return task;
 }
 
+const REPEATS = ['daily', 'weekly', 'biweekly', 'monthly'];
+const EVENT_COLOR_NAMES = ['blue', 'green', 'orange', 'red', 'purple'];
+// How far ahead a repeating event's dates exist.
+const REPEAT_HORIZON_DAYS = 90;
+
+// Tops up every repeating event's dates. A date someone removed or moved away is in its skipDates.
+function extendRepeatingEvents() {
+  const today = localDateStr(new Date());
+  const until = calendarLib.addDays(today, REPEAT_HORIZON_DAYS);
+  let added = false;
+  for (const parent of calendarEvents.filter((e) => e.recurrence && !e.isGoogleEvent)) {
+    const taken = new Set(calendarEvents.filter((e) => e.recurringParentId === parent.id).map((e) => e.date));
+    for (const date of parent.skipDates || []) taken.add(date);
+    for (const date of calendarLib.occurrences(parent.date, parent.recurrence, today, until)) {
+      if (taken.has(date)) continue;
+      calendarEvents.push({
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        title: parent.title,
+        date,
+        time: parent.time,
+        duration: parent.duration,
+        color: parent.color,
+        reminder: parent.reminder,
+        recurrence: null, // instances don't recurse
+        recurringParentId: parent.id,
+        googleEventId: null,
+        createdAt: Date.now(),
+      });
+      added = true;
+    }
+  }
+  return added;
+}
+
+function seriesOf(evt) {
+  const rootId = evt.recurringParentId || evt.id;
+  return calendarEvents.filter((e) => e.id === rootId || e.recurringParentId === rootId);
+}
+
 function addCalendarEvent(data) {
-  if (!data || typeof data.title !== 'string' || !data.date) return { success: false };
+  if (!data || typeof data.title !== 'string' || !data.title.trim() || !isRealDate(data.date)) return { success: false };
+  let reminder = null;
+  if (data.reminder === undefined) reminder = calendarLib.DEFAULT_REMINDER;
+  else if (typeof data.reminder === 'number') reminder = data.reminder;
   const evt = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     title: data.title.trim().slice(0, 100),
     date: data.date,
-    time: data.time || null,
+    time: typeof data.time === 'string' && TIME_RE.test(data.time) ? data.time : null,
     duration: typeof data.duration === 'number' && data.duration > 0 ? data.duration : null,
-    color: ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0 ? data.color : 'blue',
-    reminder: typeof data.reminder === 'number' ? data.reminder : null,
-    recurrence: data.recurrence || null,
+    color: EVENT_COLOR_NAMES.indexOf(data.color) >= 0 ? data.color : 'blue',
+    reminder,
+    recurrence: REPEATS.indexOf(data.recurrence) >= 0 ? data.recurrence : null,
     done: false,
     googleEventId: null,
     createdAt: Date.now(),
   };
-  // Generate recurring instances
-  if (evt.recurrence) {
-    generateRecurringEvents(evt);
-  }
   calendarEvents.push(evt);
+  if (evt.recurrence) extendRepeatingEvents();
   saveCalendarEvents();
   broadcastCalendar();
   scheduleReminders();
@@ -2640,20 +2477,52 @@ function addCalendarEvent(data) {
 
 function updateCalendarEvent(data) {
   if (!data || !data.id) return { success: false };
-  const idx = calendarEvents.findIndex((e) => e.id === data.id);
-  if (idx < 0) return { success: false };
-  const evt = calendarEvents[idx];
+  const evt = calendarEvents.find((e) => e.id === data.id);
+  if (!evt) return { success: false };
+  if (data.date !== undefined && !isRealDate(data.date)) return { success: false };
+  const oldDate = evt.date;
+  const oldTime = evt.time;
   if (data.title !== undefined) evt.title = String(data.title).trim().slice(0, 100);
   if (data.date !== undefined) evt.date = data.date;
-  if (data.time !== undefined) evt.time = data.time || null;
+  if (data.time !== undefined) evt.time = typeof data.time === 'string' && TIME_RE.test(data.time) ? data.time : null;
   if (data.duration !== undefined) evt.duration = typeof data.duration === 'number' && data.duration > 0 ? data.duration : null;
-  if (data.color !== undefined && ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0) evt.color = data.color;
+  if (data.color !== undefined && EVENT_COLOR_NAMES.indexOf(data.color) >= 0) evt.color = data.color;
   if (data.reminder !== undefined) evt.reminder = typeof data.reminder === 'number' ? data.reminder : null;
-  firedReminders.delete(evt.id); // allow re-fire if time changed
+
+  // A new moment means the reminders haven't happened yet.
+  if (evt.date !== oldDate || evt.time !== oldTime) delete firedStages[evt.id];
+
+  if (evt.date !== oldDate) repeatingEventMoved(evt, oldDate);
+  if (data.wholeSeries) {
+    const today = localDateStr(new Date());
+    for (const other of seriesOf(evt)) {
+      if (other === evt || other.done || other.date < today) continue;
+      other.title = evt.title;
+      other.time = evt.time;
+      other.duration = evt.duration;
+      other.color = evt.color;
+      other.reminder = evt.reminder;
+      delete firedStages[other.id];
+    }
+  }
   saveCalendarEvents();
   broadcastCalendar();
   scheduleReminders();
   return { success: true };
+}
+
+// One date of a series moved: the old date mustn't grow back. The first date moved: the pattern starts
+// over from there, so its upcoming dates are remade.
+function repeatingEventMoved(evt, oldDate) {
+  if (evt.recurringParentId) {
+    const parent = calendarEvents.find((e) => e.id === evt.recurringParentId);
+    if (parent) parent.skipDates = (parent.skipDates || []).concat(oldDate);
+  } else if (evt.recurrence) {
+    const today = localDateStr(new Date());
+    calendarEvents = calendarEvents.filter((e) => !(e.recurringParentId === evt.id && !e.done && e.date >= today));
+    evt.skipDates = [];
+    extendRepeatingEvents();
+  }
 }
 
 function toggleCalendarEvent(data) {
@@ -2663,21 +2532,37 @@ function toggleCalendarEvent(data) {
   evt.done = !evt.done;
   saveCalendarEvents();
   broadcastCalendar();
+  scheduleReminders(); // a finished event's pending reminders stop here
   return { success: true };
 }
 
+// `series`: every date of a repeating event. Otherwise just this one, which doesn't grow back.
 function deleteCalendarEvent(data) {
   if (!data || !data.id) return { success: false };
-  calendarEvents = calendarEvents.filter((e) => e.id !== data.id);
-  firedReminders.delete(data.id);
-  // Reminder timers use compound key "id:stage" — clear all matching
-  for (const key of Object.keys(reminderTimers)) {
-    if (key === data.id || key.startsWith(data.id + ':')) {
-      clearTimeout(reminderTimers[key]);
-      delete reminderTimers[key];
+  const evt = calendarEvents.find((e) => e.id === data.id);
+  if (!evt) return { success: false };
+  if (data.series) {
+    const gone = new Set(seriesOf(evt));
+    calendarEvents = calendarEvents.filter((e) => !gone.has(e));
+    for (const e of gone) delete firedStages[e.id];
+  } else {
+    if (evt.recurringParentId) {
+      const parent = calendarEvents.find((e) => e.id === evt.recurringParentId);
+      if (parent) parent.skipDates = (parent.skipDates || []).concat(evt.date);
+    } else if (evt.recurrence) {
+      // The first date holds the pattern, so the next one takes over from it.
+      const rest = seriesOf(evt).filter((e) => e !== evt).sort((a, b) => a.date.localeCompare(b.date));
+      if (rest.length > 0) {
+        const next = rest[0];
+        next.recurrence = evt.recurrence;
+        next.recurringParentId = null;
+        next.skipDates = evt.skipDates || [];
+        for (const other of rest.slice(1)) other.recurringParentId = next.id;
+      }
     }
+    calendarEvents = calendarEvents.filter((e) => e !== evt);
+    delete firedStages[evt.id];
   }
-  delete firedStages[data.id];
   saveCalendarEvents();
   broadcastCalendar();
   scheduleReminders();
@@ -2685,12 +2570,7 @@ function deleteCalendarEvent(data) {
 }
 
 function readStickyNotes() {
-  try {
-    if (fs.existsSync(STICKY_NOTES_FILE)) {
-      return JSON.parse(fs.readFileSync(STICKY_NOTES_FILE, 'utf-8'));
-    }
-  } catch { /* ignore */ }
-  return null;
+  return readJsonOr(STICKY_NOTES_FILE, null);
 }
 
 // Validate and cap, write, then tell every notes window except the one that
@@ -2703,7 +2583,7 @@ function saveStickyNotes(notes, senderContents) {
     color: typeof n.color === 'string' ? n.color.slice(0, 10) : 'default',
     createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
   }));
-  try { fs.writeFileSync(STICKY_NOTES_FILE, JSON.stringify(clean, null, 2)); } catch { /* ignore */ }
+  try { writeJsonAtomic(STICKY_NOTES_FILE, clean); } catch (err) { console.error('[notes] save failed:', err.message); }
   // Keep the other notes pages (panel, app, Plan section) in sync
   const pages = [notesWin, notesAppWin]
     .filter((w) => w && !w.isDestroyed())
@@ -2719,39 +2599,27 @@ function saveStickyNotes(notes, senderContents) {
 }
 
 function readNotesArchive() {
-  try {
-    if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-      return JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-    }
-  } catch { /* ignore */ }
-  return [];
+  const archive = readJsonOr(NOTES_ARCHIVE_FILE, []);
+  return Array.isArray(archive) ? archive : [];
 }
 
 function archiveAddNote(note) {
   if (!note || typeof note.id !== 'string') return;
   try {
-    let archive = [];
-    if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-      archive = JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-    }
+    let archive = readNotesArchive();
     note.archivedAt = Date.now();
     archive.unshift(note);
     // Keep last 50 archived notes
     if (archive.length > 50) archive = archive.slice(0, 50);
-    fs.writeFileSync(NOTES_ARCHIVE_FILE, JSON.stringify(archive, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(NOTES_ARCHIVE_FILE, archive);
+  } catch (err) { console.error('[notes] archive failed:', err.message); }
 }
 
 function archiveRemoveNote(noteId) {
   if (typeof noteId !== 'string') return;
   try {
-    let archive = [];
-    if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-      archive = JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-    }
-    archive = archive.filter((n) => n.id !== noteId);
-    fs.writeFileSync(NOTES_ARCHIVE_FILE, JSON.stringify(archive, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(NOTES_ARCHIVE_FILE, readNotesArchive().filter((n) => n.id !== noteId));
+  } catch (err) { console.error('[notes] archive failed:', err.message); }
 }
 
 // --- Alert popup ---
@@ -2763,6 +2631,10 @@ function getAlertStep(pct, threshold) {
 }
 
 function showAlertPopup(label, pct, resetsAt, accountLabel) {
+  requestPopup({ open: () => openAlertPopup(label, pct, resetsAt, accountLabel) });
+}
+
+function openAlertPopup(label, pct, resetsAt, accountLabel) {
   if (alertPopup && !alertPopup.isDestroyed()) {
     alertPopup.close();
     alertPopup = null;
@@ -2794,7 +2666,7 @@ function showAlertPopup(label, pct, resetsAt, accountLabel) {
   });
   applyLinuxPopupTransparency(alertPopup);
 
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); }
 
   alertPopup.once('ready-to-show', () => {
     if (alertPopup && !alertPopup.isDestroyed()) {
@@ -2839,6 +2711,7 @@ function checkAndNotify(ctx) {
     const step = getAlertStep(check.pct, ALERT_THRESHOLDS[check.key]);
     if (step >= 0 && step !== ctx.lastAlertedStep[check.key]) {
       ctx.lastAlertedStep[check.key] = step;
+      saveCachedUsage(ctx);
       showAlertPopup(check.label, check.pct, check.resetsAt, ctx.name || 'Me');
     }
     // Reset tracking when usage drops below threshold
@@ -2907,7 +2780,7 @@ function isNewerVersion(latest, current) {
 
 function checkForUpdates() {
   return new Promise((resolve) => {
-    const url = new URL('https://api.github.com/repos/SpitOnYourFace/claude-usage-widget/releases/latest');
+    const url = new URL('https://api.github.com/repos/KrasimirKralev/claude-meter/releases/latest');
     const req = https.request({
       hostname: url.hostname,
       path: url.pathname,
@@ -3164,18 +3037,36 @@ function reportAuthExpired(ctx) {
 // Called by doSync on 401/403 — force a refresh and retry.
 // Only escalates to a user-visible re-auth prompt when no refresh token is available;
 // the refresh endpoint itself will surface a sign-in prompt if the refresh token is rejected.
+function retryAuthSync(ctx, delay) {
+  if (ctx.authRetryTimer) clearTimeout(ctx.authRetryTimer);
+  ctx.authRetryTimer = setTimeout(() => {
+    ctx.authRetryTimer = null;
+    doSync(ctx);
+  }, delay);
+}
+
 function handleAuthFailure(ctx) {
   ctx.cachedToken = null;
   ctx.tokenLastRead = 0;
+  if (ctx.signedOut) return;
   const oauth = readOauthCreds(ctx);
   if (oauth && oauth.refreshToken) {
+    // One retry waits at a time, each longer than the last. Past the limit the regular polls and a new
+    // login are what bring it back: every refresh here rotates the login's token.
+    ctx.authAttempts = (ctx.authAttempts || 0) + 1;
+    if (ctx.authAttempts > AUTH_MAX_ATTEMPTS) {
+      ctx.lastError = ctx.lastError || 'This login keeps being refused.';
+      broadcastUsage();
+      return;
+    }
+    const wait = Math.min(AUTH_RETRY_MAX_MS, AUTH_RETRY_BASE_MS * Math.pow(2, ctx.authAttempts - 1));
     if (!ctx.isRefreshing) {
       refreshAccessToken(ctx, oauth.refreshToken, () => {
-        setTimeout(() => doSync(ctx), 500);
+        retryAuthSync(ctx, ctx.authAttempts === 1 ? 500 : wait);
       });
     } else {
-      // Refresh already in progress — retry sync after it likely completes
-      setTimeout(() => doSync(ctx), 5000);
+      // Refresh already in progress: retry sync after it likely completes
+      retryAuthSync(ctx, wait);
     }
     return;
   }
@@ -3185,7 +3076,7 @@ function handleAuthFailure(ctx) {
 }
 
 function refreshAccessToken(ctx, refreshToken, onSuccess) {
-  if (!ctx || ctx.isRefreshing) return;
+  if (!ctx || ctx.isRefreshing || ctx.signedOut) return;
   // A refresh token the endpoint already rejected stays rejected until the
   // creds file carries a different one (a re-login); every token read used to
   // retry it, which hammered the endpoint ~100 times a minute.
@@ -3277,6 +3168,11 @@ function scheduleRefreshRetry(ctx, refreshToken) {
 // Rate limits are per access token. A 429 on one account must never shorten
 // another's polling, and must never be retried faster than these floors.
 const MIN_TOKEN_POLL_MS = 3 * 60 * 1000;
+// The regular round comes every 3 minutes on the dot, so a hair less must not make it skip a turn.
+const POLL_SLACK_MS = 5000;
+const AUTH_RETRY_BASE_MS = 5000;
+const AUTH_RETRY_MAX_MS = 5 * 60 * 1000;
+const AUTH_MAX_ATTEMPTS = 6;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
 
 function resetSyncIfStale(ctx) {
@@ -3304,6 +3200,7 @@ function fetchUsage(ctx) {
     }
     ctx.syncing = true;
     ctx.syncStartedAt = Date.now();
+    ctx.lastRequestAt = ctx.syncStartedAt;
 
     const token = getAccessToken(ctx);
     if (!token) {
@@ -3505,6 +3402,7 @@ function checkLogins() {
     const mtime = credsMtime(ctx.credsFile);
     if (!mtime || mtime === ctx.needsLoginMtime || mtime === ctx.loginKickMtime) continue;
     ctx.loginKickMtime = mtime; // one kick per new file
+    ctx.authAttempts = 0;
     ctx.cachedToken = null;
     ctx.tokenLastRead = 0;
     doSync(ctx);
@@ -3615,7 +3513,8 @@ function scheduleNetworkRetry(ctx) {
 // Smart sync — only hits API if data is stale
 function syncIfStale(ctx) {
   if (!ctx) return;
-  if (Date.now() - ctx.lastSuccessfulSync < MIN_SYNC_INTERVAL) {
+  const lastTouched = Math.max(ctx.lastSuccessfulSync || 0, ctx.lastRequestAt || 0);
+  if (Date.now() - lastTouched < MIN_TOKEN_POLL_MS - POLL_SLACK_MS) {
     // Data is fresh — just broadcast cached data
     broadcastUsage();
     return;
@@ -3648,7 +3547,7 @@ function syncAllAccounts(force) {
 }
 
 async function doSync(ctx) {
-  if (!ctx) return;
+  if (!ctx || ctx.signedOut) return;
   // Force-clear stale sync lock
   resetSyncIfStale(ctx);
   const isActive = ctx.id === activeAccountId;
@@ -3663,10 +3562,10 @@ async function doSync(ctx) {
     // Guard: don't overwrite good cached data with all-zero response (treat as bad response)
     const cached = ctx.cachedUsage;
     if (usageLib.looksEmpty(newUsage) && cached && usageLib.anyUsage(cached)) {
-      // Bad response — keep cached data, schedule retry, don't mark as successful sync
+      // Bad response: keep cached data, don't mark as a successful sync. The next regular round tries
+      // again, because quick retries would break the limit of one request every 3 minutes per token.
       broadcastUsage();
       updateTrayTooltip();
-      scheduleNetworkRetry(ctx);
       return;
     }
 
@@ -3674,6 +3573,7 @@ async function doSync(ctx) {
     ctx.lastSuccessfulSync = Date.now();
     ctx.lastError = null;
     ctx.needsLogin = false;
+    ctx.authAttempts = 0;
     clearRetryTimer(ctx); // sync succeeded — stop retrying
     saveCachedUsage(ctx);
     appendHistory(ctx);
@@ -4147,12 +4047,12 @@ function toggleWindow() {
         // Offset by widget position delta (in case widget moved)
         const dx = widgetBounds.x - (saved ? saved.x : widgetBounds.x);
         const dy = widgetBounds.y - (saved ? saved.y : widgetBounds.y);
-        tasksWin.setBounds({
+        tasksWin.setBounds(clampToWorkArea({
           x: savedTasksBounds.x + dx,
           y: savedTasksBounds.y + dy,
           width: savedTasksBounds.width,
           height: savedTasksBounds.height,
-        });
+        }));
       } else if (tasksSnapped) {
         const sb = getSnappedTasksBounds(tasksSnapped);
         if (sb) tasksWin.setBounds(sb);
@@ -4165,12 +4065,12 @@ function toggleWindow() {
       if (savedCalBounds) {
         const dx = widgetBounds.x - (saved ? saved.x : widgetBounds.x);
         const dy = widgetBounds.y - (saved ? saved.y : widgetBounds.y);
-        calWin.setBounds({
+        calWin.setBounds(clampToWorkArea({
           x: savedCalBounds.x + dx,
           y: savedCalBounds.y + dy,
           width: savedCalBounds.width,
           height: savedCalBounds.height,
-        });
+        }));
       } else if (calendarSnapped) {
         const cb = getSnappedCalendarBounds(calendarSnapped);
         if (cb) calWin.setBounds(cb);
@@ -4182,12 +4082,12 @@ function toggleWindow() {
       if (savedNotesBounds) {
         const dx = widgetBounds.x - (saved ? saved.x : widgetBounds.x);
         const dy = widgetBounds.y - (saved ? saved.y : widgetBounds.y);
-        notesWin.setBounds({
+        notesWin.setBounds(clampToWorkArea({
           x: savedNotesBounds.x + dx,
           y: savedNotesBounds.y + dy,
           width: savedNotesBounds.width,
           height: savedNotesBounds.height,
-        });
+        }));
       }
       setTimeout(() => { if (notesWin && !notesWin.isDestroyed()) notesWin.show(); }, showDelay);
     }
@@ -4198,7 +4098,7 @@ function toggleWindow() {
       // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
       win.webContents.send('pomo-update', { state: pomoState, seconds: pomoSeconds, total: pomoTotal });
     }
-    // Sync on open — hits API if data is >60s old (MIN_SYNC_INTERVAL)
+    // Sync on open: hits the API only if this token's last request is 3 minutes old
     syncAllAccounts(false);
     tryShowDigestOnOpen();
     if (trayHasAlert) {
@@ -5342,6 +5242,24 @@ function saveNotesAppBounds() {
   }, 400);
 }
 
+// Spellcheck suggestions on right-click.
+function addSpellMenu(contents, getWindow) {
+  contents.on('context-menu', (_event, params) => {
+    if (!params.misspelledWord) return;
+    const items = params.dictionarySuggestions.slice(0, 5).map((suggestion) => ({
+      label: suggestion,
+      click: () => contents.replaceMisspelling(suggestion),
+    }));
+    if (items.length > 0) items.push({ type: 'separator' });
+    items.push({
+      label: 'Add to dictionary',
+      click: () => contents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+    });
+    const window = typeof getWindow === 'function' ? getWindow() : getWindow;
+    Menu.buildFromTemplate(items).popup(window ? { window } : {});
+  });
+}
+
 function openNotesAppWindow() {
   if (notesAppWin && !notesAppWin.isDestroyed()) {
     // Toggle like the other widget panels: second click closes
@@ -5394,24 +5312,7 @@ function openNotesAppWindow() {
     notesAppWin.webContents.send('theme-update', { name: currentTheme, ...theme });
   });
 
-  // Spellcheck context menu (same UX as the panel)
-  notesAppWin.webContents.on('context-menu', (event, params) => {
-    if (params.misspelledWord) {
-      const menuItems = [];
-      for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
-        menuItems.push({
-          label: suggestion,
-          click: () => notesAppWin.webContents.replaceMisspelling(suggestion),
-        });
-      }
-      if (menuItems.length > 0) menuItems.push({ type: 'separator' });
-      menuItems.push({
-        label: 'Add to dictionary',
-        click: () => notesAppWin.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
-      });
-      Menu.buildFromTemplate(menuItems).popup({ window: notesAppWin });
-    }
-  });
+  addSpellMenu(notesAppWin.webContents, notesAppWin);
 
   notesAppWin.on('moved', saveNotesAppBounds);
   notesAppWin.on('resized', saveNotesAppBounds);
@@ -5440,6 +5341,7 @@ function openQuickTaskCapture() {
   });
   applyLinuxPopupTransparency(captureWin);
   captureWin.loadFile('capture.html');
+  captureWin.webContents.once('did-finish-load', () => sendCurrentTheme(captureWin));
   captureWin.once('ready-to-show', () => {
     if (captureWin && !captureWin.isDestroyed()) { captureWin.show(); captureWin.focus(); }
   });
@@ -5716,13 +5618,6 @@ let inboxDebounce = null;
 let inboxBusy = false;
 let inboxAgain = false;
 let feedDate = null;
-
-function writeJsonAtomic(file, obj) {
-  const tmp = file + '.tmp-' + process.pid;
-  try { fs.unlinkSync(tmp); } catch { /* not there */ }
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, file);
-}
 
 function localDateStr(d) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -6100,27 +5995,32 @@ function checkDisplayScale(reason) {
   // to be free and starts the AppImage itself; inherited stdio keeps the new
   // process's log in the journal.
   try {
-    // cwd outside the mount and none of the AppImage runtime's variables (they
-    // point into this mount: LD_LIBRARY_PATH would make the new process load
-    // its libraries from here, and the old launcher could never unmount).
-    const env = { ...process.env };
-    for (const k of ['APPDIR', 'APPIMAGE', 'ARGV0', 'OWD', 'LD_LIBRARY_PATH', 'CLAUDE_METER_FAKE_START_SCALE']) delete env[k];
-    // Chromium leaves descriptors without close-on-exec (its own binary among
-    // them); closed here, or the new process would pin the old mount too.
-    // bash, because dash reads `exec 10>&-` as "run the program 10" and dies;
-    // without bash only descriptors 3-9 can be closed.
-    const script = 'for fd in $(ls /proc/$$/fd); do case $fd in 0|1|2) ;; ?) eval "exec $fd>&-" ;; ' +
-      '*) [ -n "$BASH" ] && eval "exec $fd>&-" ;; esac; done; sleep 3; exec "$0" "$@"';
-    const shell = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
-    const child = spawn(shell, ['-c', script, exe, ...args],
-      { detached: true, stdio: 'inherit', cwd: os.homedir(), env });
-    child.unref();
+    restartDetached(exe, args);
   } catch (e) {
     console.log('[scale] relaunch failed to start: ' + e.message + ' - staying as is');
     return;
   }
   app.exit(0);
 }
+// Starts this program again a moment after this process has gone, with nothing of its own left behind.
+function restartDetached(exe, args) {
+  // cwd outside the mount and none of the AppImage runtime's variables (they
+  // point into this mount: LD_LIBRARY_PATH would make the new process load
+  // its libraries from here, and the old launcher could never unmount).
+  const env = { ...process.env };
+  for (const k of ['APPDIR', 'APPIMAGE', 'ARGV0', 'OWD', 'LD_LIBRARY_PATH', 'CLAUDE_METER_FAKE_START_SCALE']) delete env[k];
+  // Chromium leaves descriptors without close-on-exec (its own binary among
+  // them); closed here, or the new process would pin the old mount too.
+  // bash, because dash reads `exec 10>&-` as "run the program 10" and dies;
+  // without bash only descriptors 3-9 can be closed.
+  const script = 'for fd in $(ls /proc/$$/fd); do case $fd in 0|1|2) ;; ?) eval "exec $fd>&-" ;; ' +
+    '*) [ -n "$BASH" ] && eval "exec $fd>&-" ;; esac; done; sleep 3; exec "$0" "$@"';
+  const shell = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
+  const child = spawn(shell, ['-c', script, exe, ...args],
+    { detached: true, stdio: 'inherit', cwd: os.homedir(), env });
+  child.unref();
+}
+
 function startDisplayScaleGuard() {
   if (process.platform !== 'linux') return;
   scaleStart = screen.getPrimaryDisplay().scaleFactor;
@@ -6150,14 +6050,16 @@ function startDisplayScaleGuard() {
 }
 
 app.whenReady().then(() => {
+  // The second copy is on its way out. Starting up would repeat reminders and take phone edits.
+  if (!gotLock) return;
   // Only the instance that owns the single-instance lock may own the socket: a
   // second instance quits right after whenReady, and if it had unlinked and
   // re-listened on the path, its exit would take the primary's socket with it
   // (2026-10-02: Ctrl+\ went dead that way).
-  if (gotLock) startToggleSocket();
+  startToggleSocket();
   // One line per start, so the journal says which build is running.
-  if (gotLock) console.log('[app] Claude Meter ' + (APP_VERSION || app.getVersion()) + ' started');
-  if (gotLock) startDisplayScaleGuard();
+  console.log('[app] Claude Meter ' + (APP_VERSION || app.getVersion()) + ' started');
+  startDisplayScaleGuard();
   // Ensure data directory exists
   try { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); } catch { /* ignore */ }
 
@@ -6167,6 +6069,8 @@ app.whenReady().then(() => {
   calendarEvents = loadCalendarEvents();
   gcalAccounts = loadGcalConfig();
   streakData = loadStreak();
+  if (extendRepeatingEvents()) saveCalendarEvents();
+  updateStreak();
   // Discover/merge accounts, then hydrate each one's cached usage + history
   initAccounts();
   for (const ctx of Object.values(accountCtx)) {
@@ -6245,6 +6149,7 @@ app.whenReady().then(() => {
     getDashboard: () => dashWin,
     getTheme: () => ({ name: currentTheme, ...(THEMES[currentTheme] || THEMES.dark) }),
     dirname: __dirname,
+    onCreated: (contents) => addSpellMenu(contents, () => dashWin),
   });
 
   ipcMain.handle('streak-get', (event) => (isLocalSender(event) ? streakData : {}));
@@ -6377,9 +6282,13 @@ app.whenReady().then(() => {
           if (filename === '.credentials.json' && authCtx) {
             authCtx.cachedToken = null;
             authCtx.tokenLastRead = 0;
+            // Signed out refuses every token on purpose, and this file changing is the way back.
+            const wasSignedOut = authCtx.signedOut;
+            authCtx.signedOut = false;
             const token = getAccessToken(authCtx, true);
+            if (!token) authCtx.signedOut = wasSignedOut;
             if (token) {
-              authCtx.signedOut = false;
+              authCtx.authAttempts = 0;
               authCtx.needsLogin = false;
               if (win && !win.isDestroyed()) {
                 win.webContents.send('auth-status-changed', { authenticated: true });
@@ -6446,9 +6355,15 @@ app.whenReady().then(() => {
       try {
         const watcher = fs.watch(ctx.dir, (_, filename) => {
           if (filename !== '.credentials.json') return;
-          const token = getAccessToken(ctx, true);
-          if (!token) return;
+          // Signed out refuses every token on purpose, and this file changing is the way back.
+          const wasSignedOut = ctx.signedOut;
           ctx.signedOut = false;
+          const token = getAccessToken(ctx, true);
+          if (!token) {
+            ctx.signedOut = wasSignedOut;
+            return;
+          }
+          ctx.authAttempts = 0;
           ctx.needsLogin = false;
           ctx.lastError = null;
           if (ctx.id === activeAccountId) {
@@ -6656,7 +6571,8 @@ app.whenReady().then(() => {
   ipcMain.handle('tasks-schedule', (event, taskId, date, time) => {
     if (!isLocalSender(event)) return { success: false };
     const task = tasks.find((t) => t.id === taskId);
-    if (!task) return { success: false };
+    if (!task || !isRealDate(date)) return { success: false };
+    if (time && !(typeof time === 'string' && TIME_RE.test(time))) return { success: false };
     // Check if already linked to a calendar event
     const existing = calendarEvents.find((e) => e.linkedTaskId === taskId);
     if (existing) return { success: true, event: existing, alreadyExists: true };
@@ -6689,11 +6605,7 @@ app.whenReady().then(() => {
     const evt = calendarEvents.find((e) => e.id === eventId);
     // A synced event lives in Google, and the next sync would put it straight back.
     if (!evt || evt.isGoogleEvent) return { success: false };
-    evt.date = newDate;
-    saveCalendarEvents();
-    broadcastCalendar();
-    scheduleReminders();
-    return { success: true };
+    return updateCalendarEvent({ id: evt.id, date: newDate });
   });
 
   ipcMain.on('open-tasks-window', (event) => {
@@ -6880,7 +6792,7 @@ app.whenReady().then(() => {
     const title = note && typeof note.title === 'string' ? note.title : 'note';
     const text = note && typeof note.text === 'string' ? note.text : '';
     const md = normalizeMarkdown(text);
-    const res = await dialog.showSaveDialog(notesWin || win || undefined, {
+    const res = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender) || dashWin || win || undefined, {
       title: 'Export note as Markdown',
       defaultPath: safeFileName(title) + '.md',
       filters: [{ name: 'Markdown', extensions: ['md'] }],
@@ -6896,7 +6808,7 @@ app.whenReady().then(() => {
     const title = payload && typeof payload.title === 'string' ? payload.title : 'note';
     const text = payload && typeof payload.text === 'string' ? payload.text : '';
     const html = noteHtmlDoc(title, text);
-    const res = await dialog.showSaveDialog(notesWin || win || undefined, {
+    const res = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender) || dashWin || win || undefined, {
       title: 'Export note as PDF',
       defaultPath: safeFileName(title) + '.pdf',
       filters: [{ name: 'PDF', extensions: ['pdf'] }],
@@ -6959,7 +6871,7 @@ app.whenReady().then(() => {
     const result = parseSmartText(text);
 
     // Always create a task
-    addTask(result.title, result.priority);
+    const addedTask = addTask(result.title, result.priority);
 
     // If date was detected, also create a calendar event
     if (result.date) {
@@ -6973,7 +6885,7 @@ app.whenReady().then(() => {
         reminder: 15,
         recurrence: null,
         done: false,
-        linkedTaskId: tasks[tasks.length - 1]?.id || null,
+        linkedTaskId: addedTask ? addedTask.id : null,
         googleEventId: null,
         createdAt: Date.now(),
       };
@@ -7155,18 +7067,21 @@ app.whenReady().then(() => {
             try { fs.unlinkSync(backupPath); } catch { /* ignore */ }
             fs.renameSync(currentAppImage, backupPath);
             try {
-              // rename is atomic but fails across devices; fall back to copy
-              fs.renameSync(installerPath, currentAppImage);
-            } catch {
-              fs.copyFileSync(installerPath, currentAppImage);
-              fs.unlinkSync(installerPath);
+              try {
+                // rename is atomic but fails across devices; fall back to copy
+                fs.renameSync(installerPath, currentAppImage);
+              } catch {
+                fs.copyFileSync(installerPath, currentAppImage);
+                fs.unlinkSync(installerPath);
+              }
+            } catch (moveErr) {
+              // Whatever went wrong, the app that works goes back where it was.
+              fs.renameSync(backupPath, currentAppImage);
+              throw moveErr;
             }
             fs.chmodSync(currentAppImage, 0o755);
             try { fs.unlinkSync(backupPath); } catch { /* ignore */ }
-            spawn(currentAppImage, [], {
-              detached: true,
-              stdio: 'ignore',
-            }).unref();
+            restartDetached(currentAppImage, []);
           } else {
             // Not running as AppImage (dev mode) — just launch from tmp
             spawn(installerPath, [], {
@@ -7211,7 +7126,7 @@ app.whenReady().then(() => {
     // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
     // Send badge counts
     const pendingCount = tasks.filter((t) => !t.done).length;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateStr(new Date());
     const todayCount = calendarEvents.filter((e) => e.date === today).length;
     win.webContents.send('badge-update', { tasks: pendingCount, calendar: todayCount });
     // Send streak
@@ -7237,11 +7152,7 @@ app.whenReady().then(() => {
     }
     if (claudeStatus) win.webContents.send('claude-status-update', claudeStatus);
     tryShowDigestOnOpen();
-    // Apply saved theme
-    if (currentTheme !== 'dark') {
-      const theme = THEMES[currentTheme] || THEMES.dark;
-      win.webContents.send('theme-update', { name: currentTheme, ...theme });
-    }
+    sendCurrentTheme(win);
   });
 
   // Auto-refresh usage every 3 minutes — fires even when widget is hidden
@@ -7265,9 +7176,26 @@ app.whenReady().then(() => {
   startFileWatcher();
   startPhoneSync();
 
+  // Timers only exist for the next day's reminders, and a late one is only noticed when something
+  // looks. So this looks: without it, an app left running never reminded anyone of later events.
+  let calendarDay = localDateStr(new Date());
+  cleanupTimers.push(setInterval(() => {
+    const today = localDateStr(new Date());
+    if (today !== calendarDay) {
+      calendarDay = today;
+      if (extendRepeatingEvents()) {
+        saveCalendarEvents();
+        broadcastCalendar();
+      }
+      updateStreak();
+    }
+    scheduleReminders();
+  }, REMINDER_CHECK_MS));
+
   // --- Power monitor: handle sleep/wake ---
   powerMonitor.on('suspend', () => {
     relaxEndEarly('system suspended');
+    relaxCloseHeadsUp();
     for (const ctx of Object.values(accountCtx)) {
       if (ctx.activeRequest) {
         try { ctx.activeRequest.destroy(); } catch { /* ignore */ }

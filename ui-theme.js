@@ -6,6 +6,9 @@
   // Colour on the accent, for themes whose accent is too dark for ink.
   var ON_ACCENT = { karchx: '#ffffff', light: '#ffffff' };
 
+  // Red that is readable as small text. Some themes' own red is only strong enough for a filled shape.
+  var CRIT_TEXT = { brutal: '#c8232b', nord: '#f2a7ae', dracula: '#ff9e9e' };
+
   function applyTheme(theme) {
     if (!theme) return;
     var root = document.documentElement;
@@ -23,8 +26,7 @@
     set('--red', theme.red);
     set('--yellow', theme.yellow);
     set('--bar-bg', theme.barBg);
-    // Brutal's red is too light for small text on white. Other themes keep their own.
-    set('--crit-text', theme.name === 'brutal' ? '#c8232b' : (theme.red || '#e5484d'));
+    set('--crit-text', CRIT_TEXT[theme.name] || theme.red || '#e5484d');
     set('--hover', DARK_THEMES[theme.name] ? 'rgba(255, 255, 255, 0.08)' : 'rgba(17, 17, 17, 0.06)');
     root.dataset.theme = theme.name || 'brutal';
     root.style.colorScheme = DARK_THEMES[theme.name] ? 'dark' : 'light';

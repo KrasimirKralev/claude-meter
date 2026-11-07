@@ -121,7 +121,7 @@ window.meetingPopupAPI.onData(function(data) {
     joinBtn.onclick = null;
   }
 
-  var isCritical = data.stage === '0m' || data.stage === '5m';
+  var isCritical = data.stage === '0m' || data.stage === '10m' || data.stage === '5m';
 
   UI.clear(ringIcon);
   if (data.stage === '0m') {
@@ -130,7 +130,7 @@ window.meetingPopupAPI.onData(function(data) {
     title.textContent = 'Starting now';
     popup.classList.add('crit');
     subtitle.textContent = timeText(data.resetText) || 'Your meeting is starting';
-  } else if (data.stage === '5m') {
+  } else if (data.stage === '10m' || data.stage === '5m') {
     ringIcon.appendChild(UI.icon('warning'));
     title.textContent = 'Starting soon';
     popup.classList.add('warn');

@@ -17,15 +17,7 @@
     --note-blue: #a9d5ff;
     --note-purple: #c5b3f6;
     --code-font: ui-monospace, 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
-    --firm-dim: color-mix(in srgb, var(--text-dim) 50%, var(--text));
-    --firm-crit: color-mix(in srgb, var(--red) 50%, var(--text));
   }
-  /* The dim and red of these two themes miss AA on their own surfaces. */
-  html[data-theme='nord'] body, html[data-theme='dracula'] body {
-    --text-dim: var(--firm-dim);
-    --crit-text: var(--firm-crit);
-  }
-
   /* The frame belongs on #app: main.js rounds it there on Linux, and 12px is that radius. */
   body.panel-window { border: 0; border-radius: 12px; user-select: none; }
   #app {
