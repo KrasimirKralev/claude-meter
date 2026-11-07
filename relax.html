@@ -3,15 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-  content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';">
+  content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self';">
 <title>Relax</title>
+<link rel="stylesheet" href="assets/fonts/inter.css">
+<!-- Not ui.css: the biomes write --ink as an "r, g, b" triplet (relax-biomes/_kit.js applyUi),
+     and ui.css reads the same name as a whole colour. -->
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  /* Each biome sets these (relax-biomes/_kit.js applyUi): ink = the UI's light, shade = its dark. */
-  :root { --ink: 255, 238, 230; --shade: 8, 6, 22; --vig: 0.5; --legible: 0; }
+  /* Each biome sets these (relax-biomes/_kit.js applyUi): ink = the UI's light, shade = its dark.
+     --back is the quiet backing under the words: stronger on the scenes that ask for legibility. */
+  :root {
+    --ink: 255, 238, 230; --shade: 8, 6, 22; --vig: 0.5; --legible: 0;
+    --back: calc(0.34 + var(--legible) * 0.45);
+  }
   html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
   body {
     font-family: Inter, system-ui, 'Segoe UI', Roboto, sans-serif;
+    font-variant-numeric: tabular-nums lining-nums;
     color: rgb(var(--ink));
     user-select: none;
     cursor: default;
@@ -37,60 +45,66 @@
     will-change: transform;
   }
   .breath-word {
-    position: absolute; left: 0; right: 0; top: calc(33% + 138px);
-    text-align: center;
-    font-size: 15px; font-weight: 300;
-    letter-spacing: 0.46em;
-    color: rgba(var(--ink), 0.8);
-    text-shadow: 0 1px 10px rgba(var(--shade), var(--legible));
+    position: absolute; left: 50%; top: calc(33% + 134px);
+    transform: translateX(-50%);
+    padding: 4px 16px;
+    border-radius: 12px;
+    background: rgba(var(--shade), var(--back));
+    font-size: 32px; line-height: 40px; font-weight: 400;
+    white-space: nowrap;
   }
-  .ring { position: absolute; left: 50%; bottom: 8.5%; width: 86px; height: 86px; margin-left: -43px; }
-  .ring svg { width: 86px; height: 86px; transform: rotate(-90deg); filter: drop-shadow(0 0 3px rgba(var(--shade), var(--legible))); }
-  .ring .bg { fill: none; stroke: rgba(var(--ink), 0.13); stroke-width: 2; }
-  .ring .fg { fill: none; stroke: rgba(var(--ink), 0.55); stroke-width: 2; stroke-linecap: round; }
-  .ring .time {
-    position: absolute; inset: 0;
-    display: flex; align-items: center; justify-content: center;
-    font: 500 15px/1 'JetBrains Mono', ui-monospace, monospace;
-    letter-spacing: 0.04em;
-    color: rgba(var(--ink), 0.78);
-    font-variant-numeric: tabular-nums;
-    text-shadow: 0 1px 10px rgba(var(--shade), var(--legible));
+  .breath-word:empty { visibility: hidden; }
+  .no-breath .breath, .no-breath .breath-word { display: none; }
+
+  /* The quiet end of the screen: one column, so nothing can land on anything else. */
+  .dock {
+    position: absolute; left: 50%; bottom: max(24px, 3.5%);
+    transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
   }
   .hint {
-    position: absolute; left: 0; right: 0; bottom: calc(8.5% + 104px);
-    text-align: center;
-    font-size: 12px; font-weight: 400;
-    letter-spacing: 0.22em; text-transform: uppercase;
-    color: rgba(var(--ink), 0.72);
-    text-shadow: 0 1px 10px rgba(var(--shade), var(--legible));
+    padding: 3px 12px;
+    border-radius: 8px;
+    background: rgba(var(--shade), var(--back));
+    font-size: 17px; line-height: 24px; white-space: nowrap;
     opacity: 0; transition: opacity 0.4s ease;
   }
   .hint.show { opacity: 1; }
+  .ring { position: relative; width: 96px; height: 96px; border-radius: 50%; background: rgba(var(--shade), var(--back)); }
+  .ring svg { display: block; width: 100%; height: 100%; transform: rotate(-90deg); }
+  .ring .bg { fill: none; stroke: rgba(var(--ink), 0.2); stroke-width: 2.5; }
+  .ring .fg { fill: none; stroke: rgb(var(--ink)); stroke-width: 2.5; stroke-linecap: round; }
+  .ring .time {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 26px; line-height: 1; font-weight: 500;
+  }
   /* Where this break is, said quietly under the timer. */
   .biome-name {
-    position: absolute; left: 0; right: 0; bottom: calc(8.5% - 27px);
-    text-align: center;
-    font: 500 10.5px/1 Inter, system-ui, sans-serif;
-    letter-spacing: 0.34em; text-transform: uppercase;
-    color: rgba(var(--ink), 0.46);
-    text-shadow: 0 1px 10px rgba(var(--shade), var(--legible));
+    padding: 2px 10px;
+    border-radius: 8px;
+    background: rgba(var(--shade), var(--back));
+    font-size: 16px; line-height: 22px; white-space: nowrap;
   }
+  /* The app's button, in the scene's own two colours. */
   .end {
-    position: absolute; left: 50%; bottom: 24px;
-    transform: translateX(-50%);
-    padding: 8px 18px;
-    border-radius: 999px;
-    border: 1px solid rgba(var(--ink), 0.26);
-    background: rgba(var(--shade), 0.18);
-    color: rgba(var(--ink), 0.6);
-    font: 500 11px/1 Inter, system-ui, sans-serif;
-    letter-spacing: 0.2em; text-transform: uppercase;
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 34px; padding: 0 18px;
+    color: rgb(var(--ink));
+    background: rgba(var(--shade), var(--back));
+    border: 2px solid rgba(var(--ink), 0.55);
+    border-radius: 8px;
+    font: inherit; font-size: 14px; font-weight: 700;
     cursor: pointer;
-    transition: color 0.2s ease, border-color 0.2s ease;
+    transition: transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.12s ease;
   }
-  .end:hover, .end:focus-visible { color: rgba(var(--ink), 0.95); border-color: rgba(var(--ink), 0.6); outline: none; }
-  .no-breath .breath, .no-breath .breath-word { display: none; }
+  .end:hover { transform: translate(-1px, -1px); box-shadow: 2px 2px 0 rgb(var(--ink)); border-color: rgb(var(--ink)); }
+  .end:active { transform: none; box-shadow: none; }
+  .end:focus-visible { outline: 2px solid rgb(var(--ink)); outline-offset: 2px; border-color: rgb(var(--ink)); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hint, .end { transition: none; }
+  }
 </style>
 </head>
 <body>
@@ -101,16 +115,18 @@
   <div class="vignette"></div>
   <div class="breath" id="breath" aria-hidden="true"></div>
   <div class="breath-word" id="breathWord" aria-live="off"></div>
-  <div class="hint" id="hint" role="status">Press Esc again to end</div>
-  <div class="ring" role="timer" aria-label="Time left">
-    <svg viewBox="0 0 86 86">
-      <circle class="bg" cx="43" cy="43" r="39"/>
-      <circle class="fg" id="ringFg" cx="43" cy="43" r="39"/>
-    </svg>
-    <div class="time" id="ringTime"></div>
+  <div class="dock">
+    <div class="hint" id="hint" role="status">Press Esc again to end</div>
+    <div class="ring" role="timer" aria-label="Time left">
+      <svg viewBox="0 0 86 86" aria-hidden="true">
+        <circle class="bg" cx="43" cy="43" r="39"/>
+        <circle class="fg" id="ringFg" cx="43" cy="43" r="39"/>
+      </svg>
+      <div class="time" id="ringTime"></div>
+    </div>
+    <div class="biome-name" id="biomeName"></div>
+    <button class="end" id="endBtn" type="button" title="End this break (Esc twice)" aria-label="End this break">End</button>
   </div>
-  <div class="biome-name" id="biomeName"></div>
-  <button class="end" id="endBtn" title="End this break (Esc twice)">End</button>
 </div>
 <script src="relax-biomes/_kit.js"></script>
 <script src="relax-biomes/_lofi.js"></script>

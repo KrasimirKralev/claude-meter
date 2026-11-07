@@ -1,11 +1,10 @@
-/* Pomodoro popup renderer — safe DOM only */
+/* Pomodoro popup renderer: safe DOM only */
 
-var dismissTimer = null;
 var countdownSecs = 15;
 var countdownInterval = null;
 var inBreakMode = false;
 
-/* ── Sound synthesis (Web Audio API, Pop Brutalist set — no files needed) ── */
+/* Sound synthesis (Web Audio API, Pop Brutalist set, no files needed) */
 
 function brutTone(ctx, masterNode, opts) {
   var osc = ctx.createOscillator();
@@ -109,39 +108,37 @@ function formatTime(secs) {
   return m + ':' + (s < 10 ? '0' : '') + s;
 }
 
+window.pomoPopupAPI.onThemeUpdate(UI.applyTheme);
+
+function setRingIcon(name) {
+  var ringIcon = document.getElementById('ringIcon');
+  UI.clear(ringIcon);
+  ringIcon.appendChild(UI.icon(name));
+}
+
 window.pomoPopupAPI.onPomoPopupData(function(data) {
   var isBreak = data.type === 'break';
-  var ringFill = document.getElementById('ringFill');
-  var ringIcon = document.getElementById('ringIcon');
+  var popup = document.getElementById('popup');
   var title = document.getElementById('title');
   var subtitle = document.getElementById('subtitle');
   var primaryBtn = document.getElementById('primaryBtn');
-  var progressBar = document.getElementById('progressBar');
-  var countdown = document.getElementById('countdown');
 
   inBreakMode = false;
 
   if (isBreak) {
-    // Break finished — ready for work
-    ringFill.classList.remove('work');
-    ringFill.classList.add('break');
-    ringIcon.textContent = '\uD83D\uDCAA'; // 💪
-    title.textContent = 'Break over!';
-    title.classList.remove('work');
-    title.classList.add('break');
+    // Break finished: ready for work
+    popup.classList.add('break');
+    setRingIcon('target');
+    title.textContent = 'Break over';
     subtitle.textContent = 'Ready for another focus session?';
-    primaryBtn.textContent = 'Start Focus';
-    primaryBtn.classList.remove('work');
-    primaryBtn.classList.add('break');
-    progressBar.classList.remove('work');
-    progressBar.classList.add('break');
+    primaryBtn.textContent = 'Start focus';
     playChime('break');
   } else {
-    // Work finished — time for break
-    ringIcon.textContent = '\uD83C\uDF89'; // 🎉
-    title.textContent = 'Focus session complete!';
-    subtitle.textContent = 'Great work! Time for a break.';
-    primaryBtn.textContent = 'Start Break';
+    // Work finished: time for a break
+    setRingIcon('star');
+    title.textContent = 'Focus session complete';
+    subtitle.textContent = 'Good work. Time for a break.';
+    primaryBtn.textContent = 'Start break';
     spawnConfetti();
     playChime('work');
   }
@@ -162,7 +159,7 @@ window.pomoPopupAPI.onPomoPopupData(function(data) {
 function updateCountdown() {
   var el = document.getElementById('countdown');
   if (!inBreakMode) {
-    el.textContent = 'Auto-dismiss in ' + countdownSecs + 's';
+    el.textContent = 'Closes in ' + countdownSecs + 's';
   }
 }
 
@@ -171,67 +168,43 @@ function enterBreakMode(seconds, total) {
   inBreakMode = true;
   clearInterval(countdownInterval);
 
-  var ringFill = document.getElementById('ringFill');
-  var ringIcon = document.getElementById('ringIcon');
-  var title = document.getElementById('title');
-  var subtitle = document.getElementById('subtitle');
-  var primaryBtn = document.getElementById('primaryBtn');
-  var dismissBtn = document.getElementById('dismissBtn');
-  var progressBar = document.getElementById('progressBar');
-  var countdown = document.getElementById('countdown');
+  document.getElementById('popup').classList.add('break');
+  document.getElementById('progressBar').style.animation = 'none';
 
-  // Switch to break style
-  ringFill.classList.remove('work');
-  ringFill.classList.add('break');
-  title.classList.remove('work');
-  title.classList.add('break');
-  progressBar.classList.remove('work');
-  progressBar.classList.add('break');
-  progressBar.style.animation = 'none';
+  setRingIcon('coffee');
+  document.getElementById('title').textContent = 'Break time';
+  document.getElementById('primaryBtn').textContent = 'Skip break';
 
-  ringIcon.textContent = '\u2615'; // ☕
-  title.textContent = 'Break time';
-  primaryBtn.textContent = 'Skip Break';
-  primaryBtn.classList.remove('work');
-  primaryBtn.classList.add('break');
-
-  // Clear confetti
-  var confetti = document.getElementById('confetti');
-  while (confetti.firstChild) confetti.removeChild(confetti.firstChild);
+  clearConfetti();
 
   updateBreakDisplay(seconds, total);
 }
 
 function updateBreakDisplay(seconds, total) {
   if (!inBreakMode) return;
-  var subtitle = document.getElementById('subtitle');
-  var countdown = document.getElementById('countdown');
-  var ringFill = document.getElementById('ringFill');
-  var progressBar = document.getElementById('progressBar');
 
-  subtitle.textContent = formatTime(seconds) + ' remaining';
+  document.getElementById('subtitle').textContent = formatTime(seconds) + ' remaining';
 
-  // Update ring gauge (251.3 = circumference)
+  // The ring fills up as the break goes by.
   var progress = total > 0 ? (total - seconds) / total : 0;
-  var offset = 251.3 * (1 - progress);
-  ringFill.style.strokeDashoffset = offset;
+  document.getElementById('ringFill').style.strokeDashoffset = 100 * (1 - progress);
 
-  // Update progress bar width
-  var pct = total > 0 ? (seconds / total) * 100 : 0;
-  progressBar.style.width = pct + '%';
+  // And the bar shrinks with the time left.
+  var left = total > 0 ? seconds / total : 0;
+  document.getElementById('progressBar').style.transform = 'scaleX(' + left + ')';
 
-  countdown.textContent = 'Enjoy your break';
+  document.getElementById('countdown').textContent = 'Enjoy your break';
 }
 
-// Primary button — start next phase or skip break
+// Primary button: start next phase or skip break
 document.getElementById('primaryBtn').addEventListener('click', function() {
   clearInterval(countdownInterval);
   if (inBreakMode) {
-    // Skip break — dismiss and let main process handle it
+    // Skip break: dismiss and let main process handle it
     inBreakMode = false;
     window.pomoPopupAPI.dismiss();
   } else {
-    // "Start Break" clicked — tell main, then transition to break countdown
+    // "Start break" clicked: tell main, then transition to break countdown
     window.pomoPopupAPI.startNext();
     // enterBreakMode will be called when first tick arrives
   }
@@ -260,35 +233,23 @@ window.pomoPopupAPI.onBreakDone(function() {
   window.pomoPopupAPI.dismiss();
 });
 
+function clearConfetti() {
+  UI.clear(document.getElementById('confetti'));
+}
+
 function spawnConfetti() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   var container = document.getElementById('confetti');
-  while (container.firstChild) container.removeChild(container.firstChild);
-  var colors = ['#facc15', '#f87171', '#60a5fa', '#4ade80', '#c084fc', '#fb923c', '#f472b6', '#34d399'];
+  clearConfetti();
   for (var i = 0; i < 40; i++) {
-    var piece = document.createElement('div');
-    piece.className = 'confetti';
+    // The classes hold the colours, so they are the theme's own.
+    var piece = UI.el('div', 'confetti c' + (i % 4) + (Math.random() > 0.5 ? ' round' : ''));
     piece.style.left = Math.random() * 100 + '%';
-    piece.style.background = colors[Math.floor(Math.random() * colors.length)];
     piece.style.animationDelay = (Math.random() * 1) + 's';
     piece.style.animationDuration = (1.8 + Math.random() * 1.2) + 's';
     piece.style.width = (4 + Math.random() * 5) + 'px';
     piece.style.height = (4 + Math.random() * 5) + 'px';
-    piece.style.borderRadius = Math.random() > 0.5 ? '50%' : '1px';
     container.appendChild(piece);
   }
+  setTimeout(clearConfetti, 4200);
 }
-
-window.pomoPopupAPI.onThemeUpdate(function(t) {
-  var r = document.documentElement;
-  // Popups are opaque cards — prefer the solid window bg over translucent theme bg
-  r.style.setProperty('--bg', t.winBg || t.bg);
-  r.style.setProperty('--surface', t.surface);
-  r.style.setProperty('--border', t.border);
-  r.style.setProperty('--text', t.text);
-  r.style.setProperty('--text-dim', t.textDim);
-  if (t.green) r.style.setProperty('--green', t.green);
-  if (t.red) r.style.setProperty('--red', t.red);
-  if (t.yellow) r.style.setProperty('--yellow', t.yellow);
-  if (t.accent) r.style.setProperty('--accent', t.accent);
-  if (t.barBg) r.style.setProperty('--bar-bg', t.barBg);
-});

@@ -8,6 +8,9 @@
   var timer = null;
   var answered = false;
 
+  // The preload has no theme channel yet: this stays on the default look until it does.
+  if (typeof window.relaxAPI.onThemeUpdate === 'function') window.relaxAPI.onThemeUpdate(UI.applyTheme);
+
   function tick() {
     var secs = Math.max(0, Math.ceil((startsAt - Date.now()) / 1000));
     countEl.textContent = String(secs);
@@ -28,11 +31,9 @@
     startsAt = data.startsAt;
     var mins = data.minutes;
     subEl.textContent = (mins === 1 ? '1 min' : mins + ' min') + ' · screens go calm' + (data.music ? ' · music' : '');
-    while (segsEl.firstChild) segsEl.removeChild(segsEl.firstChild);
+    UI.clear(segsEl);
     for (var i = 0; i < data.total; i++) {
-      var seg = document.createElement('span');
-      seg.className = 'seg' + (i < data.done ? ' f' : '');
-      segsEl.appendChild(seg);
+      segsEl.appendChild(UI.el('span', 'seg' + (i < data.done ? ' f' : '')));
     }
     tick();
     if (!timer) timer = setInterval(tick, 250);

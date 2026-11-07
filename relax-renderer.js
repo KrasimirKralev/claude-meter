@@ -11,6 +11,8 @@
   var BREATH_IN_MS = 4000;
   var BREATH_OUT_MS = 6000;
   var ESC_WINDOW_MS = 2000;
+  // The word still says when to breathe; only the growing circle goes.
+  var REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   var stage = document.getElementById('stage');
   var canvas = document.getElementById('scene');
@@ -86,8 +88,8 @@
     var len = inhale ? BREATH_IN_MS : BREATH_OUT_MS;
     var k = easeInOut(into / len);
     var scale = inhale ? 0.64 + 0.36 * k : 1 - 0.36 * k;
-    breath.style.transform = 'scale(' + scale.toFixed(4) + ')';
-    var word = inhale ? 'breathe in' : 'breathe out';
+    if (!REDUCED_MOTION) breath.style.transform = 'scale(' + scale.toFixed(4) + ')';
+    var word = inhale ? 'Breathe in' : 'Breathe out';
     if (breathWord.textContent !== word) breathWord.textContent = word;
     breathWord.style.opacity = Math.max(0, Math.min(1, into / 900, (len - into) / 900)).toFixed(3);
   }
