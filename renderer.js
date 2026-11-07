@@ -789,21 +789,9 @@ document.getElementById('overdueBanner').addEventListener('click', function() {
 
 // --- Theme system ---
 window.electronAPI.onThemeUpdate(function(theme) {
-  var root = document.documentElement;
-  root.style.setProperty('--bg', theme.bg);
-  root.style.setProperty('--surface', theme.surface);
-  root.style.setProperty('--surface2', theme.surface2);
-  root.style.setProperty('--border', theme.border);
-  root.style.setProperty('--text', theme.text);
-  root.style.setProperty('--text-dim', theme.textDim);
-  root.style.setProperty('--ink', theme.text);
-  // Brutal's red is too light for small text on white. Other themes keep their own.
-  root.style.setProperty('--crit-text', theme.name === 'brutal' ? '#c8232b' : (theme.red || '#e5484d'));
-  root.style.setProperty('--accent', theme.accent);
-  if (theme.green) root.style.setProperty('--green', theme.green);
-  if (theme.red) root.style.setProperty('--red', theme.red);
-  if (theme.yellow) root.style.setProperty('--yellow', theme.yellow);
-  if (theme.barBg) root.style.setProperty('--bar-bg', theme.barBg);
+  UI.applyTheme(theme);
+  // The widget's own ground may be translucent, where the window system allows it.
+  document.documentElement.style.setProperty('--bg', theme.bg);
 });
 
 // --- Snap glow effect ---

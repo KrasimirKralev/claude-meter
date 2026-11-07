@@ -122,7 +122,6 @@ let notesWin = null;
 let mapsFeature = null;  // the Maps section's view and server, set up with the rest of the IPC
 let notesView = null;  // the Plan section's Notes page, set up with the rest of the IPC
 let notesAppWin = null; // standalone Notes app window (own taskbar identity)
-let addEventWin = null;
 let calendarEvents = [];
 let reminderTimers = {};
 let streakData = { current: 0, lastDate: null }; // task completion streak
@@ -2110,7 +2109,7 @@ function sendCurrentTheme(targetWin) {
 function broadcastTheme() {
   const theme = THEMES[currentTheme] || THEMES.dark;
   const payload = { name: currentTheme, ...theme };
-  const allWins = [win, tasksWin, calWin, notesWin, notesAppWin, dashWin, alertPopup, pomoPopupWin, addEventWin];
+  const allWins = [win, tasksWin, calWin, notesWin, notesAppWin, dashWin, alertPopup, pomoPopupWin];
   for (const w of allWins) {
     if (w && !w.isDestroyed()) {
       try { w.webContents.send('theme-update', payload); } catch { /* ignore */ }
@@ -4354,7 +4353,7 @@ const LINUX_CARD_DOCS = new Set(['popup', 'pomo-popup', 'meeting-popup', 'relax-
 // Documents where BODY itself is the visual surface: there is no outer card,
 // every one of them declares `body { background: var(--bg) }`.
 const LINUX_SURFACE_DOCS = new Set([
-  'index', 'dashboard', 'calendar', 'tasks', 'notes', 'capture', 'add-event',
+  'index', 'dashboard', 'calendar', 'tasks', 'notes', 'capture',
 ]);
 
 // Clearing the body background is not enough for the surface documents:
@@ -4367,7 +4366,7 @@ const LINUX_SURFACE_DOCS = new Set([
 //    and would square the window off again. body has to CLIP them, and it only
 //    can once html stops propagating body's overflow to the viewport: while the
 //    root is `overflow: visible` the used value on body becomes visible too.
-//  - Specificity. dashboard/calendar/tasks/add-event carry a late
+//  - Specificity. dashboard/calendar/tasks carry a late
 //    `body { background: var(--bg) !important }` theme override, so `body` on
 //    its own is not enough to beat it - `html body` is.
 // The fixed pseudo-element escapes body's clip (body is no containing block for
@@ -5211,42 +5210,6 @@ function resolveOverlaps() {
 }
 
 let currentNoteTaskId = null; // track which task note is open
-
-function openAddEventWindow(selectedDate) {
-  if (addEventWin && !addEventWin.isDestroyed()) {
-    addEventWin.focus();
-    if (selectedDate) addEventWin.webContents.send('set-date', selectedDate);
-    return;
-  }
-
-  const display = getWidgetDisplay();
-  const wa = display.workArea;
-  const eW = 320;
-  const eH = 480;
-
-  addEventWin = new BrowserWindow({
-    width: eW, height: eH,
-    x: Math.round(wa.x + (wa.width - eW) / 2),
-    y: Math.round(wa.y + (wa.height - eH) / 2),
-    frame: false, resizable: false,
-    skipTaskbar: true, alwaysOnTop: true,
-    ...POPUP_GLASS_OPTS_FN(),
-    show: false, icon: getWindowIcon(),
-    webPreferences: {
-      preload: path.join(__dirname, 'add-event-preload.js'),
-      contextIsolation: true, nodeIntegration: false, sandbox: true,
-    },
-  });
-  applyLinuxPopupTransparency(addEventWin);
-  addEventWin.loadFile('add-event.html');
-  addEventWin.once('ready-to-show', () => {
-    if (addEventWin && !addEventWin.isDestroyed()) addEventWin.show();
-    const theme = THEMES[currentTheme] || THEMES.dark;
-    addEventWin.webContents.send('theme-update', { name: currentTheme, ...theme });
-    if (selectedDate) addEventWin.webContents.send('set-date', selectedDate);
-  });
-  addEventWin.on('closed', () => { addEventWin = null; });
-}
 
 function openNotesWindow(taskId, taskText) {
   if (notesWin && !notesWin.isDestroyed()) {
@@ -6985,16 +6948,6 @@ app.whenReady().then(() => {
     if (!isLocalSender(event)) return null;
     if (typeof text !== 'string' || !text.trim()) return null;
     return parseSmartText(text.trim());
-  });
-
-  ipcMain.on('close-add-event', (event) => {
-    if (!isLocalSender(event)) return;
-    if (addEventWin && !addEventWin.isDestroyed()) addEventWin.close();
-  });
-
-  ipcMain.on('open-add-event', (event, selectedDate) => {
-    if (!isLocalSender(event)) return;
-    openAddEventWindow(selectedDate);
   });
 
   // --- Smart add: parse plain text into task + calendar event ---

@@ -21,6 +21,26 @@ const focusStep = (): void => {
   );
 };
 
+/**
+ * The page takes a moment to reach its new size after asking for or leaving full screen, and a fit
+ * done before that lands off-centre. So it fits again on the resize, with a timer in case none comes.
+ */
+const fitAfterResize = (): void => {
+  fitView();
+  const again = (): void => {
+    window.removeEventListener('resize', again);
+    clearTimeout(timer);
+    fitView();
+  };
+  const timer = setTimeout(again, 400);
+  window.addEventListener('resize', again);
+};
+
+/** Leaving full screen by any other route, like Esc handled by the browser, also ends presenting. */
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && store.ui.present) stopPresenting();
+});
+
 export const startPresenting = (): void => {
   if (store.ui.view !== 'map' || walkOrder(store.doc).length === 0) {
     showToast('The finished map has nothing to present yet.');
@@ -29,7 +49,7 @@ export const startPresenting = (): void => {
   store.setUi({ present: { index: -1, bubble: null }, selectedBubble: null, editing: null });
   // Full screen can be refused. Presenting still works inside the window.
   void document.documentElement.requestFullscreen?.().catch(() => undefined);
-  setTimeout(() => fitView(), 120);
+  fitAfterResize();
 };
 
 export const stepPresenting = (delta: number): void => {
@@ -46,5 +66,5 @@ export const stopPresenting = (): void => {
   if (!store.ui.present) return;
   store.setUi({ present: null });
   if (document.fullscreenElement) void document.exitFullscreen();
-  fitView();
+  fitAfterResize();
 };
