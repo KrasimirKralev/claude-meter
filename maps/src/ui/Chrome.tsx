@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { camera } from '../canvas/camera.ts';
 import { changeView, deleteSelected, fitView, groupSelection, setTool, toggleTheme } from '../canvas/actions.ts';
+import { insideApp } from '../desktop/bridge.ts';
 import { digitize } from '../digitize/run.ts';
 import { startPresenting } from './present.ts';
 import type { InkColor, Tool, View } from '../doc/types.ts';
@@ -220,11 +221,13 @@ export const Chrome = () => {
         </Pill>
 
         <Pill className="top-4 right-4 !z-30">
-          <IconButton
-            icon={theme === 'dark' ? 'sun' : 'moon'}
-            label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-            onClick={toggleTheme}
-          />
+          {!insideApp() && (
+            <IconButton
+              icon={theme === 'dark' ? 'sun' : 'moon'}
+              label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+              onClick={toggleTheme}
+            />
+          )}
           <IconButton
             icon="help"
             label="Keyboard shortcuts"

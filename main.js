@@ -1,6 +1,7 @@
 const {
   app,
   BrowserWindow,
+  WebContentsView,
   dialog,
   globalShortcut,
   Tray,
@@ -118,7 +119,7 @@ let tasksMovedTimer = null;  // debounced snap timer — cleared on hide to prev
 let claudeStatus = null; // { indicator, description, updatedAt }
 let calWin = null;
 let notesWin = null;
-let mapsFeature = null;  // the Maps window (Balonche), set up with the rest of the IPC
+let mapsFeature = null;  // the Maps section's view and server, set up with the rest of the IPC
 let notesAppWin = null; // standalone Notes app window (own taskbar identity)
 let addEventWin = null;
 let calendarEvents = [];
@@ -289,7 +290,7 @@ const RELAX_STATE_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-state.json');
 // generated lo-fi (config musicSource), shuffled without repeats.
 const relaxMusic = require('./relax-music');
 const displayScale = require('./display-scale');
-const { createMapsFeature } = require('./maps-window');
+const { createMapsFeature } = require('./maps-view');
 const RELAX_MUSIC_DIR = path.join(os.homedir(), 'Music', 'relax');
 const RELAX_MUSIC_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-music.json');
 const RELAX_TICK_MS = 5000;
@@ -2113,6 +2114,7 @@ function broadcastTheme() {
       try { w.webContents.send('theme-update', payload); } catch { /* ignore */ }
     }
   }
+  if (mapsFeature) mapsFeature.themeChanged();
 }
 
 // --- Smart text parser: "Meeting with John tomorrow 3pm 1h" → { title, date, time, duration, priority } ---
@@ -4254,6 +4256,8 @@ function openDashboard(tab) {
   });
 
   applyLinuxPopupTransparency(dashWin);
+  // The default menu's Ctrl+Q would quit the widget too, and its Ctrl+R would reload around an open map.
+  dashWin.setMenu(null);
   dashWin.loadFile('dashboard.html');
 
   dashWin.webContents.on('will-navigate', (e, url) => {
@@ -4278,7 +4282,10 @@ function openDashboard(tab) {
     }
   });
 
-  dashWin.on('closed', () => { dashWin = null; });
+  dashWin.on('closed', () => {
+    dashWin = null;
+    if (mapsFeature) mapsFeature.dashboardClosed();
+  });
 }
 
 // --- Glass morphism: mica/acrylic on Windows 11 ---
@@ -6244,11 +6251,11 @@ app.whenReady().then(() => {
   };
 
   mapsFeature = createMapsFeature({
-    BrowserWindow, dialog, ipcMain, session, isLocalSender,
+    WebContentsView, ipcMain, session, isLocalSender,
     dataDir: CLAUDE_DIR,
-    clampBounds: clampToWorkArea,
-    trackWindow: enableLinuxWindowEvents,
-    iconPath: getAssetPath('icon.png'),
+    getDashboard: () => dashWin,
+    openDashboard,
+    getTheme: () => ({ name: currentTheme, ...(THEMES[currentTheme] || THEMES.dark) }),
     getTargets: () => [win, dashWin],
   });
 

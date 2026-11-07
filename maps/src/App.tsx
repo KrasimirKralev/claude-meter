@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { fitView } from './canvas/actions.ts';
+import { applyAppTheme, fitView } from './canvas/actions.ts';
 import { Surface } from './canvas/Surface.tsx';
+import { listenForTheme } from './desktop/bridge.ts';
 import { isLiveProposal } from './doc/proposals.ts';
 import { MAP_STYLES } from './map/styles.ts';
 import { startPersistence } from './state/persist.ts';
@@ -45,6 +46,7 @@ export const App = () => {
   useShortcuts();
 
   useEffect(() => {
+    listenForTheme(applyAppTheme);
     void startPersistence()
       .then(() => MAP_STYLES[store.doc.style].load())
       .catch((error: unknown) => {

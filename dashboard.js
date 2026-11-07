@@ -85,7 +85,7 @@ function afterTabShown(tab) {
   }
   if (tab === 'calendar') renderCalendar();
   if (tab === 'habits') renderHabits();
-  if (tab === 'maps') renderMaps();
+  if (tab === 'maps') window.dashboardAPI.showMaps(mapsHostBounds());
   if (tab === 'status') {
     if (!claudeStatusData) {
       window.dashboardAPI.getClaudeStatus().then(function(data) {
@@ -100,8 +100,10 @@ function showTab(requested) {
   var tab = TAB_ALIASES[requested] || requested;
   var section = sectionOfTab(tab);
   if (!section) return;
+  if (currentTab === 'maps' && tab !== 'maps') window.dashboardAPI.hideMaps();
   currentTab = tab;
   lastTabOf[section.id] = tab;
+  document.querySelector('.main').classList.toggle('flush', tab === 'maps');
   var panels = document.querySelectorAll('.tab-content');
   for (var i = 0; i < panels.length; i++) {
     panels[i].classList.toggle('active', panels[i].id === 'tab-' + tab);
@@ -429,17 +431,35 @@ function renderMaps() {
   document.getElementById('railMaps').hidden = !mapsState.available;
   document.getElementById('overviewMapsPanel').hidden = !mapsState.available;
   var overview = document.getElementById('overviewMaps');
-  var grid = document.getElementById('mapsGrid');
   while (overview.firstChild) overview.removeChild(overview.firstChild);
-  while (grid.firstChild) grid.removeChild(grid.firstChild);
   if (mapsState.maps.length === 0) {
     overview.appendChild(el('div', 'maps-empty', 'No maps yet.'));
-    grid.appendChild(el('div', 'maps-empty', 'No maps yet. Press New map to start one.'));
     return;
   }
   mapsState.maps.slice(0, 2).forEach(function(map) { overview.appendChild(mapButton(map)); });
-  mapsState.maps.forEach(function(map) { grid.appendChild(mapButton(map, 'mapcard')); });
 }
+
+// The map page lies over #mapsHost in its own view, so main needs to know where that box is.
+function mapsHostBounds() {
+  var box = document.getElementById('mapsHost').getBoundingClientRect();
+  return { x: box.left, y: box.top, width: box.width, height: box.height };
+}
+
+function renderMapsStatus(status) {
+  var failed = status && status.state === 'error';
+  document.getElementById('mapsStatusText').textContent = failed
+    ? status.message + ' Your maps are saved.'
+    : 'Opening Maps...';
+  document.getElementById('mapsRetry').hidden = !failed;
+}
+
+new ResizeObserver(function() {
+  if (currentTab === 'maps') window.dashboardAPI.placeMaps(mapsHostBounds());
+}).observe(document.getElementById('mapsHost'));
+window.dashboardAPI.onMapsStatus(renderMapsStatus);
+document.getElementById('mapsRetry').addEventListener('click', function() {
+  window.dashboardAPI.showMaps(mapsHostBounds());
+});
 
 function takeMapsState(state) {
   if (!state) return;
@@ -449,7 +469,6 @@ function takeMapsState(state) {
 window.dashboardAPI.getMapsState().then(takeMapsState);
 window.dashboardAPI.onMapsUpdate(takeMapsState);
 document.getElementById('overviewNewMap').addEventListener('click', function() { window.dashboardAPI.openMaps({ new: true }); });
-document.getElementById('mapsTabNew').addEventListener('click', function() { window.dashboardAPI.openMaps({ new: true }); });
 
 function renderSyncText() {
   var sync = document.getElementById('dashSync');

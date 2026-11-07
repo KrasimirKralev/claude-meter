@@ -7,9 +7,12 @@
     <title>Balonche</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script>
-      // Runs before first paint so the light theme never flashes dark.
+      // Runs before first paint so the theme never flashes. The desktop app names its theme in the URL.
       try {
-        if (localStorage.getItem('balonche-theme') === 'light') {
+        const fromApp = new URLSearchParams(location.search).get('theme');
+        if (['brutal', 'dark', 'light'].includes(fromApp)) {
+          document.documentElement.dataset.theme = fromApp;
+        } else if (localStorage.getItem('balonche-theme') === 'light') {
           document.documentElement.dataset.theme = 'light';
         }
       } catch {

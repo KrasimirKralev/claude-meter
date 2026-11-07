@@ -26,9 +26,13 @@ export interface OpenRequest {
   new?: boolean;
 }
 
+/** The app's look. The page's own dark and light, plus the app's main theme. */
+export type AppTheme = 'brutal' | 'dark' | 'light';
+
 interface MeterBridge {
   reportMaps(maps: ReportedMap[]): void;
   onOpen(listener: (request: OpenRequest) => void): void;
+  onTheme(listener: (theme: AppTheme) => void): void;
 }
 
 const PREVIEW_BUBBLES = 12;
@@ -109,4 +113,11 @@ export const reportMapsSoon = (readAll: () => Promise<MapDoc[]>): void => {
 
 export const listenForOpen = (listener: (request: OpenRequest) => void): void => {
   bridge()?.onOpen(listener);
+};
+
+/** Inside the app, the look comes from the app, so the page offers no theme switch of its own. */
+export const insideApp = (): boolean => bridge() !== undefined;
+
+export const listenForTheme = (listener: (theme: AppTheme) => void): void => {
+  bridge()?.onTheme(listener);
 };

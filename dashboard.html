@@ -1322,8 +1322,11 @@
   .mapitem:hover b { text-decoration: underline; }
   .thumb { width: 92px; height: 55px; flex-shrink: 0; border-radius: 8px; }
   .maplist { display: flex; flex-direction: column; gap: 8px; }
-  .maps-head { margin-bottom: 14px; }
-  .mapgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  /* The map page lies over this box, in its own view. What's in here shows only until it's ready. */
+  .main.flush { padding: 8px 12px 12px !important; overflow: hidden !important; scrollbar-gutter: auto; }
+  #tab-maps.active { height: 100%; animation: none !important; }
+  .maps-host { height: 100%; display: grid; place-items: center; border: 2.5px solid var(--border); border-radius: 14px; background: var(--surface); }
+  .maps-status { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 24px; text-align: center; max-width: 420px; font-size: 14px; }
   .mapcard { background: var(--surface); border: 2.5px solid var(--ink); border-radius: 12px; padding: 10px; }
   .mapcard .thumb { width: 120px; height: 72px; }
   .maps-empty { font-size: 13.5px; color: var(--text-dim); padding: 4px 0; }
@@ -1514,8 +1517,12 @@
   </div>
 
   <div class="tab-content" id="tab-maps">
-    <div class="phead maps-head"><p class="foot">Sketch freely, then turn it into a finished map.</p><button class="new" id="mapsTabNew">New map</button></div>
-    <div class="mapgrid" id="mapsGrid"></div>
+    <div class="maps-host" id="mapsHost">
+      <div class="maps-status" id="mapsStatus" role="status">
+        <p id="mapsStatusText">Opening Maps...</p>
+        <button class="new" id="mapsRetry" hidden>Try again</button>
+      </div>
+    </div>
   </div>
 
   <div class="tab-content" id="tab-settings">

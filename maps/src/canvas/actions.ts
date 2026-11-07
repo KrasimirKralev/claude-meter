@@ -1,5 +1,6 @@
 // The things a toolbar button or a shortcut can do.
 
+import type { AppTheme } from '../desktop/bridge.ts';
 import { applyLayout } from '../digitize/apply.ts';
 import {
   addLink,
@@ -148,6 +149,12 @@ export const toggleTheme = (): void => {
   } catch {
     // Storage blocked: the switch still works until the page reloads.
   }
+};
+
+/** Inside the desktop app, the look follows the app. The brutal theme draws on the light palette. */
+export const applyAppTheme = (theme: AppTheme): void => {
+  document.documentElement.dataset.theme = theme;
+  store.setUi({ theme: theme === 'dark' ? 'dark' : 'light' });
 };
 
 export const deleteSelected = (): void => {

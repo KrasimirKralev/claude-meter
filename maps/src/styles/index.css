@@ -78,6 +78,50 @@
   --note-edge: #e3c75a;
 }
 
+/* The desktop app's main theme: bone paper, ink borders, hard shadows, pink and yellow. */
+:root[data-theme='brutal'] {
+  color-scheme: light;
+  --bg: #f0ede4;
+  --dot: #bdb8aa;
+  --surface: #ffffff;
+  --raised: #f7f3ea;
+  --hover: #e6e2d6;
+  --line: #111111;
+  --ink: #111111;
+  --mute: #5f5a4f;
+  --arrow: #111111;
+  --blue: #ff90e8;
+  --blue-hover: #ffb0ef;
+  --accent: #111111;
+  --accent-ink: #111111;
+  --soft: #ffc900;
+  --chip: #ffc900;
+  --chip-ink: #111111;
+  --ok: #0f766e;
+  --danger: #c8232b;
+  --selection: #ffc900;
+  --elev-float: 3px 3px 0 #111111;
+  --elev-card: 3px 3px 0 #111111;
+  --map-line: #111111;
+  --bubble-shadow: 4px 4px 0 #111111;
+  --ripple-dot: #ff90e8;
+  --note-fill: #ffc900;
+  --note-edge: #111111;
+}
+
+:root[data-theme='brutal'] .bg-blue {
+  border: 2px solid #111111;
+  color: #111111;
+}
+
+:root[data-theme='brutal'] .rounded-xl.border {
+  border-width: 2.5px;
+}
+
+:root[data-theme='brutal'] .rounded-lg.border {
+  border-width: 2px;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -804,7 +848,8 @@ button:disabled {
   display: none;
 }
 
-@media (max-width: 1023px) {
+/* The toolbars start to collide below this. The desktop app never gets this narrow. */
+@media (max-width: 639px) {
   .too-narrow {
     position: fixed;
     inset: 0;

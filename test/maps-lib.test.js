@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const path = require('node:path');
 const {
   MAPS_ORIGIN,
-  childEnv,
+  childEnv, cleanBounds, mapsThemeFor,
   cleanMapsReport,
   cleanOpenRequest,
   isMapsUrl,
@@ -124,4 +124,19 @@ test('cleanMapsReport keeps only links between bubbles in the preview', () => {
   const preview = [{ x: 0, y: 0, w: 1, h: 1, color: '#000' }, { x: 2, y: 0, w: 1, h: 1, color: '#000' }];
   const [map] = cleanMapsReport([{ id: 'a', preview, links: [[0, 1], [1, 5], [0, 'x'], 'bad', [-1, 0], [0.5, 1]] }]);
   assert.deepStrictEqual(map.links, [[0, 1]]);
+});
+
+test('bounds for the view are whole pixels, and nonsense is refused', () => {
+  assert.deepStrictEqual(cleanBounds({ x: 10.4, y: 20.6, width: 300.2, height: 200.5 }), { x: 10, y: 21, width: 300, height: 201 });
+  for (const bad of [null, 'x', {}, { x: 1, y: 1, width: 0, height: 5 }, { x: -1, y: 0, width: 5, height: 5 }, { x: NaN, y: 0, width: 5, height: 5 }]) {
+    assert.strictEqual(cleanBounds(bad), null);
+  }
+});
+
+test('every app theme maps to one the map page draws', () => {
+  assert.strictEqual(mapsThemeFor('brutal'), 'brutal');
+  assert.strictEqual(mapsThemeFor('karchx'), 'light');
+  assert.strictEqual(mapsThemeFor('nord'), 'dark');
+  assert.strictEqual(mapsThemeFor('dracula'), 'dark');
+  assert.strictEqual(mapsThemeFor('unknown'), 'brutal');
 });

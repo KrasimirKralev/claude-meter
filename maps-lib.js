@@ -87,4 +87,18 @@ function isMapsUrl(url) {
   }
 }
 
-module.exports = { MAPS_ORIGIN, MAPS_PORT, childEnv, cleanMapsReport, cleanOpenRequest, isMapsUrl, serverEntry };
+// Where the dashboard wants the Maps view, in window coordinates. Null when it makes no sense, and a
+// view can't be placed at a fraction of a pixel.
+function cleanBounds(bounds) {
+  if (!bounds || typeof bounds !== 'object') return null;
+  const { x, y, width, height } = bounds;
+  if (![x, y, width, height].every(finite)) return null;
+  if (x < 0 || y < 0 || width < 1 || height < 1) return null;
+  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+}
+
+// The app has more themes than the map page. Each maps to the nearest one it draws well on.
+const MAPS_THEMES = { brutal: 'brutal', karchx: 'light', light: 'light', dark: 'dark', nord: 'dark', dracula: 'dark' };
+const mapsThemeFor = (name) => MAPS_THEMES[name] || 'brutal';
+
+module.exports = { MAPS_ORIGIN, MAPS_PORT, childEnv, cleanBounds, cleanMapsReport, cleanOpenRequest, isMapsUrl, mapsThemeFor, serverEntry };

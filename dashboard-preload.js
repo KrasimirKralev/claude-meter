@@ -113,6 +113,10 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   openNotes: () => ipcRenderer.send('open-notes-window'),
   getMapsState: () => ipcRenderer.invoke('maps-state'),
   onMapsUpdate: (cb) => ipcRenderer.on('maps-update', (_e, data) => cb(data)),
+  onMapsStatus: (cb) => ipcRenderer.on('maps-status', (_e, data) => cb(data)),
+  showMaps: (bounds) => ipcRenderer.send('maps-show', bounds),
+  placeMaps: (bounds) => ipcRenderer.send('maps-bounds', bounds),
+  hideMaps: () => ipcRenderer.send('maps-hide'),
   getClaudeStatus: () => ipcRenderer.invoke('get-claude-status'),
   onClaudeStatusUpdate: (cb) => {
     if (claudeStatusHandler) ipcRenderer.removeListener('claude-status-update', claudeStatusHandler);

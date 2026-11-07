@@ -48,19 +48,14 @@ export interface UiState {
 
 const MAX_HISTORY = 200;
 
-const readTheme = (): Theme => {
-  try {
-    return localStorage.getItem('balonche-theme') === 'light' ? 'light' : 'dark';
-  } catch {
-    return 'dark';
-  }
-};
+/** The page's first lines have already chosen, before first paint. */
+const readTheme = (): Theme => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
 
 export const initialUi = (): UiState => ({
   view: 'sketch',
   tool: 'pen',
   penColor: 'ink',
-  theme: typeof localStorage === 'undefined' ? 'dark' : readTheme(),
+  theme: typeof document === 'undefined' ? 'dark' : readTheme(),
   selection: [],
   selectedBubble: null,
   selectedLink: null,
