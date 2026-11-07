@@ -24,6 +24,14 @@ function getBarClass(pct) {
   return '';
 }
 
+// The server's severity when it graded the limit, else the pct thresholds.
+function getMeterClass(meter) {
+  if (meter.severity === 'critical') return 'danger';
+  if (meter.severity === 'warning') return 'warning';
+  if (meter.severity === 'normal') return '';
+  return getBarClass(meter.pct);
+}
+
 function formatCountdown(ts) {
   if (!ts) return '';
   var d = new Date(ts);
@@ -102,7 +110,7 @@ function buildUsageCard(label, data) {
   card.appendChild(el('div', 'card-label', label));
 
   var track = el('div', 'bar-track');
-  var fill = el('div', 'bar-fill ' + getBarClass(data.pct));
+  var fill = el('div', 'bar-fill ' + getMeterClass(data));
   fill.style.width = Math.max(1, data.pct) + '%';
   track.appendChild(fill);
   card.appendChild(track);
@@ -117,11 +125,19 @@ function buildUsageCard(label, data) {
 
 // The four usage cards for one account's usage object, appended to `target`.
 function appendUsageCards(target, usage) {
-  target.appendChild(buildUsageCard('Session (5h window)', usage.session));
-  target.appendChild(buildUsageCard('Weekly — All Models', usage.weekAll));
+  // Only the limits this plan has: Ultra has no 5-hour session, and a 0 %
+  // card would claim one.
+  if (usage.session) target.appendChild(buildUsageCard('Session (5h window)', usage.session));
+  if (usage.weekAll) target.appendChild(buildUsageCard('Weekly — All Models', usage.weekAll));
   // The scoped weekly bucket is named after whatever model the API reports (Fable, Sonnet…)
-  var scopedModel = (usage.weekSonnet && usage.weekSonnet.model) ? usage.weekSonnet.model : 'Sonnet';
-  target.appendChild(buildUsageCard('Weekly — ' + scopedModel, usage.weekSonnet));
+  if (usage.weekSonnet) {
+    target.appendChild(buildUsageCard('Weekly — ' + (usage.weekSonnet.model || 'Model'), usage.weekSonnet));
+  }
+  // Any further server limit (another scoped model, a surface cap), as sent.
+  var others = usage.otherLimits || [];
+  for (var o = 0; o < others.length; o++) {
+    target.appendChild(buildUsageCard(others[o].label, others[o]));
+  }
 
   // Extra usage card — same bar style as other metrics
   if (usage.extraUsage) {
@@ -245,8 +261,20 @@ function renderPlanner() {
   var container = document.getElementById('plannerText');
   while (container.firstChild) container.removeChild(container.firstChild);
 
-  if (!usageData || !usageData.session) {
+  if (!usageData) {
     container.textContent = 'Waiting for data...';
+    return;
+  }
+  if (!usageData.session) {
+    // The plan reports no 5-hour window (Ultra): nothing to pace within it.
+    var headerNs = el('div', 'planner-header');
+    var badgeNs = el('div', 'planner-badge on-track');
+    badgeNs.appendChild(el('span', 'planner-badge-dot'));
+    badgeNs.appendChild(document.createTextNode('No session limit'));
+    headerNs.appendChild(badgeNs);
+    container.appendChild(headerNs);
+    container.appendChild(el('div', 'planner-recommendation',
+      'This plan has no 5-hour session limit. Only the weekly limits apply.'));
     return;
   }
 
@@ -360,6 +388,13 @@ function renderPlanner() {
 
 var usageChart = null;
 
+// True when the active account's current usage says its plan has no such
+// meter (Ultra: no 5-hour session). Only current data can say so - history
+// written before 2.15 holds 0 where the meter was missing.
+function planLacksMeter(key) {
+  return !!(usageData && typeof usageData === 'object' && !usageData[key]);
+}
+
 var chartSeriesDefs = [
   { key: 'session', color: '#d4845a', label: 'Session' },
   { key: 'weekAll', color: '#7c7cba', label: 'Weekly (all)' },
@@ -420,6 +455,11 @@ function drawChart() {
   var chartDatasets = [];
   for (var d = 0; d < chartSeriesDefs.length; d++) {
     var def = chartSeriesDefs[d];
+    // A limit the plan never reported in this range (null points) is no line.
+    if (!datasets[d].some(function(v) { return typeof v === 'number'; })) continue;
+    // Nor one the plan has dropped: builds before 2.15 stored 0 for "no
+    // 5-hour limit", so old points alone would draw a fake flat 0 % line.
+    if (planLacksMeter(def.key)) continue;
     chartDatasets.push({
       label: def.label,
       data: datasets[d],
@@ -1512,24 +1552,33 @@ function renderAnalytics() {
   var last7 = historyData.filter(function(p) { return p.ts > day7; });
   var last30 = historyData.filter(function(p) { return p.ts > day30; });
 
+  // The stats follow the 5-hour session while the plan reports one; a plan
+  // without it (Ultra: its points carry session null) uses the weekly limit.
+  var hasNum = function(p, key) { return typeof p[key] === 'number'; };
+  var statKey = !planLacksMeter('session') && last7.some(function(p) { return hasNum(p, 'session'); })
+    ? 'session' : 'weekAll';
+  var statName = statKey === 'session' ? 'Session' : 'Weekly';
+
   // Peak usage
-  var peakSession = 0, peakWeekAll = 0;
+  var peakSession = 0;
   for (var i = 0; i < historyData.length; i++) {
-    if (historyData[i].session > peakSession) peakSession = historyData[i].session;
-    if (historyData[i].weekAll > peakWeekAll) peakWeekAll = historyData[i].weekAll;
+    if (hasNum(historyData[i], statKey) && historyData[i][statKey] > peakSession) {
+      peakSession = historyData[i][statKey];
+    }
   }
 
-  // Average session usage
+  // Average usage over the points that carry the series
   var avgSession7 = 0;
-  if (last7.length > 0) {
-    for (var j = 0; j < last7.length; j++) avgSession7 += last7[j].session;
-    avgSession7 = Math.round(avgSession7 / last7.length);
+  var last7Stat = last7.filter(function(p) { return hasNum(p, statKey); });
+  if (last7Stat.length > 0) {
+    for (var j = 0; j < last7Stat.length; j++) avgSession7 += last7Stat[j][statKey];
+    avgSession7 = Math.round(avgSession7 / last7Stat.length);
   }
 
-  // Days hit limit (session >= 95%)
+  // Days hit limit (>= 95%)
   var limitDays = new Set();
   for (var k = 0; k < historyData.length; k++) {
-    if (historyData[k].session >= 95) {
+    if (hasNum(historyData[k], statKey) && historyData[k][statKey] >= 95) {
       limitDays.add(new Date(historyData[k].ts).toDateString());
     }
   }
@@ -1538,8 +1587,9 @@ function renderAnalytics() {
   var hourBuckets = new Array(24).fill(0);
   var hourCounts = new Array(24).fill(0);
   for (var h = 0; h < historyData.length; h++) {
+    if (!hasNum(historyData[h], statKey)) continue;
     var hr = new Date(historyData[h].ts).getHours();
-    hourBuckets[hr] += historyData[h].session;
+    hourBuckets[hr] += historyData[h][statKey];
     hourCounts[hr]++;
   }
   var peakHour = 0, peakHourAvg = 0;
@@ -1572,10 +1622,10 @@ function renderAnalytics() {
     return card;
   }
 
-  grid.appendChild(statCard('Avg Session (7d)', avgSession7 + '%', 'Average session utilization'));
-  grid.appendChild(statCard('Peak Session', peakSession + '%', 'All-time highest'));
-  grid.appendChild(statCard('Peak Hour', peakHour + ':00', Math.round(peakHourAvg) + '% avg session at this hour'));
-  grid.appendChild(statCard('Limit Days', limitDays.size, 'Days session hit \u226595%'));
+  grid.appendChild(statCard('Avg ' + statName + ' (7d)', avgSession7 + '%', 'Average ' + statName.toLowerCase() + ' utilization'));
+  grid.appendChild(statCard('Peak ' + statName, peakSession + '%', 'All-time highest'));
+  grid.appendChild(statCard('Peak Hour', peakHour + ':00', Math.round(peakHourAvg) + '% avg ' + statName.toLowerCase() + ' at this hour'));
+  grid.appendChild(statCard('Limit Days', limitDays.size, 'Days ' + statName.toLowerCase() + ' hit \u226595%'));
   grid.appendChild(statCard('Data Points', historyData.length, last30.length + ' in last 30 days'));
   grid.appendChild(statCard('Streak', (typeof streakData !== 'undefined' && streakData.current) || 0, 'Consecutive task-complete days'));
 
@@ -2447,6 +2497,14 @@ setInterval(function() {
   updateDashboardTimers();
 }, 10000);
 
+// The meters in the order appendUsageCards draws their cards (absent ones
+// have no card), so countdown i always belongs to card i.
+function cardSources(usage) {
+  return [usage.session, usage.weekAll, usage.weekSonnet]
+    .filter(Boolean)
+    .concat(usage.otherLimits || []);
+}
+
 function patchCardCountdowns(metaSpans, sources) {
   for (var i = 0; i < metaSpans.length && i < sources.length; i++) {
     var spans = metaSpans[i].querySelectorAll('span');
@@ -2464,14 +2522,14 @@ function updateDashboardTimers() {
     for (var g = 0; g < groups.length && g < accountsData.length; g++) {
       var u = accountsData[g].usage;
       if (!u) continue;
-      patchCardCountdowns(groups[g].querySelectorAll('.card-meta'), [u.session, u.weekAll, u.weekSonnet]);
+      patchCardCountdowns(groups[g].querySelectorAll('.card-meta'), cardSources(u));
     }
     return;
   }
   if (!usageData) return;
   patchCardCountdowns(
     document.querySelectorAll('#overviewCards .card-meta'),
-    [usageData.session, usageData.weekAll, usageData.weekSonnet]
+    cardSources(usageData)
   );
 }
 
@@ -2594,13 +2652,19 @@ window.dashboardAPI.getTasks().then(function(data) {
 
 // --- Habits tab ---
 
-var habitsData = { training: [], reading: [], learning: [] };
+// Train · Read/Write · Relax. The old `learning` history stays in the file, unshown.
+var HABIT_CALS = ['training', 'reading', 'relax'];
+var habitsData = { training: [], reading: [], relax: [] };
 var habitsView = {
   training: { year: null, month: null }, // 0-indexed month
   reading: { year: null, month: null },
-  learning: { year: null, month: null },
+  relax: { year: null, month: null },
 };
 var habitsInited = false;
+// Relax is never toggled here: it ticks itself when the day's last break
+// completes. Its calendar shows today's count from the Relax meter instead.
+var HABIT_AUTO = { relax: true };
+var relaxToday = null; // { done, total }
 
 function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 
@@ -2654,6 +2718,8 @@ function renderHabitCal(kind) {
   for (var i = 0; i < arr.length; i++) marked[arr[i]] = true;
 
   var todayStr = ymd(new Date());
+  var auto = HABIT_AUTO[kind] === true;
+  grid.classList.toggle('auto', auto);
 
   // Clear grid
   while (grid.firstChild) grid.removeChild(grid.firstChild);
@@ -2687,6 +2753,10 @@ function renderHabitCal(kind) {
       cell.classList.add('marked');
       cell.textContent = '✓';
       cell.title = dateStr + ' — done';
+    } else if (auto && dateStr === todayStr && relaxToday) {
+      cell.textContent = relaxToday.done + '/' + relaxToday.total;
+      cell.title = dateStr + ' — ' + relaxToday.done + ' of ' + relaxToday.total + ' breaks; ticks itself at '
+        + relaxToday.total + '/' + relaxToday.total;
     } else {
       cell.textContent = String(dd);
       cell.title = dateStr;
@@ -2699,7 +2769,8 @@ function renderHabitCal(kind) {
 
   if (streakEl) {
     var n = streakInMonth(kind, year, month);
-    streakEl.textContent = n + (n === 1 ? ' day this month' : ' days this month');
+    streakEl.textContent = n + (n === 1 ? ' day this month' : ' days this month')
+      + (auto && relaxToday ? ' · today ' + relaxToday.done + '/' + relaxToday.total : '');
   }
 }
 
@@ -2707,21 +2778,13 @@ function renderHabits() {
   if (!habitsInited) initHabitsHandlers();
   // Default views to current month if not yet set
   var now = new Date();
-  if (habitsView.training.year === null) {
-    habitsView.training.year = now.getFullYear();
-    habitsView.training.month = now.getMonth();
-  }
-  if (habitsView.reading.year === null) {
-    habitsView.reading.year = now.getFullYear();
-    habitsView.reading.month = now.getMonth();
-  }
-  if (habitsView.learning.year === null) {
-    habitsView.learning.year = now.getFullYear();
-    habitsView.learning.month = now.getMonth();
-  }
-  renderHabitCal('training');
-  renderHabitCal('reading');
-  renderHabitCal('learning');
+  HABIT_CALS.forEach(function(kind) {
+    if (habitsView[kind].year === null) {
+      habitsView[kind].year = now.getFullYear();
+      habitsView[kind].month = now.getMonth();
+    }
+    renderHabitCal(kind);
+  });
 }
 
 function initHabitsHandlers() {
@@ -2744,7 +2807,7 @@ function initHabitsHandlers() {
   }
 
   // Day toggle (event delegation on each grid)
-  var grids = ['trainingGrid', 'readingGrid', 'learningGrid'];
+  var grids = HABIT_CALS.map(function(kind) { return kind + 'Grid'; });
   for (var g = 0; g < grids.length; g++) {
     (function(gridId) {
       var grid = document.getElementById(gridId);
@@ -2755,7 +2818,7 @@ function initHabitsHandlers() {
         if (cell.classList.contains('empty') || cell.classList.contains('future')) return;
         var date = cell.getAttribute('data-date');
         var kind = cell.getAttribute('data-kind');
-        if (!date || !kind) return;
+        if (!date || !kind || HABIT_AUTO[kind]) return;
         window.dashboardAPI.toggleHabitDay(kind, date).then(function(h) {
           habitsData = h;
           renderHabitCal(kind);
@@ -2771,12 +2834,22 @@ if (window.dashboardAPI && window.dashboardAPI.onHabitsUpdate) {
     habitsData = data || habitsData;
     var habitsTab = document.getElementById('tab-habits');
     if (habitsTab && habitsTab.classList.contains('active')) {
-      renderHabitCal('training');
-      renderHabitCal('reading');
-      renderHabitCal('learning');
+      HABIT_CALS.forEach(renderHabitCal);
     }
   });
 }
+
+function takeRelaxToday(v) {
+  if (!v) return;
+  if (relaxToday && relaxToday.done === v.done && relaxToday.total === v.total) return;
+  relaxToday = { done: v.done, total: v.total };
+  var hint = document.getElementById('relaxHintTarget');
+  if (hint) hint.textContent = String(v.total);
+  var habitsTab = document.getElementById('tab-habits');
+  if (habitsTab && habitsTab.classList.contains('active') && habitsView.relax.year !== null) renderHabitCal('relax');
+}
+if (window.dashboardAPI && window.dashboardAPI.onRelaxUpdate) window.dashboardAPI.onRelaxUpdate(takeRelaxToday);
+if (window.dashboardAPI && window.dashboardAPI.getRelax) window.dashboardAPI.getRelax().then(takeRelaxToday);
 
 // Prime the data so the habit calendars are ready when the tab opens
 if (window.dashboardAPI && window.dashboardAPI.getHabits) {

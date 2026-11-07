@@ -279,12 +279,47 @@
     background: var(--surface);
   }
   .widget-habits-badge.on .widget-habits-checkbox { background: var(--ink); color: var(--yellow); }
+  /* Relax ticks itself at 4/4: a ring that fills with the day's breaks, never pressed. */
+  .widget-habits-badge.auto { cursor: default; }
+  .widget-habits-badge.auto:hover,
+  .widget-habits-badge.auto:active { transform: none; box-shadow: var(--shadow-sm); }
+  .widget-habits:has(.widget-habits-badge.auto:active) { transform: none; box-shadow: var(--shadow); }
+  .widget-habits-ring { border-radius: 50%; background: conic-gradient(var(--ink) var(--p, 0%), var(--surface) 0); }
   .widget-habits-todayhint {
     font-size: 8px; font-weight: 900;
     text-transform: uppercase; letter-spacing: 1.2px;
     color: var(--ink); opacity: 0.55;
     margin-left: auto;
   }
+
+  /* Relax meter: the habits card's second line, built from the widget's own
+     parts - the usage rows' block segments and the pomodoro's button. */
+  .widget-relax-row { min-width: 0; }
+  .relax-segs { display: inline-flex; gap: 3px; width: 62px; flex-shrink: 0; }
+  .relax-segs .seg { height: 11px; }
+  .relax-meta {
+    font-family: var(--mono); font-size: 9px; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 0.4px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .relax-now-btn {
+    margin-left: auto; flex-shrink: 0;
+    padding: 5px 9px; font-size: 9px; font-weight: 900;
+    border: 2px solid var(--ink); border-radius: 6px;
+    background: var(--green); color: #fff;
+    cursor: pointer; font-family: inherit; text-align: center;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.12s var(--pop);
+    text-transform: uppercase; letter-spacing: 0.6px;
+    line-height: 1;
+  }
+  .relax-now-btn:hover { transform: translate(-1px,-1px); box-shadow: 3.5px 3.5px 0 var(--ink); }
+  .relax-now-btn:active { transform: translate(2px,2px); box-shadow: 0.5px 0.5px 0 var(--ink); }
+  .relax-now-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .relax-now-btn[hidden] { display: none; }
 
   /* ---------- Usage rows: white cards + block meters ---------- */
   /* ---------- Account tabs (multi-account) ---------- */
@@ -850,6 +885,12 @@
       <span class="widget-habits-today" id="widgetHabitsTodayBadges"></span>
       <span class="widget-habits-todayhint">today</span>
     </div>
+    <div class="widget-habits-row widget-relax-row" id="widgetRelax" style="display:none;">
+      <span class="widget-habits-label">Relax</span>
+      <span class="relax-segs" id="relaxSegs" aria-hidden="true"></span>
+      <span class="relax-meta" id="relaxMeta"></span>
+      <button class="relax-now-btn" id="relaxNowBtn" title="Start a Relax break now">Relax now</button>
+    </div>
   </div>
 
   <div class="usage-rows" id="usageRows">
@@ -857,6 +898,7 @@
       <div class="usage-row" id="sessionRow"></div>
       <div class="usage-row" id="weekAllRow"></div>
       <div class="usage-row" id="weekSonnetRow"></div>
+      <div id="otherLimitRows" style="display:contents"></div>
     </div>
 
     <div class="extra-section" id="extraSection" style="display:none">

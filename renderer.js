@@ -67,6 +67,16 @@ function getBarClass(pct) {
   return '';
 }
 
+// A meter's colour: the server's own severity when it sent one (Claude Code
+// never re-grades a row), else the pct thresholds above.
+function getMeterClass(meter) {
+  if (!meter) return '';
+  if (meter.severity === 'critical') return 'danger';
+  if (meter.severity === 'warning') return 'warning';
+  if (meter.severity === 'normal') return '';
+  return getBarClass(meter.pct);
+}
+
 function animateNumbers(from, to, key, duration) {
   var start = performance.now();
   function step(now) {
@@ -86,11 +96,14 @@ var SEG_COUNT = 12;
 
 function renderUsageRow(container, data, key) {
   while (container.firstChild) container.removeChild(container.firstChild);
+  // A limit this plan does not have (Ultra: no 5-hour session) is not drawn
+  // at all - a 0 % bar would claim a limit that does not exist.
+  container.style.display = data ? '' : 'none';
   if (!data) return;
 
   // Card tint follows usage level
   container.classList.remove('state-warning', 'state-danger');
-  var barClass = getBarClass(data.pct);
+  var barClass = getMeterClass(data);
   if (barClass === 'warning') container.classList.add('state-warning');
   else if (barClass === 'danger') container.classList.add('state-danger');
 
@@ -219,10 +232,19 @@ function renderLoginStrip(acc) {
 
 // The dot uses the meters' own thresholds so a tab can never disagree with the
 // bar it stands for.
+// The dot follows the server's headline limit (is_active: the one that binds
+// now), so a used-up Fable cap turns the tab red even at 54 % of the week.
+function getHeadlineMeter(usage) {
+  if (!usage) return null;
+  if (usage.headline && usage[usage.headline]) return usage[usage.headline];
+  return usage.session || usage.weekAll || usage.weekSonnet || null;
+}
+
 function getAccountDotClass(acc) {
   if (isLoggedOut(acc) || acc.error) return 'alert';
-  if (!acc.usage || !acc.usage.session) return accountLimitedMins(acc) ? 'limited' : '';
-  var cls = getBarClass(acc.usage.session.pct);
+  var headline = getHeadlineMeter(acc.usage);
+  if (!headline) return accountLimitedMins(acc) ? 'limited' : '';
+  var cls = getMeterClass(headline);
   if (cls === 'danger') return 'crit';
   if (cls === 'warning') return 'warn';
   return 'ok';
@@ -355,14 +377,33 @@ function showActiveAccountUsage() {
   }
 }
 
+// Limits the three fixed meters do not cover (a second scoped model, a
+// surface cap, a kind this build does not know yet), drawn the same way and
+// in the server's order, so a new server meter shows up without a release.
+function renderOtherLimits(rows) {
+  var holder = document.getElementById('otherLimitRows');
+  if (!holder) return;
+  while (holder.firstChild) holder.removeChild(holder.firstChild);
+  if (!rows || !rows.length) return;
+  for (var i = 0; i < rows.length; i++) {
+    var rowEl = createElement('div', 'usage-row');
+    rowEl.style.cursor = 'pointer';
+    rowEl.title = 'Open usage overview';
+    rowEl.addEventListener('click', function() { window.electronAPI.openDashboard('overview'); });
+    renderUsageRow(rowEl, rows[i]);
+    holder.appendChild(rowEl);
+  }
+}
+
 function renderAll() {
   var data = usageData;
   if (!data) {
     // Clear bars so stale data doesn't show
     ['sessionRow', 'weekAllRow', 'weekSonnetRow'].forEach(function(id) {
       var row = document.getElementById(id);
-      if (row) { while (row.firstChild) row.removeChild(row.firstChild); }
+      if (row) { while (row.firstChild) row.removeChild(row.firstChild); row.style.display = ''; }
     });
+    renderOtherLimits(null);
     renderExtraUsage(null);
     updateFooter();
     return;
@@ -370,6 +411,7 @@ function renderAll() {
   renderUsageRow(document.getElementById('sessionRow'), data.session, 'session');
   renderUsageRow(document.getElementById('weekAllRow'), data.weekAll, 'weekAll');
   renderUsageRow(document.getElementById('weekSonnetRow'), data.weekSonnet, 'weekSonnet');
+  renderOtherLimits(data.otherLimits);
 
   renderExtraUsage(data.extraUsage);
 
@@ -1217,6 +1259,42 @@ function reportMinHeight() {
     return Math.round((bMid.getTime() - aMid.getTime()) / 86400000);
   }
 
+  var HABIT_BADGES = [
+    { kind: 'training', label: 'Train' },
+    { kind: 'reading', label: 'Read/Write' },
+    // Never pressed: it ticks itself when the day's last Relax break completes.
+    { kind: 'relax', label: 'Relax', auto: true },
+  ];
+  var lastHabits = null;
+  var relaxCount = null; // { done, total } from the Relax meter
+
+  // Relax: a ring filling with the day's breaks and "RELAX 2/4"; a click does nothing.
+  function makeAutoBadge(label, on) {
+    var el = document.createElement('span');
+    el.className = 'widget-habits-badge auto' + (on ? ' on' : '');
+    el.setAttribute('data-kind', 'relax');
+    var done = relaxCount ? relaxCount.done : 0;
+    var total = relaxCount ? relaxCount.total : 0;
+    el.setAttribute('aria-label', label + (relaxCount ? ', ' + done + ' of ' + total + ' breaks today' : '')
+      + (on ? ', done' : ''));
+    el.title = on
+      ? 'Relax done today'
+      : 'Relax ticks itself when today\'s ' + (total || 'last') + ' breaks are done' + (relaxCount ? ' (' + done + ' so far)' : '');
+
+    var ring = document.createElement('span');
+    ring.className = 'widget-habits-checkbox widget-habits-ring';
+    ring.style.setProperty('--p', (total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0) + '%');
+    ring.textContent = on ? '✓' : '';
+    el.appendChild(ring);
+
+    var text = document.createElement('span');
+    text.textContent = label + (relaxCount ? ' ' + done + '/' + total : '');
+    el.appendChild(text);
+
+    el.addEventListener('click', function(e) { e.stopPropagation(); });
+    return el;
+  }
+
   function makeBadge(kind, label, on) {
     var el = document.createElement('span');
     el.className = 'widget-habits-badge' + (on ? ' on' : '');
@@ -1250,19 +1328,19 @@ function reportMinHeight() {
     var box = document.getElementById('widgetHabits');
     var todayBadges = document.getElementById('widgetHabitsTodayBadges');
     if (!box) return;
+    lastHabits = habits;
 
     // Always show the widget once habits are present in the system
     box.style.display = 'block';
 
     var todayStr = ymd(new Date());
-    var t = (habits.training || []).indexOf(todayStr) !== -1;
-    var r = (habits.reading || []).indexOf(todayStr) !== -1;
-    var l = (habits.learning || []).indexOf(todayStr) !== -1;
     if (todayBadges) {
       while (todayBadges.firstChild) todayBadges.removeChild(todayBadges.firstChild);
-      todayBadges.appendChild(makeBadge('training', 'Train', t));
-      todayBadges.appendChild(makeBadge('reading', 'Read', r));
-      todayBadges.appendChild(makeBadge('learning', 'Learn', l));
+      // `learning` stays in the file for its history but is no longer shown.
+      HABIT_BADGES.forEach(function(b) {
+        var on = (habits[b.kind] || []).indexOf(todayStr) !== -1;
+        todayBadges.appendChild(b.auto ? makeAutoBadge(b.label, on) : makeBadge(b.kind, b.label, on));
+      });
     }
     if (typeof reportMinHeight === 'function') reportMinHeight();
   }
@@ -1289,10 +1367,78 @@ function reportMinHeight() {
   if (window.electronAPI.onHabitsUpdate) {
     window.electronAPI.onHabitsUpdate(function(data) { render(data); });
   }
+  function takeRelax(v) {
+    if (!v) return;
+    if (relaxCount && relaxCount.done === v.done && relaxCount.total === v.total) return;
+    relaxCount = { done: v.done, total: v.total };
+    if (lastHabits) render(lastHabits);
+  }
+  if (window.electronAPI.onRelaxUpdate) window.electronAPI.onRelaxUpdate(takeRelax);
+  if (window.electronAPI.getRelax) window.electronAPI.getRelax().then(takeRelax);
 
   // Re-fetch and re-render once per minute so the day count auto-ticks past midnight
   setInterval(function() {
     if (!window.electronAPI || !window.electronAPI.getHabits) return;
     window.electronAPI.getHabits().then(function(data) { if (data) render(data); });
   }, 60 * 1000);
+})();
+
+// --- Relax meter (the schedule and the breaks live in main) ---
+(function() {
+  if (!window.electronAPI || !window.electronAPI.getRelax) return;
+  var row = document.getElementById('widgetRelax');
+  var segsEl = document.getElementById('relaxSegs');
+  var metaEl = document.getElementById('relaxMeta');
+  var btn = document.getElementById('relaxNowBtn');
+  if (!row || !segsEl || !metaEl || !btn) return;
+  var view = null;
+  var clock = null;
+
+  function mmss(ms) {
+    var secs = Math.max(0, Math.ceil(ms / 1000));
+    return Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+  }
+
+  function metaText(v) {
+    var count = v.total > 0 ? v.done + '/' + v.total : v.done + ' today';
+    if (v.phase === 'active') return 'Relaxing \u00b7 ' + mmss(v.endsAt - Date.now());
+    if (v.phase === 'headsup') return 'Starts in ' + mmss(v.startsAt - Date.now());
+    if (!v.enabled) return count + ' \u00b7 schedule off';
+    if (!v.next) return count;
+    if (v.next.tomorrow) {
+      return count + (v.total > 0 && v.done >= v.total ? ' \u00b7 done for today' : ' \u00b7 next tmrw ' + v.next.time);
+    }
+    return count + ' \u00b7 next ' + v.next.time + (v.next.retry ? ' (retry)' : '');
+  }
+
+  function render() {
+    if (!view) return;
+    row.style.display = '';
+    var total = Math.min(8, Math.max(view.total, 1));
+    if (segsEl.childNodes.length !== total) {
+      while (segsEl.firstChild) segsEl.removeChild(segsEl.firstChild);
+      for (var i = 0; i < total; i++) segsEl.appendChild(createElement('span', 'seg'));
+    }
+    for (var j = 0; j < total; j++) {
+      segsEl.childNodes[j].className = 'seg' + (j < view.done ? ' f' : '');
+    }
+    metaEl.textContent = metaText(view);
+    row.title = view.total > 0
+      ? 'Relax: ' + view.total + ' breaks a day, ' + view.minutes + ' min each. Click for the Habits tab.'
+      : 'Relax breaks. Click for the Habits tab.';
+    btn.hidden = view.phase === 'active';
+    btn.textContent = view.phase === 'headsup' ? 'Start now' : 'Relax now';
+    var ticking = view.phase === 'active' || view.phase === 'headsup';
+    if (ticking && !clock) clock = setInterval(function() { if (view) metaEl.textContent = metaText(view); }, 1000);
+    if (!ticking && clock) { clearInterval(clock); clock = null; }
+    if (typeof reportMinHeight === 'function') reportMinHeight();
+  }
+
+  btn.addEventListener('click', function(e) {
+    e.stopPropagation(); // the card itself opens the Habits tab
+    window.electronAPI.relaxNow();
+  });
+
+  window.electronAPI.onRelaxUpdate(function(v) { if (v) { view = v; render(); } });
+  window.electronAPI.getRelax().then(function(v) { if (v) { view = v; render(); } });
 })();

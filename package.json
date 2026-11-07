@@ -1,6 +1,6 @@
 {
   "name": "claude-usage-widget",
-  "version": "2.8.1",
+  "version": "2.15.0",
   "description": "Desktop widget for Claude usage + a planner (calendar, tasks, notes, habits).",
   "main": "main.js",
   "author": "Krasimir Kralev",
@@ -11,7 +11,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/login-expiry.test.js",
+    "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/display-scale.test.js test/usage-limits.test.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac --publish never",
@@ -26,6 +26,8 @@
     "files": [
       "*.js",
       "*.html",
+      "relax-biomes/**/*",
+      "!relax-biomes/samples/build-pack.py",
       "assets/**/*"
     ],
     "win": {

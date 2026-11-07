@@ -11,6 +11,7 @@ let claudeStatusHandler = null;
 let authStatusHandler = null;
 let calendarUpdateHandler = null;
 let habitsUpdateHandler = null;
+let relaxUpdateHandler = null;
 let navigateTabHandler = null;
 
 contextBridge.exposeInMainWorld('dashboardAPI', {
@@ -100,6 +101,12 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
     if (habitsUpdateHandler) ipcRenderer.removeListener('habits-update', habitsUpdateHandler);
     habitsUpdateHandler = (_e, data) => cb(data);
     ipcRenderer.on('habits-update', habitsUpdateHandler);
+  },
+  getRelax: () => ipcRenderer.invoke('relax-get'),
+  onRelaxUpdate: (cb) => {
+    if (relaxUpdateHandler) ipcRenderer.removeListener('relax-update', relaxUpdateHandler);
+    relaxUpdateHandler = (_e, data) => cb(data);
+    ipcRenderer.on('relax-update', relaxUpdateHandler);
   },
   openExternal: (url) => ipcRenderer.send('open-external-url', url),
   getClaudeStatus: () => ipcRenderer.invoke('get-claude-status'),

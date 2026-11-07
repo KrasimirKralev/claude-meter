@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';">
+<title>Relax</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* Each biome sets these (relax-biomes/_kit.js applyUi): ink = the UI's light, shade = its dark. */
+  :root { --ink: 255, 238, 230; --shade: 8, 6, 22; --vig: 0.5; --legible: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body {
+    font-family: Inter, system-ui, 'Segoe UI', Roboto, sans-serif;
+    color: rgb(var(--ink));
+    user-select: none;
+    cursor: default;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Everything fades together, so the desktop shows through while it fades. */
+  #stage { position: fixed; inset: 0; opacity: 0; }
+  #scene, #grain { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #grain, #sprites { pointer-events: none; }
+  #sprites { position: absolute; inset: 0; overflow: hidden; }
+  .vignette {
+    position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse 75% 70% at 50% 48%, rgba(var(--shade), 0) 60%, rgba(var(--shade), var(--vig)) 100%);
+  }
+  .breath {
+    position: absolute; left: 50%; top: 33%;
+    width: 236px; height: 236px; margin: -118px 0 0 -118px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(var(--ink), 0.4);
+    background: radial-gradient(circle, rgba(var(--ink), 0.13) 0%, rgba(var(--ink), 0.045) 58%, rgba(var(--ink), 0) 71%);
+    box-shadow: 0 0 70px rgba(var(--ink), 0.10), inset 0 0 40px rgba(var(--ink), 0.06),
+      0 0 0 1.5px rgba(var(--shade), calc(var(--legible) * 0.3));
+    will-change: transform;
+  }
+  .breath-word {
+    position: absolute; left: 0; right: 0; top: calc(33% + 138px);
+    text-align: center;
+    font-size: 15px; font-weight: 300;
+    letter-spacing: 0.46em;
+    color: rgba(var(--ink), 0.8);
+    text-shadow: 0 1px 10px rgba(var(--shade), var(--legible));
+  }
+  .ring { position: absolute; left: 50%; bottom: 8.5%; width: 86px; height: 86px; margin-left: -43px; }
+  .ring svg { width: 86px; height: 86px; transform: rotate(-90deg); filter: drop-shadow(0 0 3px rgba(var(--shade), var(--legible))); }
+  .ring .bg { fill: none; stroke: rgba(var(--ink), 0.13); stroke-width: 2; }
+  .ring .fg { fill: none; stroke: rgba(var(--ink), 0.55); stroke-width: 2; stroke-linecap: round; }
+  .ring .time {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font: 500 15px/1 'JetBrains Mono', ui-monospace, monospace;
+    letter-spacing: 0.04em;
+    color: rgba(var(--ink), 0.78);
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 10px rgba(var(--shade), var(--legible));
+  }
+  .hint {
+    position: absolute; left: 0; right: 0; bottom: calc(8.5% + 104px);
+    text-align: center;
+    font-size: 12px; font-weight: 400;
+    letter-spacing: 0.22em; text-transform: uppercase;
+    color: rgba(var(--ink), 0.72);
+    text-shadow: 0 1px 10px rgba(var(--shade), var(--legible));
+    opacity: 0; transition: opacity 0.4s ease;
+  }
+  .hint.show { opacity: 1; }
+  /* Where this break is, said quietly under the timer. */
+  .biome-name {
+    position: absolute; left: 0; right: 0; bottom: calc(8.5% - 27px);
+    text-align: center;
+    font: 500 10.5px/1 Inter, system-ui, sans-serif;
+    letter-spacing: 0.34em; text-transform: uppercase;
+    color: rgba(var(--ink), 0.46);
+    text-shadow: 0 1px 10px rgba(var(--shade), var(--legible));
+  }
+  .end {
+    position: absolute; left: 50%; bottom: 24px;
+    transform: translateX(-50%);
+    padding: 8px 18px;
+    border-radius: 999px;
+    border: 1px solid rgba(var(--ink), 0.26);
+    background: rgba(var(--shade), 0.18);
+    color: rgba(var(--ink), 0.6);
+    font: 500 11px/1 Inter, system-ui, sans-serif;
+    letter-spacing: 0.2em; text-transform: uppercase;
+    cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease;
+  }
+  .end:hover, .end:focus-visible { color: rgba(var(--ink), 0.95); border-color: rgba(var(--ink), 0.6); outline: none; }
+  .no-breath .breath, .no-breath .breath-word { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="scene" aria-hidden="true"></canvas>
+  <canvas id="grain" aria-hidden="true"></canvas>
+  <div id="sprites"></div>
+  <div class="vignette"></div>
+  <div class="breath" id="breath" aria-hidden="true"></div>
+  <div class="breath-word" id="breathWord" aria-live="off"></div>
+  <div class="hint" id="hint" role="status">Press Esc again to end</div>
+  <div class="ring" role="timer" aria-label="Time left">
+    <svg viewBox="0 0 86 86">
+      <circle class="bg" cx="43" cy="43" r="39"/>
+      <circle class="fg" id="ringFg" cx="43" cy="43" r="39"/>
+    </svg>
+    <div class="time" id="ringTime"></div>
+  </div>
+  <div class="biome-name" id="biomeName"></div>
+  <button class="end" id="endBtn" title="End this break (Esc twice)">End</button>
+</div>
+<script src="relax-biomes/_kit.js"></script>
+<script src="relax-biomes/_lofi.js"></script>
+<script src="relax-renderer.js"></script>
+</body>
+</html>

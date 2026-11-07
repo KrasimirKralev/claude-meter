@@ -269,6 +269,8 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
+  .habit-cal-grid.auto .habit-cal-day { cursor: default; }
+  .habit-cal-grid.auto .habit-cal-day:not(.marked):hover { background: transparent; }
   .habit-hint {
     font-size: 12px;
     color: var(--text-dim);
@@ -1286,7 +1288,7 @@
 
       <div class="habit-cal" data-kind="reading">
         <div class="habit-cal-header">
-          <div class="habit-cal-title">Reading</div>
+          <div class="habit-cal-title">Read/Write</div>
           <div class="habit-cal-streak" id="readingStreak"></div>
         </div>
         <div class="habit-cal-nav">
@@ -1297,21 +1299,21 @@
         <div class="habit-cal-grid" id="readingGrid"></div>
       </div>
 
-      <div class="habit-cal" data-kind="learning">
+      <div class="habit-cal" data-kind="relax">
         <div class="habit-cal-header">
-          <div class="habit-cal-title">Learning</div>
-          <div class="habit-cal-streak" id="learningStreak"></div>
+          <div class="habit-cal-title">Relax</div>
+          <div class="habit-cal-streak" id="relaxStreak"></div>
         </div>
         <div class="habit-cal-nav">
-          <button class="habit-btn habit-nav-btn" data-cal="learning" data-dir="-1">◀</button>
-          <div class="habit-cal-month" id="learningMonth"></div>
-          <button class="habit-btn habit-nav-btn" data-cal="learning" data-dir="1">▶</button>
+          <button class="habit-btn habit-nav-btn" data-cal="relax" data-dir="-1">◀</button>
+          <div class="habit-cal-month" id="relaxMonth"></div>
+          <button class="habit-btn habit-nav-btn" data-cal="relax" data-dir="1">▶</button>
         </div>
-        <div class="habit-cal-grid" id="learningGrid"></div>
+        <div class="habit-cal-grid" id="relaxGrid"></div>
       </div>
     </div>
 
-    <div class="habit-hint">Click a day to toggle ✓. Today is highlighted.</div>
+    <div class="habit-hint">Click a day to toggle ✓ for Training and Read/Write. Relax ticks itself once all <span id="relaxHintTarget">4</span> of the day's breaks are done. Today is highlighted.</div>
   </div>
 
   <div class="tab-content" id="tab-status">

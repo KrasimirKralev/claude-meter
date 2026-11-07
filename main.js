@@ -9,6 +9,7 @@ const {
   nativeImage,
   screen,
   powerMonitor,
+  powerSaveBlocker,
   shell,
   clipboard,
   Notification,
@@ -52,6 +53,17 @@ const NOTES_APP_BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-notes-app-boun
 const NOTES_ARCHIVE_FILE = path.join(CLAUDE_DIR, 'usage-widget-notes-archive.json');
 const POMO_FILE = path.join(CLAUDE_DIR, 'usage-widget-pomo.json');
 const HABITS_FILE = path.join(CLAUDE_DIR, 'usage-widget-habits.json');
+// Train · Read/Write · Relax are shown. `learning` (Learn, until 2026-09-29) is
+// kept in the file and still accepted from older phone builds, never shown.
+const HABIT_KINDS = ['training', 'reading', 'relax', 'learning'];
+// Relax is never set by hand - not from the widget, the dashboard, the phone or
+// the watch: the app ticks it when the day's last break (4 of 4) completes.
+const AUTO_HABIT = 'relax';
+// Phone/watch sync (claude-meter-hub): the hub drops one op file per change into
+// INBOX_DIR and never writes the files above; see "Phone/watch sync" below.
+const INBOX_DIR = path.join(CLAUDE_DIR, 'usage-widget-inbox');
+const ALIVE_FILE = path.join(CLAUDE_DIR, 'usage-widget-alive.json');
+const CALENDAR_FEED_FILE = path.join(CLAUDE_DIR, 'usage-widget-calendar-feed.json');
 const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const USAGE_API = 'https://api.anthropic.com/api/oauth/usage';
 const BETA_HEADER = 'oauth-2025-04-20';
@@ -91,7 +103,7 @@ const ALERT_THRESHOLDS = { session: 80, weekAll: 90, weekSonnet: 90 };
 let trayHasAlert = false;
 let tasksWin = null;
 let tasks = [];
-let habits = { training: [], reading: [], learning: [] };
+let habits = emptyHabits();
 let tasksSnapped = 'left';
 let calendarSnapped = 'right';
 let tasksUserHidden = false; // true when user manually closed/hid the tasks window
@@ -259,6 +271,484 @@ function showPomoPopup(type) {
     pomoPopupWin.webContents.send('pomo-popup-data', { type });
     sendCurrentTheme(pomoPopupWin);
   });
+}
+
+// --- Relax breaks ---
+// Four short breaks a day (usage-widget-relax.json): a 30 s heads-up, then a
+// calm full-screen scene on every display with generated music, GNOME banners
+// held off meanwhile. relax.js has the schedule and the "is he free" checks.
+const relaxLib = require('./relax');
+// Which place a break shows: one of relax-biomes/, random, never one of the last five.
+const relaxBiomes = require('./relax-biomes');
+const RELAX_BIOMES_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-biomes.json');
+const RELAX_CONFIG_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax.json');
+const RELAX_STATE_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-state.json');
+// His own music, if he drops tracks in ~/Music/relax: played instead of the
+// generated lo-fi (config musicSource), shuffled without repeats.
+const relaxMusic = require('./relax-music');
+const displayScale = require('./display-scale');
+const RELAX_MUSIC_DIR = path.join(os.homedir(), 'Music', 'relax');
+const RELAX_MUSIC_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-music.json');
+const RELAX_TICK_MS = 5000;
+const RELAX_LOCK_POLL_MS = 15000;
+const RELAX_BANNER_RETRY_MS = 60 * 1000;
+const RELAX_EARLY_FADE_MS = 1200;
+const RELAX_HABIT_RETRY_MS = 60 * 1000;
+let relaxConfig = relaxLib.normalizeConfig(null);
+let relaxConfigMtime = -1;
+let relaxState = null;
+let relaxChecking = false;
+let relaxRestoring = false;
+let relaxBannerRetryAt = 0;
+let relaxHabitRetryAt = 0;
+let relaxHeadsUp = null; // { slot, startsAt, timer, win }
+let relaxActive = null;  // { slot, source, startedAt, endsAt, durationMs, windows, blocker, timer, lockTimer, ending }
+
+function relaxLog(msg) { console.log('[relax] ' + msg); }
+
+function relaxToday() { return relaxLib.localDateStr(new Date()); }
+
+function relaxSave() {
+  try {
+    // The hub shows the phone and the watch "Relax 2/4" from this file alone.
+    relaxState.target = relaxLib.dailyTarget(relaxConfig);
+    relaxLib.saveState(RELAX_STATE_FILE, relaxState);
+    return true;
+  } catch (err) {
+    relaxLog('could not save ' + RELAX_STATE_FILE + ': ' + err.message);
+    return false;
+  }
+}
+
+// An edit to the config applies on the next tick, no restart needed.
+function relaxReloadConfig() {
+  let mtime = 0;
+  try { mtime = fs.statSync(RELAX_CONFIG_FILE).mtimeMs; } catch { mtime = 0; }
+  if (mtime === relaxConfigMtime) return;
+  const r = relaxLib.loadConfig(RELAX_CONFIG_FILE);
+  if (r.error) relaxLog(r.error);
+  relaxConfig = r.config;
+  try { relaxConfigMtime = fs.statSync(RELAX_CONFIG_FILE).mtimeMs; } catch { relaxConfigMtime = 0; }
+  relaxLog('config: ' + (relaxConfig.enabled ? relaxConfig.times.join(', ') : 'schedule off')
+    + ', ' + relaxConfig.minutes + ' min');
+  if (!relaxState) return;
+  if (relaxState.target !== relaxLib.dailyTarget(relaxConfig)) relaxSave();
+  broadcastRelax();
+}
+
+function relaxRollover() {
+  const today = relaxToday();
+  if (relaxState && relaxState.date === today) return;
+  relaxState = relaxLib.normalizeState(relaxState, today);
+  relaxSave();
+  broadcastRelax();
+}
+
+function relaxViewNow() {
+  relaxRollover();
+  let extra = null;
+  if (relaxActive) extra = { phase: 'active', endsAt: relaxActive.endsAt };
+  else if (relaxHeadsUp) extra = { phase: 'headsup', startsAt: relaxHeadsUp.startsAt };
+  return relaxLib.relaxView(relaxConfig, relaxState, Date.now(), extra);
+}
+
+function broadcastRelax() {
+  const view = relaxViewNow();
+  if (win && !win.isDestroyed()) win.webContents.send('relax-update', view);
+  // The Habits tab shows today's count on the Relax calendar.
+  if (dashWin && !dashWin.isDestroyed()) dashWin.webContents.send('relax-update', view);
+}
+
+// Relax is ticked for the day once the day's count reaches its target - never on
+// an earlier break, never un-ticked. Asked again every tick, so a habits file
+// that could not be written, or a lowered target, is caught up within seconds.
+function relaxSyncHabit() {
+  if (!relaxState || Date.now() < relaxHabitRetryAt) return;
+  const day = relaxState.date;
+  if (!relaxLib.habitDue(relaxConfig, relaxState, habits[AUTO_HABIT].indexOf(day) >= 0)) return;
+  const progress = relaxState.done + '/' + relaxLib.dailyTarget(relaxConfig);
+  if (setHabitDay(AUTO_HABIT, day, true, true)) {
+    relaxLog('relax habit ticked for ' + day + ' (' + progress + ')');
+  } else {
+    relaxHabitRetryAt = Date.now() + RELAX_HABIT_RETRY_MS;
+    relaxLog('could not tick the relax habit (' + progress + '): habits file not saved; retrying in a minute');
+  }
+}
+
+// -> null when now is a good moment, else why not. Every call asks again: a
+// call or a meeting can start at any time, nothing here is cached.
+async function relaxBusyReason(checkIdle) {
+  const now = Date.now();
+  if (pomoState === 'running') return 'pomodoro focus running';
+  const evt = relaxLib.busyEvent(calendarEvents, now, relaxConfig.minutes * 60 * 1000);
+  if (evt) return 'calendar event at ' + evt.time;
+  const [idleMs, locked, mic] = await Promise.all([
+    checkIdle ? relaxLib.probeIdleMs() : Promise.resolve(null),
+    relaxLib.probeLocked(),
+    relaxLib.probeMic(),
+  ]);
+  if (locked === true) return 'screen locked';
+  if (checkIdle) {
+    let idle = idleMs;
+    // Off GNOME there is no Mutter to ask; Electron's own figure is right there.
+    if (idle === null) idle = powerMonitor.getSystemIdleTime() * 1000;
+    if (idle > relaxLib.IDLE_LIMIT_MS) return 'away (idle ' + Math.round(idle / 60000) + ' min)';
+  }
+  if (mic.captures === null) {
+    if (process.platform === 'linux') relaxLog('microphone check unavailable: ' + mic.error);
+  } else if (mic.captures.length > 0) {
+    return 'microphone in use (' + mic.captures.map((c) => c.app).join(', ') + ')';
+  }
+  return null;
+}
+
+function relaxDefer(slot, reason) {
+  const entry = Object.assign({}, relaxState.slots[slot]);
+  entry.status = 'waiting';
+  entry.nextAt = Date.now() + relaxLib.RETRY_MS;
+  entry.reason = reason;
+  relaxState.slots[slot] = entry;
+  relaxSave();
+  relaxLog('slot ' + slot + ' not now: ' + reason + '; next try '
+    + new Date(entry.nextAt).toTimeString().slice(0, 5));
+  broadcastRelax();
+}
+
+function relaxTick() {
+  relaxRollover();
+  relaxReloadConfig();
+  relaxRetryBannerRestore();
+  relaxSyncHabit();
+  if (relaxActive || relaxHeadsUp || relaxChecking || !relaxConfig.enabled) return;
+  const plan = relaxLib.planSlots(relaxConfig, relaxState, Date.now());
+  if (plan.changed) {
+    relaxSave();
+    broadcastRelax();
+  }
+  if (!plan.due) return;
+  const slot = plan.due;
+  relaxChecking = true;
+  relaxBusyReason(true).then((reason) => {
+    relaxChecking = false;
+    if (relaxActive || relaxHeadsUp) return;
+    if (reason) relaxDefer(slot, reason);
+    else relaxShowHeadsUp(slot);
+  }, (err) => {
+    relaxChecking = false;
+    relaxDefer(slot, 'check failed: ' + (err && err.message));
+  });
+}
+
+function relaxShowHeadsUp(slot) {
+  const startsAt = Date.now() + relaxLib.HEADS_UP_MS;
+  const display = getWidgetDisplay();
+  const wa = display.workArea;
+  const w = 300;
+  const h = 204; // a second row of buttons since Start now
+  // Top centre: the bottom-right corner belongs to Telegram's and GNOME's own
+  // pop-ups, which sit above every normal window (seen covering it in testing).
+  const toast = new BrowserWindow({
+    width: w,
+    height: h,
+    x: Math.round(wa.x + (wa.width - w) / 2),
+    y: wa.y + 16,
+    frame: false,
+    resizable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    ...POPUP_GLASS_OPTS_FN(),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'relax-preload.js'),
+    },
+  });
+  applyLinuxPopupTransparency(toast);
+  relaxHeadsUp = { slot, startsAt, win: toast, timer: setTimeout(() => relaxBeginSlot(slot), relaxLib.HEADS_UP_MS) };
+  // Shown without focus: he may be typing, and the keystrokes must stay where they are.
+  toast.once('ready-to-show', () => { if (!toast.isDestroyed()) toast.showInactive(); });
+  toast.loadFile(path.join(__dirname, 'relax-toast.html'));
+  toast.webContents.once('did-finish-load', () => {
+    if (toast.isDestroyed()) return;
+    toast.webContents.send('relax-toast-data', {
+      startsAt,
+      minutes: relaxConfig.minutes,
+      music: relaxConfig.music,
+      done: relaxState.done,
+      total: relaxLib.dailyTarget(relaxConfig),
+    });
+  });
+  relaxLog('heads-up for ' + slot);
+  broadcastRelax();
+}
+
+function relaxCloseHeadsUp() {
+  const h = relaxHeadsUp;
+  if (!h) return;
+  relaxHeadsUp = null;
+  clearTimeout(h.timer);
+  if (h.win && !h.win.isDestroyed()) h.win.close();
+}
+
+async function relaxBeginSlot(slot) {
+  if (!relaxHeadsUp || relaxHeadsUp.slot !== slot) return;
+  relaxCloseHeadsUp();
+  // Thirty seconds is enough for a call to start or a meeting to be added.
+  let reason;
+  try {
+    reason = await relaxBusyReason(false);
+  } catch (err) {
+    reason = 'check failed: ' + (err && err.message);
+  }
+  if (relaxActive) return;
+  if (reason) relaxDefer(slot, reason);
+  else relaxStartBreak(slot, 'schedule');
+}
+
+// "Relax now" from the widget, the tray or the socket: no checks, he asked.
+function relaxNow(source) {
+  if (relaxActive) return;
+  const slot = relaxHeadsUp ? relaxHeadsUp.slot : null;
+  relaxCloseHeadsUp();
+  relaxStartBreak(slot, source);
+}
+
+function relaxOpenWindow(display, primary) {
+  const b = display.bounds;
+  const w = new BrowserWindow({
+    x: b.x,
+    y: b.y,
+    width: b.width,
+    height: b.height,
+    frame: false,
+    // Must stay resizable: Mutter refuses fullscreen to a fixed-size window
+    // (tested - with resizable:false the top bar stayed over the scene).
+    resizable: true,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreen: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    // Transparent, so the fade in and out shows his own windows through it.
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
+    title: 'Relax',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'relax-preload.js'),
+      autoplayPolicy: 'no-user-gesture-required',
+      backgroundThrottling: false,
+    },
+  });
+  w.setAlwaysOnTop(true, 'screen-saver');
+  w.setVisibleOnAllWorkspaces(true);
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  w.webContents.on('will-navigate', (e) => e.preventDefault());
+  // Alt+F4 or a crashed page ends the break (uncounted) instead of leaving a hole.
+  w.on('close', (e) => {
+    if (relaxActive && relaxActive.windows.indexOf(w) >= 0 && !relaxActive.ending) {
+      e.preventDefault();
+      relaxEndEarly('window closed');
+    }
+  });
+  w.webContents.on('render-process-gone', () => relaxEndEarly('page crashed'));
+  w.once('ready-to-show', () => {
+    if (w.isDestroyed()) return;
+    if (primary) {
+      w.show();
+      w.focus(); // Esc has to reach the page
+    } else {
+      w.showInactive();
+    }
+  });
+  w.loadFile(path.join(__dirname, 'relax.html'));
+  w.webContents.once('did-finish-load', () => {
+    const a = relaxActive;
+    if (w.isDestroyed() || !a || a.windows.indexOf(w) < 0) return;
+    w.webContents.send('relax-start', {
+      endsAt: a.endsAt,
+      durationMs: a.durationMs,
+      fadeMs: relaxLib.FADE_MS,
+      primary,
+      music: relaxConfig.music,
+      musicSource: a.musicSource,
+      breathing: relaxConfig.breathing,
+      display: b,
+      biome: a.biome,
+    });
+  });
+  return w;
+}
+
+async function relaxStartBreak(slot, source) {
+  if (relaxActive) return;
+  relaxReloadConfig();
+  const durationMs = Math.round(relaxConfig.minutes * 60 * 1000);
+  const a = {
+    slot, source, startedAt: 0, endsAt: 0, durationMs, ddterm: null,
+    windows: [], blocker: null, timer: null, lockTimer: null, ending: false,
+  };
+  relaxActive = a;
+  await relaxBannersOff();
+  // Asked before the break takes the keyboard: afterwards it is too late to know.
+  if (process.platform === 'linux') a.ddterm = await relaxLib.ddtermOpen();
+  if (relaxActive !== a || a.ending) return;
+  const displays = screen.getAllDisplays();
+  const primaryId = screen.getPrimaryDisplay().id;
+  a.startedAt = Date.now();
+  a.endsAt = a.startedAt + durationMs;
+  a.biome = relaxBiomes.nextBiome(RELAX_BIOMES_FILE, { log: relaxLog }); // the same place on every screen
+  a.musicSource = relaxConfig.music
+    ? relaxMusic.chooseSource(relaxConfig.musicSource, relaxMusic.listTracks(RELAX_MUSIC_DIR)) : 'off';
+  for (const d of displays) a.windows.push(relaxOpenWindow(d, d.id === primaryId));
+  try {
+    a.blocker = powerSaveBlocker.start('prevent-display-sleep');
+  } catch (err) {
+    relaxLog('could not keep the screen awake: ' + err.message);
+  }
+  a.timer = setTimeout(relaxComplete, durationMs);
+  a.lockTimer = setInterval(() => {
+    relaxLib.probeLocked().then((locked) => { if (locked === true) relaxEndEarly('screen locked'); });
+  }, RELAX_LOCK_POLL_MS);
+  relaxLog('break started (' + source + (slot ? ', slot ' + slot : '') + ', '
+    + relaxConfig.minutes + ' min, ' + displays.length + ' screen' + (displays.length === 1 ? '' : 's') + ', ' + a.biome
+    + ', music ' + a.musicSource + ')');
+  broadcastRelax();
+}
+
+// The countdown reached zero: this is the moment the break counts.
+function relaxComplete() {
+  const a = relaxActive;
+  if (!a || a.ending) return;
+  a.ending = true;
+  relaxRollover();
+  const now = Date.now();
+  relaxState.done += 1;
+  relaxState.lastDoneAt = now;
+  if (a.slot) relaxState.slots[a.slot] = { status: 'done', at: now };
+  relaxSave();
+  relaxLog('break completed: ' + relaxState.done + '/' + relaxLib.dailyTarget(relaxConfig) + ' today');
+  // A completed break is a break: Relax now counts toward the target like a slot.
+  relaxHabitRetryAt = 0;
+  relaxSyncHabit();
+  relaxFinish(a, relaxLib.FADE_MS);
+}
+
+function relaxEndEarly(reason) {
+  const a = relaxActive;
+  if (!a || a.ending) return;
+  a.ending = true;
+  if (a.slot) {
+    relaxState.slots[a.slot] = { status: 'ended', at: Date.now(), reason };
+    relaxSave();
+  }
+  relaxLog('break ended early (' + reason + '), not counted');
+  relaxFinish(a, RELAX_EARLY_FADE_MS);
+}
+
+function relaxFinish(a, fadeMs) {
+  clearTimeout(a.timer);
+  clearInterval(a.lockTimer);
+  for (const w of a.windows) {
+    if (!w.isDestroyed()) w.webContents.send('relax-fade-out', { ms: fadeMs });
+  }
+  broadcastRelax();
+  setTimeout(() => {
+    for (const w of a.windows) {
+      if (!w.isDestroyed()) w.close();
+    }
+    if (a.blocker !== null && powerSaveBlocker.isStarted(a.blocker)) powerSaveBlocker.stop(a.blocker);
+    if (relaxActive === a) relaxActive = null;
+    relaxBannersRestore().then(() => broadcastRelax());
+    relaxReturnDdterm(a);
+  }, fadeMs + 150);
+}
+
+// Mutter hands the keyboard back to the window he was in, unless that was
+// ddterm, which hid itself when the break took focus: open it again.
+async function relaxReturnDdterm(a) {
+  if (a.ddterm !== true) return;
+  if (await relaxLib.ddtermOpen() !== false) return;
+  relaxLog(await relaxLib.ddtermActivate() ? 'ddterm was open before the break: shown again' : 'could not show ddterm again');
+}
+
+// GNOME banners off for the break. The value to restore is saved BEFORE the
+// change, so a crash mid-break is repaired on the next start.
+async function relaxBannersOff() {
+  if (process.platform !== 'linux') return;
+  const current = await relaxLib.getBanners();
+  if (current !== true) {
+    relaxLog('notification banners ' + (current === false ? 'already off' : 'unreadable') + ', left alone');
+    return;
+  }
+  relaxState.bannersRestore = true;
+  if (!relaxSave()) {
+    relaxLog('banners left on: the value to restore could not be saved');
+    relaxState.bannersRestore = null;
+    return;
+  }
+  relaxLog(await relaxLib.setBanners(false) ? 'notification banners off' : 'could not turn notification banners off');
+}
+
+async function relaxBannersRestore() {
+  if (typeof relaxState.bannersRestore !== 'boolean' || relaxRestoring) return;
+  relaxRestoring = true;
+  try {
+    const want = relaxState.bannersRestore;
+    if (await relaxLib.setBanners(want)) {
+      relaxState.bannersRestore = null;
+      relaxSave();
+      relaxLog('notification banners restored to ' + want);
+    } else {
+      relaxBannerRetryAt = Date.now() + RELAX_BANNER_RETRY_MS;
+      relaxLog('could not restore notification banners; retrying in a minute');
+    }
+  } finally {
+    relaxRestoring = false;
+  }
+}
+
+function relaxRetryBannerRestore() {
+  if (relaxActive || typeof relaxState.bannersRestore !== 'boolean' || Date.now() < relaxBannerRetryAt) return;
+  relaxBannersRestore();
+}
+
+function relaxInit() {
+  relaxReloadConfig();
+  relaxState = relaxLib.loadState(RELAX_STATE_FILE, relaxToday());
+  relaxSave();
+  // Still set from a break the app never finished (it crashed or was killed).
+  if (typeof relaxState.bannersRestore === 'boolean') {
+    relaxLog('restoring notification banners left off by an unfinished break');
+    relaxBannersRestore();
+  }
+}
+
+// On quit nothing async survives: close the break and put the banners back now.
+function relaxShutdown() {
+  relaxCloseHeadsUp();
+  const a = relaxActive;
+  if (a) {
+    a.ending = true;
+    clearTimeout(a.timer);
+    clearInterval(a.lockTimer);
+    for (const w of a.windows) { if (!w.isDestroyed()) w.destroy(); }
+    if (a.blocker !== null && powerSaveBlocker.isStarted(a.blocker)) powerSaveBlocker.stop(a.blocker);
+    relaxActive = null;
+  }
+  if (relaxState && typeof relaxState.bannersRestore === 'boolean') {
+    if (relaxLib.setBannersSync(relaxState.bannersRestore)) {
+      relaxState.bannersRestore = null;
+      relaxSave();
+    }
+  }
 }
 
 const SYNC_TIMEOUT_MS = 15000; // force-reset syncing flag after 15s
@@ -760,7 +1250,7 @@ function loadAccountState(ctx) {
   try {
     if (fs.existsSync(ctx.dataFile)) {
       const data = JSON.parse(fs.readFileSync(ctx.dataFile, 'utf-8'));
-      ctx.cachedUsage = data.usage || null;
+      ctx.cachedUsage = usageLib.normalizeCached(data.usage || null);
       const until = Number(data.rateLimitUntil);
       if (Number.isFinite(until) && until > Date.now()) ctx.rateLimitUntil = until;
     }
@@ -805,9 +1295,11 @@ function appendHistory(ctx) {
   if (!usage) return;
   const point = {
     ts: Date.now(),
-    session: usage.session.pct,
-    weekAll: usage.weekAll.pct,
-    weekSonnet: usage.weekSonnet.pct,
+    // null = this plan has no such limit (Ultra has no 5-hour session); the
+    // charts draw a gap for it, never a 0 %.
+    session: usage.session ? usage.session.pct : null,
+    weekAll: usage.weekAll ? usage.weekAll.pct : null,
+    weekSonnet: usage.weekSonnet ? usage.weekSonnet.pct : null,
   };
 
   // Deduplicate: skip if values unchanged from last point
@@ -921,24 +1413,34 @@ function saveTasks() {
 
 // --- Habits persistence ---
 
+function emptyHabits() {
+  const out = {};
+  for (const kind of HABIT_KINDS) out[kind] = [];
+  return out;
+}
+
 function loadHabits() {
+  const out = emptyHabits();
   try {
     if (fs.existsSync(HABITS_FILE)) {
       const data = JSON.parse(fs.readFileSync(HABITS_FILE, 'utf-8'));
-      return {
-        training: Array.isArray(data.training) ? data.training : [],
-        reading: Array.isArray(data.reading) ? data.reading : [],
-        learning: Array.isArray(data.learning) ? data.learning : [],
-      };
+      for (const kind of HABIT_KINDS) {
+        if (Array.isArray(data[kind])) out[kind] = data[kind];
+      }
     }
   } catch { /* ignore */ }
-  return { training: [], reading: [], learning: [] };
+  return out;
 }
 
+// -> false when the file could not be written: the change is only in memory.
 function saveHabits() {
   try {
     fs.writeFileSync(HABITS_FILE, JSON.stringify(habits, null, 2));
-  } catch { /* ignore */ }
+    return true;
+  } catch (err) {
+    console.error('[habits] save failed:', err.message);
+    return false;
+  }
 }
 
 function broadcastHabits() {
@@ -948,6 +1450,32 @@ function broadcastHabits() {
   if (win && !win.isDestroyed()) {
     win.webContents.send('habits-update', habits);
   }
+}
+
+// One day of one habit. `done` undefined toggles (the widget's badge click, via
+// habits-toggle-day); true/false sets it (the phone: a retried or doubled request
+// must not flip it back). -> false when kind or date is not valid, when it is
+// Relax and the app itself (`byApp`, the 4th break) is not the one setting it,
+// or when the change could not be saved.
+function setHabitDay(kind, dateStr, done, byApp) {
+  if (HABIT_KINDS.indexOf(kind) < 0) return false;
+  if (kind === AUTO_HABIT && byApp !== true) return false;
+  if (!isValidDateStr(dateStr)) return false;
+  const arr = habits[kind];
+  const idx = arr.indexOf(dateStr);
+  const want = done === undefined ? idx === -1 : done === true;
+  if (want === (idx !== -1)) return true; // already so: nothing to save
+  if (want) arr.push(dateStr);
+  else arr.splice(idx, 1);
+  if (!saveHabits()) {
+    // Keep memory equal to the file: otherwise a retry would find "already so"
+    // and report a save that never happened.
+    if (want) arr.splice(arr.lastIndexOf(dateStr), 1);
+    else arr.splice(idx, 0, dateStr);
+    return false;
+  }
+  broadcastHabits();
+  return true;
 }
 
 function isValidDateStr(s) {
@@ -998,6 +1526,9 @@ function saveCalendarEvents() {
       events: calendarEvents,
     }, null, 2));
   } catch { /* ignore */ }
+  // Every local change and every Google sync comes through here: keep the
+  // phone hub's view of the calendar in step.
+  writeCalendarFeed();
 }
 
 // --- Google Calendar: config persistence ---
@@ -1514,7 +2045,8 @@ function showDailyDigest() {
   lines.push(taskLine);
   const digestUsage = activeUsage();
   if (digestUsage) {
-    lines.push('Session ' + digestUsage.session.pct + '% \u00b7 Week ' + digestUsage.weekAll.pct + '%');
+    const usageLine = usageLib.summaryLine(digestUsage);
+    if (usageLine) lines.push('Usage ' + usageLine);
   }
   const summary = lines.join('\n');
 
@@ -1999,31 +2531,41 @@ function showReminderPopup(evt, autoDismissMs, stage) {
   });
 }
 
-function addTask(text, priority) {
-  if (typeof text !== 'string') return;
+// Task, calendar and sticky-note mutations. The IPC handlers and the phone inbox
+// (applyInboxOp) both call these, so validation, saving and the live window
+// updates are the same whichever side made the change.
+
+// `id`: a phone's or the watch's own id for a task made there (hub 1.6 sync), so the task has
+// one id everywhere; ignored when malformed or taken.
+function addTask(text, priority, id) {
+  if (typeof text !== 'string') return null;
   const clean = text.trim().slice(0, 200);
-  if (!clean) return;
+  if (!clean) return null;
   const validPriority = ['high', 'medium', 'low'].indexOf(priority) >= 0 ? priority : 'medium';
-  tasks.push({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+  const ownId = typeof id === 'string' && /^[a-z0-9]{4,20}$/.test(id) && !tasks.some((t) => t.id === id);
+  const task = {
+    id: ownId ? id : Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     text: clean,
     done: false,
     priority: validPriority,
     order: tasks.length,
     createdAt: Date.now(),
     completedAt: null,
-  });
+  };
+  tasks.push(task);
   saveTasks();
   broadcastTasks();
+  return task;
 }
 
 function toggleTask(id) {
   const task = tasks.find((t) => t.id === id);
-  if (!task) return;
+  if (!task) return null;
   task.done = !task.done;
   task.completedAt = task.done ? Date.now() : null;
   saveTasks();
   broadcastTasks();
+  return task;
 }
 
 function deleteTask(id) {
@@ -2036,6 +2578,167 @@ function clearCompletedTasks() {
   tasks = tasks.filter((t) => !t.done);
   saveTasks();
   broadcastTasks();
+}
+
+function setTaskPriority(id, priority) {
+  if (typeof id !== 'string' || id.length >= 20) return null;
+  const task = tasks.find((t) => t.id === id);
+  if (!task) return null;
+  if (['high', 'medium', 'low'].indexOf(priority) >= 0) {
+    task.priority = priority;
+    saveTasks();
+    broadcastTasks();
+    return task;
+  }
+  return null;
+}
+
+// The desktop has no rename; the phone does. Same text rule as addTask.
+function renameTask(id, text) {
+  const task = tasks.find((t) => t.id === id);
+  if (!task || typeof text !== 'string') return null;
+  const clean = text.trim().slice(0, 200);
+  if (!clean) return null;
+  task.text = clean;
+  saveTasks();
+  broadcastTasks();
+  return task;
+}
+
+function addCalendarEvent(data) {
+  if (!data || typeof data.title !== 'string' || !data.date) return { success: false };
+  const evt = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    title: data.title.trim().slice(0, 100),
+    date: data.date,
+    time: data.time || null,
+    duration: typeof data.duration === 'number' && data.duration > 0 ? data.duration : null,
+    color: ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0 ? data.color : 'blue',
+    reminder: typeof data.reminder === 'number' ? data.reminder : null,
+    recurrence: data.recurrence || null,
+    done: false,
+    googleEventId: null,
+    createdAt: Date.now(),
+  };
+  // Generate recurring instances
+  if (evt.recurrence) {
+    generateRecurringEvents(evt);
+  }
+  calendarEvents.push(evt);
+  saveCalendarEvents();
+  broadcastCalendar();
+  scheduleReminders();
+  return { success: true, event: evt };
+}
+
+function updateCalendarEvent(data) {
+  if (!data || !data.id) return { success: false };
+  const idx = calendarEvents.findIndex((e) => e.id === data.id);
+  if (idx < 0) return { success: false };
+  const evt = calendarEvents[idx];
+  if (data.title !== undefined) evt.title = String(data.title).trim().slice(0, 100);
+  if (data.date !== undefined) evt.date = data.date;
+  if (data.time !== undefined) evt.time = data.time || null;
+  if (data.color !== undefined && ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0) evt.color = data.color;
+  if (data.reminder !== undefined) evt.reminder = typeof data.reminder === 'number' ? data.reminder : null;
+  firedReminders.delete(evt.id); // allow re-fire if time changed
+  saveCalendarEvents();
+  broadcastCalendar();
+  scheduleReminders();
+  return { success: true };
+}
+
+function toggleCalendarEvent(data) {
+  if (!data || !data.id) return { success: false };
+  const evt = calendarEvents.find((e) => e.id === data.id);
+  if (!evt) return { success: false };
+  evt.done = !evt.done;
+  saveCalendarEvents();
+  broadcastCalendar();
+  return { success: true };
+}
+
+function deleteCalendarEvent(data) {
+  if (!data || !data.id) return { success: false };
+  calendarEvents = calendarEvents.filter((e) => e.id !== data.id);
+  firedReminders.delete(data.id);
+  // Reminder timers use compound key "id:stage" — clear all matching
+  for (const key of Object.keys(reminderTimers)) {
+    if (key === data.id || key.startsWith(data.id + ':')) {
+      clearTimeout(reminderTimers[key]);
+      delete reminderTimers[key];
+    }
+  }
+  delete firedStages[data.id];
+  saveCalendarEvents();
+  broadcastCalendar();
+  scheduleReminders();
+  return { success: true };
+}
+
+function readStickyNotes() {
+  try {
+    if (fs.existsSync(STICKY_NOTES_FILE)) {
+      return JSON.parse(fs.readFileSync(STICKY_NOTES_FILE, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+// Validate and cap, write, then tell every notes window except the one that
+// sent the notes (senderContents null = a change from outside: tell them all).
+function saveStickyNotes(notes, senderContents) {
+  const clean = notes.slice(0, 50).map((n) => ({
+    id: typeof n.id === 'string' ? n.id.slice(0, 20) : '',
+    title: typeof n.title === 'string' ? n.title.slice(0, 30) : '',
+    text: typeof n.text === 'string' ? n.text.slice(0, 100000) : '',
+    color: typeof n.color === 'string' ? n.color.slice(0, 10) : 'default',
+    createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
+  }));
+  try { fs.writeFileSync(STICKY_NOTES_FILE, JSON.stringify(clean, null, 2)); } catch { /* ignore */ }
+  // Keep the other notes window (panel vs app) in sync
+  for (const w of [notesWin, notesAppWin]) {
+    if (w && !w.isDestroyed() && w.webContents !== senderContents) {
+      try { w.webContents.send('sticky-notes-updated', clean); } catch { /* ignore */ }
+    }
+  }
+  return clean;
+}
+
+function readNotesArchive() {
+  try {
+    if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
+      return JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+function archiveAddNote(note) {
+  if (!note || typeof note.id !== 'string') return;
+  try {
+    let archive = [];
+    if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
+      archive = JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
+    }
+    note.archivedAt = Date.now();
+    archive.unshift(note);
+    // Keep last 50 archived notes
+    if (archive.length > 50) archive = archive.slice(0, 50);
+    fs.writeFileSync(NOTES_ARCHIVE_FILE, JSON.stringify(archive, null, 2));
+  } catch { /* ignore */ }
+}
+
+function archiveRemoveNote(noteId) {
+  if (typeof noteId !== 'string') return;
+  try {
+    let archive = [];
+    if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
+      archive = JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
+    }
+    archive = archive.filter((n) => n.id !== noteId);
+    fs.writeFileSync(NOTES_ARCHIVE_FILE, JSON.stringify(archive, null, 2));
+  } catch { /* ignore */ }
 }
 
 // --- Alert popup ---
@@ -2109,11 +2812,15 @@ function showAlertPopup(label, pct, resetsAt, accountLabel) {
 function checkAndNotify(ctx) {
   const usage = ctx && ctx.cachedUsage;
   if (!usage) return;
-  const checks = [
-    { key: 'session', pct: usage.session.pct, label: 'Session', resetsAt: usage.session.resetsAt },
-    { key: 'weekAll', pct: usage.weekAll.pct, label: 'Weekly (all)', resetsAt: usage.weekAll.resetsAt },
-    { key: 'weekSonnet', pct: usage.weekSonnet.pct, label: 'Weekly (Fable)', resetsAt: usage.weekSonnet.resetsAt },
-  ];
+  // Only the limits this plan has; the scoped cap is named after its model.
+  const checks = usageLib.METER_KEYS.filter((key) => usage[key]).map((key) => ({
+    key,
+    pct: usage[key].pct,
+    label: key === 'session' ? 'Session'
+      : key === 'weekAll' ? 'Weekly (all)'
+      : 'Weekly (' + (usage[key].model || 'model') + ')',
+    resetsAt: usage[key].resetsAt,
+  }));
 
   for (const check of checks) {
     const step = getAlertStep(check.pct, ALERT_THRESHOLDS[check.key]);
@@ -2143,9 +2850,9 @@ function getAlertTrayIcon() {
 
 function updateTrayBadge(usage) {
   if (!tray) return;
-  const hasAlert = usage.session.pct >= ALERT_THRESHOLDS.session
-    || usage.weekAll.pct >= ALERT_THRESHOLDS.weekAll
-    || usage.weekSonnet.pct >= ALERT_THRESHOLDS.weekSonnet;
+  // A used-up limit the server grades critical (a scoped Fable cap) counts too.
+  const hasAlert = usageLib.METER_KEYS.some((key) => usage[key]
+    && (usage[key].pct >= ALERT_THRESHOLDS[key] || usage[key].severity === 'critical'));
 
   if (hasAlert !== trayHasAlert) {
     trayHasAlert = hasAlert;
@@ -2466,6 +3173,10 @@ function handleAuthFailure(ctx) {
 
 function refreshAccessToken(ctx, refreshToken, onSuccess) {
   if (!ctx || ctx.isRefreshing) return;
+  // A refresh token the endpoint already rejected stays rejected until the
+  // creds file carries a different one (a re-login); every token read used to
+  // retry it, which hammered the endpoint ~100 times a minute.
+  if (ctx.rejectedRefreshToken && ctx.rejectedRefreshToken === refreshToken) return;
   ctx.isRefreshing = true;
   const credsFile = ctx.credsFile;
   const postData = JSON.stringify({
@@ -2501,6 +3212,7 @@ function refreshAccessToken(ctx, refreshToken, onSuccess) {
             ctx.tokenLastRead = Date.now();
             ctx.refreshRetryCount = 0;
             ctx.needsLogin = false;
+            ctx.rejectedRefreshToken = null;
             if (ctx.refreshRetryTimer) { clearTimeout(ctx.refreshRetryTimer); ctx.refreshRetryTimer = null; }
             if (typeof onSuccess === 'function') onSuccess();
           }
@@ -2509,9 +3221,12 @@ function refreshAccessToken(ctx, refreshToken, onSuccess) {
         // Throttled, not rejected — back off and try the same refresh token again.
         console.error('[token-refresh] Rate limited for account', ctx.id, '— backing off');
         scheduleRefreshRetry(ctx, refreshToken);
-      } else if (res.statusCode === 401 || res.statusCode === 403) {
-        // Refresh token revoked or expired (they live ~30 days)
+      } else if (res.statusCode === 400 || res.statusCode === 401 || res.statusCode === 403) {
+        // Refresh token revoked, expired (they live ~30 days) or, on 400
+        // (invalid_grant), rotated away by another client that logged in with
+        // the same account. Retrying the same token can never succeed.
         console.error('[token-refresh] Refresh rejected for account', ctx.id, 'status', res.statusCode);
+        ctx.rejectedRefreshToken = refreshToken;
         reportAuthExpired(ctx);
       } else {
         console.error('[token-refresh] Unexpected status', res.statusCode, 'for account', ctx.id);
@@ -2674,78 +3389,10 @@ function fetchUsage(ctx) {
   });
 }
 
-function clampPct(val) {
-  const n = Number(val) || 0;
-  return Math.min(100, Math.max(0, Math.round(n)));
-}
-
+// The usage body -> meters mapping lives in usage-limits.js (tested without
+// Electron). A meter the plan does not have is null, never { pct: 0 }.
 function buildUsage(data) {
-  const usage = {
-    session: { pct: 0, resetsAt: null, label: 'Current session' },
-    weekAll: { pct: 0, resetsAt: null, label: 'Current week (all models)' },
-    weekSonnet: { pct: 0, resetsAt: null, label: 'Current week (Fable only)' },
-    extraUsage: { enabled: false },
-    syncTime: Date.now(),
-  };
-
-  if (data.five_hour) {
-    usage.session = {
-      pct: clampPct(data.five_hour.utilization),
-      resetsAt: data.five_hour.resets_at,
-      label: 'Current session',
-    };
-  }
-  if (data.seven_day) {
-    usage.weekAll = {
-      pct: clampPct(data.seven_day.utilization),
-      resetsAt: data.seven_day.resets_at,
-      label: 'Current week (all models)',
-    };
-  }
-  // Model-scoped weekly limit. The old fixed seven_day_sonnet field is null on
-  // current plans; the API now reports per-model caps in the `limits` array as
-  // kind "weekly_scoped" with the model name attached (currently Fable).
-  // Internal key stays `weekSonnet` for history/settings compatibility.
-  const scoped = Array.isArray(data.limits)
-    ? data.limits.find((l) => l && l.kind === 'weekly_scoped' && l.scope && l.scope.model)
-    : null;
-  if (scoped) {
-    const modelName = scoped.scope.model.display_name || 'model';
-    usage.weekSonnet = {
-      pct: clampPct(scoped.percent),
-      resetsAt: scoped.resets_at,
-      label: 'Current week (' + modelName + ' only)',
-      model: modelName,
-    };
-  } else if (data.seven_day_sonnet) {
-    // Legacy fallback for accounts still reporting the fixed Sonnet bucket
-    usage.weekSonnet = {
-      pct: clampPct(data.seven_day_sonnet.utilization),
-      resetsAt: data.seven_day_sonnet.resets_at,
-      label: 'Current week (Sonnet only)',
-      model: 'Sonnet',
-    };
-  }
-  if (data.extra_usage) {
-    const eu = data.extra_usage;
-    const util = Number(eu.utilization);
-    const dec = Number.isFinite(Number(eu.decimal_places)) ? Number(eu.decimal_places) : 2;
-    usage.extraUsage = {
-      enabled: !!eu.is_enabled,
-      utilization: Number.isFinite(util) ? util : null,
-      usedMinor: Number.isFinite(Number(eu.used_credits)) ? Number(eu.used_credits) : null,
-      limitMinor: Number.isFinite(Number(eu.monthly_limit)) ? Number(eu.monthly_limit) : null,
-      currency: typeof eu.currency === 'string' ? eu.currency : 'USD',
-      decimals: dec,
-    };
-    // Prefer the precise percent/severity from the spend object when present
-    if (data.spend && typeof data.spend.percent === 'number') {
-      usage.extraUsage.percent = data.spend.percent;
-      usage.extraUsage.severity = data.spend.severity || null;
-    }
-  }
-
-  return usage;
+  return usageLib.buildUsage(data, Date.now());
 }
 
 // The usage-update payload every renderer receives: one entry per enabled
@@ -2796,6 +3443,7 @@ function broadcastUsage() {
 // once a minute so a new day, an amber/red turn or a fresh login shows up
 // without waiting for the next sync.
 const loginLib = require('./login-expiry');
+const usageLib = require('./usage-limits');
 // Written by the clx launcher, when installed: its per-account `auth` verdict.
 const CLX_USAGE_CACHE_FILE = path.join(CLAUDE_DIR, 'cc-usage-cache.json');
 const LOGIN_ENV_TTL_MS = 30 * 1000;
@@ -3001,12 +3649,7 @@ async function doSync(ctx) {
 
     // Guard: don't overwrite good cached data with all-zero response (treat as bad response)
     const cached = ctx.cachedUsage;
-    const allZero = newUsage.session.pct === 0
-      && newUsage.weekAll.pct === 0
-      && newUsage.weekSonnet.pct === 0;
-    const hasResetTimes = newUsage.session.resetsAt || newUsage.weekAll.resetsAt || newUsage.weekSonnet.resetsAt;
-    if (allZero && cached && !hasResetTimes
-      && (cached.session.pct > 0 || cached.weekAll.pct > 0 || cached.weekSonnet.pct > 0)) {
+    if (usageLib.looksEmpty(newUsage) && cached && usageLib.anyUsage(cached)) {
       // Bad response — keep cached data, schedule retry, don't mark as successful sync
       broadcastUsage();
       updateTrayTooltip();
@@ -3119,7 +3762,7 @@ function updateTrayTooltip() {
     if (ctx.needsLogin) {
       lines.push(`${ctx.name}${cliTag} — sign-in needed`);
     } else if (ctx.cachedUsage) {
-      let line = `${ctx.name}${cliTag} 5h ${ctx.cachedUsage.session.pct}% · 7d ${ctx.cachedUsage.weekAll.pct}%`;
+      let line = `${ctx.name}${cliTag} ${usageLib.summaryLine(ctx.cachedUsage) || 'no limits reported'}`;
       if (limitedMin) line += ` (rate limited, retrying in ${limitedMin}m)`;
       lines.push(line);
     } else if (limitedMin) {
@@ -3205,6 +3848,7 @@ function buildTrayMenu() {
     { label: 'Show  (' + currentHotkey + ')', click: () => toggleWindow() },
     { label: 'Dashboard', click: () => openDashboard() },
     { label: 'Tasks', click: () => openTasksWindow() },
+    { label: 'Relax now', click: () => relaxNow('tray') },
     { type: 'separator' },
     { label: 'Quit', click: () => { if (win && !win.isDestroyed()) win.destroy(); app.quit(); } },
   ]);
@@ -3655,7 +4299,12 @@ function startToggleSocket() {
     const sockPath = path.join(os.tmpdir(), 'claude-meter-' + (process.getuid ? process.getuid() : 0) + '.sock');
     try { fs.unlinkSync(sockPath); } catch { /* not there */ }
     const server = net.createServer((c) => {
-      c.on('data', () => {
+      c.on('data', (buf) => {
+        // `relax` starts a break (for a keyboard shortcut); anything else toggles.
+        if (String(buf).trim() === 'relax') {
+          relaxNow('socket');
+          return;
+        }
         if (win && !win.isDestroyed()) {
           const wasVisible = win.isVisible();
           toggleWindow();
@@ -3680,7 +4329,7 @@ const LINUX_WIN_RADIUS = '12px';
 
 // Documents whose own markup already paints a rounded, opaque card (.popup)
 // filling the window. Only the body behind it has to be cleared.
-const LINUX_CARD_DOCS = new Set(['popup', 'pomo-popup', 'meeting-popup']);
+const LINUX_CARD_DOCS = new Set(['popup', 'pomo-popup', 'meeting-popup', 'relax-toast']);
 
 // Documents where BODY itself is the visual surface: there is no outer card,
 // every one of them declares `body { background: var(--bg) }`.
@@ -5052,6 +5701,364 @@ function startFileWatcher() {
   } catch { /* ignore */ }
 }
 
+// --- Phone/watch sync: op inbox, heartbeat, calendar feed ---
+// claude-meter-hub (~/claude-meter/hub, contract: mobile-briefs/SYNC-API.md v1.1)
+// serves the phone and the watch. It never edits our files: tasks and calendar
+// live in memory here and every change overwrites the files, so an outside write
+// would be lost on the next save. The hub drops one op file per change into
+// INBOX_DIR instead; we claim it by rename, apply it through the same functions
+// the IPC handlers use (so every open window updates live) and leave a result
+// file for the hub. ALIVE_FILE tells the hub someone is here to apply ops.
+
+const INBOX_OP_RE = /^([A-Za-z0-9_-]{8,64})\.op\.json$/;
+const INBOX_CLAIMED_RE = /^([A-Za-z0-9_-]{8,64})\.claimed\.json$/;
+const INBOX_RESULT_TTL_MS = 24 * 60 * 60 * 1000;   // results nobody collected (queued ops)
+const HEARTBEAT_MS = 15000;
+const NOTES_MAX = 50;                                // saveStickyNotes keeps the first 50
+const NOTE_COLORS = ['yellow', 'pink', 'green', 'blue', 'purple', 'default'];
+const EVENT_COLORS = ['blue', 'green', 'orange', 'red', 'purple'];
+const TASK_PRIORITIES = ['high', 'medium', 'low'];
+const INBOX_ID_RE = /^[a-z0-9]{4,20}$/;              // task / note / local event ids
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+let inboxWatcher = null;
+let inboxDebounce = null;
+let inboxBusy = false;
+let inboxAgain = false;
+let feedDate = null;
+
+function writeJsonAtomic(file, obj) {
+  const tmp = file + '.tmp-' + process.pid;
+  try { fs.unlinkSync(tmp); } catch { /* not there */ }
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+function localDateStr(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function isRealDate(s) {
+  if (!isValidDateStr(s)) return false;
+  const d = new Date(s + 'T12:00');
+  return !isNaN(d.getTime()) && localDateStr(d) === s;
+}
+
+// The notes window's noteTitle(): first "# heading", else the title field, else
+// the first line. The archive panel stores and shows this, so we do too.
+function noteDisplayTitle(note) {
+  const text = note.text || '';
+  const mh = text.match(/^#\s+(.+)$/m);
+  if (mh) return mh[1].trim().slice(0, 46);
+  if (note.title) return note.title.slice(0, 46);
+  const first = text.split('\n').map((s) => s.trim()).filter(Boolean)[0];
+  return first ? first.replace(/^[#>\-*\s]+/, '').slice(0, 46) : 'Untitled';
+}
+
+// Append a captured line to the "# Inbox" note, creating it (yellow, first on
+// the board) on first use. This is what Ctrl+] did before it switched to adding
+// tasks (5eb531c); Ctrl+] still adds tasks, and the phone's quick capture keeps
+// this. Goes through saveStickyNotes so the caps and live update match a save.
+function appendToInbox(text) {
+  let notes = readStickyNotes();
+  if (!Array.isArray(notes)) notes = [];
+  const line = '- ' + String(text).slice(0, 500);
+  let inbox = notes.find((n) => n && typeof n.text === 'string' && /^#\s*Inbox\b/i.test(n.text.trim()));
+  if (inbox) {
+    inbox.text = inbox.text.replace(/\s+$/, '') + '\n' + line;
+  } else {
+    if (notes.length >= NOTES_MAX) return null; // a new first note would push the last one off
+    inbox = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      title: '', text: '# Inbox\n\n' + line, color: 'yellow', createdAt: Date.now(),
+    };
+    notes.unshift(inbox);
+  }
+  const clean = saveStickyNotes(notes, null);
+  return clean.find((n) => n.id === inbox.id) || null;
+}
+
+function inboxOk(result) { return Object.assign({ ok: true, status: 200 }, result || {}); }
+function inboxFail(status, error, message) { return { ok: false, status, error, message }; }
+const NOTES_FULL = 'The desktop keeps at most 50 notes - archive one first.';
+
+// One op from the hub -> the same calls a desktop window would make. The hub
+// validates too; this is the check that counts.
+function applyInboxOp(op) {
+  if (!op || op.v !== 1 || typeof op.op !== 'string') return inboxFail(400, 'bad_request', 'Malformed op.');
+  const a = op.args && typeof op.args === 'object' ? op.args : {};
+  const str = (v) => typeof v === 'string';
+  switch (op.op) {
+    case 'tasks.add': {
+      if (!str(a.text) || !a.text.trim()) return inboxFail(400, 'bad_request', '`text` is required.');
+      if (a.priority !== undefined && TASK_PRIORITIES.indexOf(a.priority) < 0) return inboxFail(400, 'bad_request', 'Bad `priority`.');
+      // The same add sent again (sync replays what it is not sure landed): it is there already.
+      if (str(a.id) && tasks.some((t) => t.id === a.id)) return inboxOk({ task: tasks.find((t) => t.id === a.id) });
+      const task = addTask(a.text, a.priority, a.id); // tasks-add-with-priority
+      return task ? inboxOk({ task }) : inboxFail(400, 'bad_request', '`text` is required.');
+    }
+    case 'tasks.update': {
+      const task = str(a.id) ? tasks.find((t) => t.id === a.id) : null;
+      if (!task) return inboxFail(404, 'not_found', 'No such task.');
+      if (a.text !== undefined && (!str(a.text) || !a.text.trim())) return inboxFail(400, 'bad_request', 'Bad `text`.');
+      if (a.priority !== undefined && TASK_PRIORITIES.indexOf(a.priority) < 0) return inboxFail(400, 'bad_request', 'Bad `priority`.');
+      if (a.done !== undefined && typeof a.done !== 'boolean') return inboxFail(400, 'bad_request', 'Bad `done`.');
+      if (a.text !== undefined && a.text.trim().slice(0, 200) !== task.text) renameTask(task.id, a.text);
+      if (a.priority !== undefined && a.priority !== task.priority) setTaskPriority(task.id, a.priority); // tasks-set-priority
+      if (a.done !== undefined && a.done !== !!task.done) toggleTask(task.id);                         // tasks-toggle
+      return inboxOk({ task: tasks.find((t) => t.id === task.id) });
+    }
+    case 'tasks.delete': {
+      if (!str(a.id) || !tasks.some((t) => t.id === a.id)) return inboxFail(404, 'not_found', 'No such task.');
+      deleteTask(a.id); // tasks-delete
+      return inboxOk();
+    }
+    case 'tasks.clearCompleted': {
+      const before = tasks.length;
+      clearCompletedTasks(); // tasks-clear-completed
+      return inboxOk({ removed: before - tasks.length });
+    }
+    case 'calendar.add': {
+      if (!str(a.title) || !a.title.trim()) return inboxFail(400, 'bad_request', '`title` is required.');
+      if (!isRealDate(a.date)) return inboxFail(400, 'bad_request', '`date` must be YYYY-MM-DD.');
+      if (a.time !== undefined && a.time !== null && !(str(a.time) && TIME_RE.test(a.time))) return inboxFail(400, 'bad_request', '`time` must be HH:MM.');
+      if (a.duration !== undefined && a.duration !== null && !(Number.isInteger(a.duration) && a.duration > 0)) return inboxFail(400, 'bad_request', 'Bad `duration`.');
+      if (a.color !== undefined && EVENT_COLORS.indexOf(a.color) < 0) return inboxFail(400, 'bad_request', 'Bad `color`.');
+      const r = addCalendarEvent({ title: a.title, date: a.date, time: a.time || null, duration: a.duration, color: a.color }); // calendar-add-event
+      return r.success ? inboxOk({ event: r.event }) : inboxFail(400, 'bad_request', 'The desktop refused this event.');
+    }
+    case 'calendar.update': {
+      const evt = str(a.id) ? calendarEvents.find((e) => e.id === a.id) : null;
+      if (!evt) return inboxFail(404, 'not_found', 'No such event.');
+      if (evt.isGoogleEvent) return inboxFail(409, 'read_only', 'Google Calendar events are read-only here.');
+      if (a.title !== undefined && (!str(a.title) || !a.title.trim())) return inboxFail(400, 'bad_request', 'Bad `title`.');
+      if (a.date !== undefined && !isRealDate(a.date)) return inboxFail(400, 'bad_request', '`date` must be YYYY-MM-DD.');
+      if (a.time !== undefined && a.time !== null && !(str(a.time) && TIME_RE.test(a.time))) return inboxFail(400, 'bad_request', '`time` must be HH:MM.');
+      if (a.color !== undefined && EVENT_COLORS.indexOf(a.color) < 0) return inboxFail(400, 'bad_request', 'Bad `color`.');
+      if (a.done !== undefined && typeof a.done !== 'boolean') return inboxFail(400, 'bad_request', 'Bad `done`.');
+      const data = { id: evt.id };
+      for (const k of ['title', 'date', 'time', 'color']) if (a[k] !== undefined) data[k] = a[k];
+      if (Object.keys(data).length > 1) updateCalendarEvent(data);             // calendar-update-event
+      if (a.done !== undefined && a.done !== !!evt.done) toggleCalendarEvent({ id: evt.id }); // calendar-toggle-event
+      return inboxOk({ event: calendarEvents.find((e) => e.id === evt.id) });
+    }
+    case 'calendar.delete': {
+      const evt = str(a.id) ? calendarEvents.find((e) => e.id === a.id) : null;
+      if (!evt) return inboxFail(404, 'not_found', 'No such event.');
+      if (evt.isGoogleEvent) return inboxFail(409, 'read_only', 'Google Calendar events are read-only here.');
+      deleteCalendarEvent({ id: evt.id }); // calendar-delete-event
+      return inboxOk();
+    }
+    case 'notes.add': {
+      if (!str(a.title) || !str(a.text)) return inboxFail(400, 'bad_request', '`title` and `text` are required.');
+      if (a.color !== undefined && NOTE_COLORS.indexOf(a.color) < 0) return inboxFail(400, 'bad_request', 'Bad `color`.');
+      let notes = readStickyNotes();
+      if (!Array.isArray(notes)) notes = [];
+      // A phone's or the watch's own id (hub 1.6 sync): one id everywhere, and a resent add finds it made.
+      const same = str(a.id) ? notes.find((n) => n && n.id === a.id) : null;
+      if (same) return inboxOk({ note: same });
+      if (notes.length >= NOTES_MAX) return inboxFail(400, 'bad_request', NOTES_FULL);
+      const archived = readNotesArchive();
+      const ownId = str(a.id) && INBOX_ID_RE.test(a.id) && !(Array.isArray(archived) && archived.some((n) => n && n.id === a.id));
+      // The notes window's addNote(): a new note goes at the end of the board
+      const note = {
+        id: ownId ? a.id : Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        title: a.title, text: a.text, color: a.color || 'default', createdAt: Date.now(),
+      };
+      notes.push(note);
+      const clean = saveStickyNotes(notes, null); // sticky-notes-save
+      return inboxOk({ note: clean.find((n) => n.id === note.id) });
+    }
+    case 'notes.update': {
+      let notes = readStickyNotes();
+      if (!Array.isArray(notes)) notes = [];
+      const note = str(a.id) ? notes.find((n) => n && n.id === a.id) : null;
+      if (!note) return inboxFail(404, 'not_found', 'No such note.');
+      if (a.title !== undefined && !str(a.title)) return inboxFail(400, 'bad_request', 'Bad `title`.');
+      if (a.text !== undefined && !str(a.text)) return inboxFail(400, 'bad_request', 'Bad `text`.');
+      if (a.color !== undefined && NOTE_COLORS.indexOf(a.color) < 0) return inboxFail(400, 'bad_request', 'Bad `color`.');
+      for (const k of ['title', 'text', 'color']) if (a[k] !== undefined) note[k] = a[k];
+      const clean = saveStickyNotes(notes, null); // sticky-notes-save
+      return inboxOk({ note: clean.find((n) => n.id === note.id) });
+    }
+    case 'notes.archive': {
+      let notes = readStickyNotes();
+      if (!Array.isArray(notes)) notes = [];
+      const note = str(a.id) ? notes.find((n) => n && n.id === a.id) : null;
+      if (!note) return inboxFail(404, 'not_found', 'No such note.');
+      // The notes window's archiveNote(): archive a copy, then drop it from the board
+      archiveAddNote({ id: note.id, title: noteDisplayTitle(note), text: note.text, color: note.color, createdAt: note.createdAt });
+      saveStickyNotes(notes.filter((n) => n !== note), null);
+      return inboxOk();
+    }
+    case 'notes.restore': {
+      const archive = readNotesArchive();
+      const entry = str(a.id) && Array.isArray(archive) ? archive.find((n) => n && n.id === a.id) : null;
+      if (!entry) return inboxFail(404, 'not_found', 'No such archived note.');
+      let notes = readStickyNotes();
+      if (!Array.isArray(notes)) notes = [];
+      if (!notes.some((n) => n && n.id === entry.id)) {
+        if (notes.length >= NOTES_MAX) return inboxFail(400, 'bad_request', NOTES_FULL);
+        // The archive panel's Restore: back at the end of the board, off the archive
+        notes.push({ id: entry.id, title: entry.title, text: entry.text, color: entry.color, createdAt: entry.createdAt });
+      }
+      archiveRemoveNote(entry.id);
+      const clean = saveStickyNotes(notes, null);
+      return inboxOk({ note: clean.find((n) => n.id === entry.id) });
+    }
+    case 'notes.inbox': {
+      if (!str(a.text) || !a.text.trim()) return inboxFail(400, 'bad_request', '`text` is required.');
+      const note = appendToInbox(a.text.trim());
+      return note ? inboxOk({ note }) : inboxFail(400, 'bad_request', NOTES_FULL);
+    }
+    case 'habits.set': {
+      // `learning` still comes from phone builds older than v1.4: accepted, not shown.
+      if (HABIT_KINDS.indexOf(a.kind) < 0) return inboxFail(400, 'bad_request', '`kind` must be training or reading.');
+      if (a.kind === AUTO_HABIT) {
+        return inboxFail(409, 'relax_is_automatic', 'Relax ticks itself when the day\'s '
+          + relaxLib.dailyTarget(relaxConfig) + ' breaks are done; it cannot be set by hand.');
+      }
+      if (!isRealDate(a.date)) return inboxFail(400, 'bad_request', '`date` must be YYYY-MM-DD.');
+      if (a.date > localDateStr(new Date())) return inboxFail(400, 'bad_request', '`date` is in the future.');
+      if (typeof a.done !== 'boolean') return inboxFail(400, 'bad_request', '`done` must be true or false.');
+      if (!setHabitDay(a.kind, a.date, a.done)) { // habits-toggle-day's function, as a set
+        return inboxFail(500, 'internal', 'The desktop could not save the habit.');
+      }
+      return inboxOk({ habit: { kind: a.kind, dates: habits[a.kind].slice() } });
+    }
+    default:
+      return inboxFail(400, 'bad_request', 'Unknown op.');
+  }
+}
+
+function processInbox() {
+  if (inboxBusy) { inboxAgain = true; return; }
+  inboxBusy = true;
+  try {
+    let names;
+    try { names = fs.readdirSync(INBOX_DIR); } catch { return; }
+    // opIds start with a zero-padded ms timestamp: name order is arrival order
+    for (const name of names.filter((n) => INBOX_OP_RE.test(n)).sort()) {
+      const opId = name.match(INBOX_OP_RE)[1];
+      const claimed = path.join(INBOX_DIR, opId + '.claimed.json');
+      try { fs.renameSync(path.join(INBOX_DIR, name), claimed); } catch { continue; } // gone or taken
+      let op = null;
+      try { op = JSON.parse(fs.readFileSync(claimed, 'utf-8')); } catch { op = null; }
+      let result;
+      try {
+        result = op ? applyInboxOp(op) : inboxFail(400, 'bad_request', 'Unreadable op.');
+      } catch (err) {
+        console.error('[inbox] op ' + opId + ' failed:', err && err.message);
+        result = inboxFail(500, 'internal', 'The desktop app failed to apply this change.');
+      }
+      try {
+        writeJsonAtomic(path.join(INBOX_DIR, opId + '.result.json'), Object.assign({ v: 1, opId, at: Date.now() }, result));
+      } catch { /* the hub times out and says so */ }
+      try { fs.unlinkSync(claimed); } catch { /* ignore */ }
+    }
+  } finally {
+    inboxBusy = false;
+    if (inboxAgain) { inboxAgain = false; setImmediate(processInbox); }
+  }
+}
+
+// At startup: a claim with no result means we died mid-op. The change may or may
+// not have landed and replaying it could duplicate it, so report it, never replay.
+// Results nobody collected (ops the phone was told were queued) age out.
+function recoverInbox() {
+  let names;
+  try { names = fs.readdirSync(INBOX_DIR); } catch { return; }
+  const now = Date.now();
+  for (const name of names) {
+    const full = path.join(INBOX_DIR, name);
+    const claimed = name.match(INBOX_CLAIMED_RE);
+    if (claimed) {
+      try {
+        writeJsonAtomic(path.join(INBOX_DIR, claimed[1] + '.result.json'), Object.assign(
+          { v: 1, opId: claimed[1], at: now },
+          inboxFail(500, 'interrupted', 'The desktop app stopped while applying this change; check before retrying.')));
+        fs.unlinkSync(full);
+      } catch { /* ignore */ }
+      continue;
+    }
+    if (/\.result\.json$/.test(name) || /\.tmp-\d+$/.test(name)) {
+      try { if (now - fs.statSync(full).mtimeMs > INBOX_RESULT_TTL_MS) fs.unlinkSync(full); } catch { /* ignore */ }
+    }
+  }
+}
+
+// One calendar event as the hub serves it (SYNC-API v1.1 Event)
+function feedEvent(e) {
+  const google = !!e.isGoogleEvent;
+  return {
+    id: e.id,
+    title: e.title,
+    date: e.date,
+    time: e.time || null,
+    duration: typeof e.duration === 'number' && e.duration > 0 ? e.duration : null,
+    color: e.color || 'blue',
+    done: !!e.done,
+    source: google ? 'google' : 'local',
+    account: google ? (e.googleAccount || null) : null,
+    meetLink: eventJoinLink(e),
+    linkedTaskId: e.linkedTaskId || null,
+    recurrence: e.recurrence || null,
+    recurringParentId: e.recurringParentId || null,
+  };
+}
+
+// Local + Google events for [-31 days, +62 days], as this app holds them
+// (recurring instances are already expanded into calendarEvents). No tokens.
+// The phone asks from two weeks back, so the window reaches past "yesterday".
+function writeCalendarFeed() {
+  try {
+    const now = new Date();
+    const from = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 31));
+    const to = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 62));
+    const events = calendarEvents
+      .filter((e) => e && isValidDateStr(e.date) && e.date >= from && e.date <= to)
+      .map(feedEvent);
+    writeJsonAtomic(CALENDAR_FEED_FILE, { version: 1, generatedAt: Date.now(), from, to, events });
+    feedDate = localDateStr(now);
+  } catch { /* ignore */ }
+}
+
+function writeHeartbeat() {
+  try { writeJsonAtomic(ALIVE_FILE, { pid: process.pid, at: Date.now() }); } catch { /* ignore */ }
+  // A new day moves the feed's window even when nothing changed
+  if (feedDate !== localDateStr(new Date())) writeCalendarFeed();
+}
+
+function startPhoneSync() {
+  try {
+    fs.mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 });
+    fs.chmodSync(INBOX_DIR, 0o700);
+  } catch { /* ignore */ }
+  recoverInbox();
+  writeCalendarFeed();
+  writeHeartbeat();
+  cleanupTimers.push(setInterval(writeHeartbeat, HEARTBEAT_MS));
+  try {
+    inboxWatcher = fs.watch(INBOX_DIR, (_, filename) => {
+      if (filename && !INBOX_OP_RE.test(filename)) return;
+      if (inboxDebounce) clearTimeout(inboxDebounce);
+      inboxDebounce = setTimeout(() => { inboxDebounce = null; processInbox(); }, 25);
+    });
+  } catch { /* watch unavailable — the poll below still applies ops */ }
+  // fs.watch can miss events and dies with its directory: poll as a safety net
+  cleanupTimers.push(setInterval(processInbox, 2000));
+  processInbox(); // ops queued while the app was not running
+}
+
+function stopPhoneSync() {
+  if (inboxWatcher) { try { inboxWatcher.close(); } catch { /* ignore */ } inboxWatcher = null; }
+  if (inboxDebounce) { clearTimeout(inboxDebounce); inboxDebounce = null; }
+  // Tell the hub at once that nobody is left to apply ops
+  try {
+    const beat = JSON.parse(fs.readFileSync(ALIVE_FILE, 'utf-8'));
+    if (beat && beat.pid === process.pid) fs.unlinkSync(ALIVE_FILE);
+  } catch { /* ignore */ }
+}
+
 // --- App lifecycle ---
 
 // Single instance lock - prevent multiple instances
@@ -5072,8 +6079,94 @@ if (!gotLock) {
   });
 }
 
+// --- Display-scale guard (Linux under XWayland) ---
+// Chromium follows GNOME's XSETTINGS scale live, but windows created before a
+// change keep their pixel size, so a 2x start leaves every window twice as big
+// once the 1x monitors take over (see display-scale.js). Comparing the scale
+// now with the scale at start catches it; the cure is a relaunch, through the
+// AppImage rather than the mounted binary, which disappears with the launcher.
+let scaleStart = null;
+let scaleRelaunchAt = displayScale.lastRelaunchFromArgv(process.argv);
+function checkDisplayScale(reason) {
+  if (process.platform !== 'linux' || scaleStart == null) return;
+  const nowScale = screen.getPrimaryDisplay().scaleFactor;
+  if (Math.abs(nowScale - scaleStart) < 0.01) return;
+  const go = displayScale.shouldRelaunch({
+    startScale: scaleStart, nowScale, breakRunning: !!relaxActive,
+    lastRelaunchAt: scaleRelaunchAt, now: Date.now(),
+  });
+  console.log('[scale] display is ' + nowScale + 'x but this process started at ' + scaleStart + 'x (' + reason + ')' +
+    (go ? ' - relaunching' : ' - holding (break running or restarted recently)'));
+  if (!go) return;
+  const exe = process.env.APPIMAGE || (process.execPath.includes('/.mount_') ? null : process.execPath);
+  if (!exe) { console.log('[scale] no stable executable to relaunch from - staying as is'); return; }
+  scaleRelaunchAt = Date.now();
+  const args = process.argv.slice(1).filter((a) => !a.startsWith(displayScale.RELAUNCH_ARG))
+    .concat([displayScale.RELAUNCH_ARG + scaleRelaunchAt]);
+  // Not app.relaunch(): its helper is the binary inside the AppImage mount,
+  // which is gone by the time this process has exited (tested 2026-10-26: the
+  // app simply vanished). A detached shell waits for the single-instance lock
+  // to be free and starts the AppImage itself; inherited stdio keeps the new
+  // process's log in the journal.
+  try {
+    // cwd outside the mount and none of the AppImage runtime's variables (they
+    // point into this mount: LD_LIBRARY_PATH would make the new process load
+    // its libraries from here, and the old launcher could never unmount).
+    const env = { ...process.env };
+    for (const k of ['APPDIR', 'APPIMAGE', 'ARGV0', 'OWD', 'LD_LIBRARY_PATH', 'CLAUDE_METER_FAKE_START_SCALE']) delete env[k];
+    // Chromium leaves descriptors without close-on-exec (its own binary among
+    // them); closed here, or the new process would pin the old mount too.
+    // bash, because dash reads `exec 10>&-` as "run the program 10" and dies;
+    // without bash only descriptors 3-9 can be closed.
+    const script = 'for fd in $(ls /proc/$$/fd); do case $fd in 0|1|2) ;; ?) eval "exec $fd>&-" ;; ' +
+      '*) [ -n "$BASH" ] && eval "exec $fd>&-" ;; esac; done; sleep 3; exec "$0" "$@"';
+    const shell = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
+    const child = spawn(shell, ['-c', script, exe, ...args],
+      { detached: true, stdio: 'inherit', cwd: os.homedir(), env });
+    child.unref();
+  } catch (e) {
+    console.log('[scale] relaunch failed to start: ' + e.message + ' - staying as is');
+    return;
+  }
+  app.exit(0);
+}
+function startDisplayScaleGuard() {
+  if (process.platform !== 'linux') return;
+  scaleStart = screen.getPrimaryDisplay().scaleFactor;
+  // Test hook: pretend the process came up at another scale, so the relaunch
+  // path can be exercised without a reboot (CLAUDE_METER_FAKE_START_SCALE=2).
+  const fake = parseFloat(process.env.CLAUDE_METER_FAKE_START_SCALE || '');
+  if (Number.isFinite(fake) && fake > 0) scaleStart = fake;
+  console.log('[scale] process started at ' + scaleStart + 'x');
+  cleanupTimers.push(setTimeout(() => checkDisplayScale('startup'), 15 * 1000));
+  // The boot race lasts a minute or two: keep looking for the first ten minutes.
+  let bootChecks = 0;
+  const bootInterval = setInterval(() => {
+    if (++bootChecks > 10) { clearInterval(bootInterval); return; }
+    checkDisplayScale('boot');
+  }, 60 * 1000);
+  cleanupTimers.push(bootInterval);
+  let debounce = null;
+  for (const ev of ['display-added', 'display-removed', 'display-metrics-changed']) {
+    screen.on(ev, (event, display, metrics) => {
+      // One line per change, so the journal shows what the next boot did.
+      console.log('[scale] ' + ev + (metrics ? ' ' + metrics.join(',') : '') +
+        (display ? ' display ' + display.id + ' at ' + display.scaleFactor + 'x' : ''));
+      clearTimeout(debounce);
+      debounce = setTimeout(() => checkDisplayScale(ev), 5 * 1000);
+    });
+  }
+}
+
 app.whenReady().then(() => {
-  startToggleSocket();
+  // Only the instance that owns the single-instance lock may own the socket: a
+  // second instance quits right after whenReady, and if it had unlinked and
+  // re-listened on the path, its exit would take the primary's socket with it
+  // (2026-10-02: Ctrl+\ went dead that way).
+  if (gotLock) startToggleSocket();
+  // One line per start, so the journal says which build is running.
+  if (gotLock) console.log('[app] Claude Meter ' + (APP_VERSION || app.getVersion()) + ' started');
+  if (gotLock) startDisplayScaleGuard();
   // Ensure data directory exists
   try { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); } catch { /* ignore */ }
 
@@ -5095,6 +6188,8 @@ app.whenReady().then(() => {
   if (pomoState === 'running' || pomoState === 'break') {
     pomoInterval = setInterval(pomoTick, 1000);
   }
+  relaxInit();
+  cleanupTimers.push(setInterval(relaxTick, RELAX_TICK_MS));
   startCliMarkerWatcher();
   // Pick up accounts logged in (or out) while the app is running.
   const discoveryTimer = setInterval(() => {
@@ -5518,33 +6613,19 @@ app.whenReady().then(() => {
 
   // --- Habits IPC ---
   ipcMain.handle('habits-get', (event) => {
-    if (!isLocalSender(event)) return { training: [], reading: [], learning: [] };
+    if (!isLocalSender(event)) return emptyHabits();
     return habits;
   });
 
   ipcMain.handle('habits-toggle-day', (event, kind, dateStr) => {
     if (!isLocalSender(event)) return habits;
-    if (kind !== 'training' && kind !== 'reading' && kind !== 'learning') return habits;
-    if (!isValidDateStr(dateStr)) return habits;
-    const arr = habits[kind];
-    const idx = arr.indexOf(dateStr);
-    if (idx === -1) arr.push(dateStr);
-    else arr.splice(idx, 1);
-    saveHabits();
-    broadcastHabits();
+    setHabitDay(kind, dateStr); // toggle; Relax is refused there, it ticks itself
     return habits;
   });
 
   ipcMain.on('tasks-set-priority', (event, id, priority) => {
     if (!isLocalSender(event)) return;
-    if (typeof id !== 'string' || id.length >= 20) return;
-    const task = tasks.find((t) => t.id === id);
-    if (!task) return;
-    if (['high', 'medium', 'low'].indexOf(priority) >= 0) {
-      task.priority = priority;
-      saveTasks();
-      broadcastTasks();
-    }
+    setTaskPriority(id, priority);
   });
 
   ipcMain.on('tasks-reorder', (event, orderedIds) => {
@@ -5652,6 +6733,67 @@ app.whenReady().then(() => {
     return { state: pomoState, seconds: pomoSeconds, total: pomoTotal };
   });
 
+  // Relax IPC
+  ipcMain.handle('relax-get', (event) => {
+    if (!isLocalSender(event)) return null;
+    return relaxViewNow();
+  });
+  ipcMain.on('relax-now', (event) => {
+    if (!isLocalSender(event)) return;
+    relaxNow('widget');
+  });
+  ipcMain.on('relax-end', (event) => {
+    if (!isLocalSender(event) || !relaxActive) return;
+    if (relaxActive.windows.some((w) => !w.isDestroyed() && w.webContents === event.sender)) relaxEndEarly('ended by him');
+  });
+  // The break page asks for his next track (only during a break, only its own windows).
+  const relaxFromBreak = (event) => isLocalSender(event) && relaxActive && !relaxActive.ending
+    && relaxActive.windows.some((w) => !w.isDestroyed() && w.webContents === event.sender);
+  ipcMain.handle('relax-track', async (event) => {
+    if (!relaxFromBreak(event) || relaxActive.musicSource !== 'folder') return { error: 'no track wanted now' };
+    const pick = relaxMusic.pickTrack(RELAX_MUSIC_DIR, RELAX_MUSIC_FILE, { log: relaxLog });
+    if (!pick) return { error: 'no tracks in ' + RELAX_MUSIC_DIR };
+    try {
+      const data = await relaxMusic.readTrack(pick);
+      relaxLog('music: ' + pick.name + ' (' + pick.left + ' more before the shuffle repeats)');
+      return { name: pick.name, data };
+    } catch (err) {
+      relaxLog('music: could not read ' + pick.name + ': ' + err.message);
+      return { error: 'could not read ' + pick.name };
+    }
+  });
+  ipcMain.on('relax-log', (event, msg) => {
+    if (relaxFromBreak(event)) relaxLog('page: ' + String(msg).slice(0, 300));
+  });
+  ipcMain.on('relax-toast-skip', (event) => {
+    const h = relaxHeadsUp;
+    if (!isLocalSender(event) || !h || !h.win || h.win.isDestroyed() || h.win.webContents !== event.sender) return;
+    relaxCloseHeadsUp();
+    relaxState.slots[h.slot] = { status: 'skipped', at: Date.now() };
+    relaxSave();
+    relaxLog('slot ' + h.slot + ' skipped');
+    broadcastRelax();
+  });
+  ipcMain.on('relax-toast-start', (event) => {
+    const h = relaxHeadsUp;
+    if (!isLocalSender(event) || !h || !h.win || h.win.isDestroyed() || h.win.webContents !== event.sender) return;
+    // No busy checks: he asked for it now, exactly like the widget's Relax now.
+    relaxLog('slot ' + h.slot + ' started from the heads-up');
+    relaxNow('toast');
+  });
+  ipcMain.on('relax-toast-later', (event) => {
+    const h = relaxHeadsUp;
+    if (!isLocalSender(event) || !h || !h.win || h.win.isDestroyed() || h.win.webContents !== event.sender) return;
+    relaxCloseHeadsUp();
+    const nextAt = Date.now() + relaxLib.RETRY_MS;
+    // "Later" is his answer, so it outlives the slot's usual hour.
+    relaxState.slots[h.slot] = Object.assign({}, relaxState.slots[h.slot],
+      { status: 'waiting', nextAt, laterUntil: nextAt + 60 * 1000, reason: 'later' });
+    relaxSave();
+    relaxLog('slot ' + h.slot + ' later, at ' + new Date(nextAt).toTimeString().slice(0, 5));
+    broadcastRelax();
+  });
+
   // Meeting popup dismiss
   ipcMain.on('meeting-popup-dismiss', () => {
     if (alertPopup && !alertPopup.isDestroyed()) alertPopup.close();
@@ -5703,33 +6845,12 @@ app.whenReady().then(() => {
   });
 
   // Multi-note sticky notes
-  ipcMain.handle('sticky-notes-get', () => {
-    try {
-      if (fs.existsSync(STICKY_NOTES_FILE)) {
-        return JSON.parse(fs.readFileSync(STICKY_NOTES_FILE, 'utf-8'));
-      }
-    } catch { /* ignore */ }
-    return null;
-  });
+  ipcMain.handle('sticky-notes-get', () => readStickyNotes());
 
   ipcMain.on('sticky-notes-save', (event, notes) => {
     if (!isLocalSender(event)) return;
     if (!Array.isArray(notes)) return;
-    // Validate and cap each note
-    const clean = notes.slice(0, 50).map((n) => ({
-      id: typeof n.id === 'string' ? n.id.slice(0, 20) : '',
-      title: typeof n.title === 'string' ? n.title.slice(0, 30) : '',
-      text: typeof n.text === 'string' ? n.text.slice(0, 100000) : '',
-      color: typeof n.color === 'string' ? n.color.slice(0, 10) : 'default',
-      createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
-    }));
-    try { fs.writeFileSync(STICKY_NOTES_FILE, JSON.stringify(clean, null, 2)); } catch { /* ignore */ }
-    // Keep the other notes window (panel vs app) in sync
-    for (const w of [notesWin, notesAppWin]) {
-      if (w && !w.isDestroyed() && w.webContents !== event.sender) {
-        try { w.webContents.send('sticky-notes-updated', clean); } catch { /* ignore */ }
-      }
-    }
+    saveStickyNotes(notes, event.sender);
   });
 
   // Quick-task popover → task list
@@ -5785,42 +6906,16 @@ app.whenReady().then(() => {
   });
 
   // Notes archive — deleted notes go here for recovery
-  ipcMain.handle('notes-archive-get', () => {
-    try {
-      if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-        return JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-      }
-    } catch { /* ignore */ }
-    return [];
-  });
+  ipcMain.handle('notes-archive-get', () => readNotesArchive());
 
   ipcMain.on('notes-archive-add', (event, note) => {
     if (!isLocalSender(event)) return;
-    if (!note || typeof note.id !== 'string') return;
-    try {
-      let archive = [];
-      if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-        archive = JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-      }
-      note.archivedAt = Date.now();
-      archive.unshift(note);
-      // Keep last 50 archived notes
-      if (archive.length > 50) archive = archive.slice(0, 50);
-      fs.writeFileSync(NOTES_ARCHIVE_FILE, JSON.stringify(archive, null, 2));
-    } catch { /* ignore */ }
+    archiveAddNote(note);
   });
 
   ipcMain.on('notes-archive-restore', (event, noteId) => {
     if (!isLocalSender(event)) return;
-    if (typeof noteId !== 'string') return;
-    try {
-      let archive = [];
-      if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-        archive = JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-      }
-      archive = archive.filter((n) => n.id !== noteId);
-      fs.writeFileSync(NOTES_ARCHIVE_FILE, JSON.stringify(archive, null, 2));
-    } catch { /* ignore */ }
+    archiveRemoveNote(noteId);
   });
 
   ipcMain.handle('get-theme', () => currentTheme);
@@ -5943,77 +7038,22 @@ app.whenReady().then(() => {
 
   ipcMain.handle('calendar-add-event', (event, data) => {
     if (!isLocalSender(event)) return { success: false };
-    if (!data || typeof data.title !== 'string' || !data.date) return { success: false };
-    const evt = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      title: data.title.trim().slice(0, 100),
-      date: data.date,
-      time: data.time || null,
-      duration: typeof data.duration === 'number' && data.duration > 0 ? data.duration : null,
-      color: ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0 ? data.color : 'blue',
-      reminder: typeof data.reminder === 'number' ? data.reminder : null,
-      recurrence: data.recurrence || null,
-      done: false,
-      googleEventId: null,
-      createdAt: Date.now(),
-    };
-    // Generate recurring instances
-    if (evt.recurrence) {
-      generateRecurringEvents(evt);
-    }
-    calendarEvents.push(evt);
-    saveCalendarEvents();
-    broadcastCalendar();
-    scheduleReminders();
-    return { success: true, event: evt };
+    return addCalendarEvent(data);
   });
 
   ipcMain.handle('calendar-update-event', (event, data) => {
     if (!isLocalSender(event)) return { success: false };
-    if (!data || !data.id) return { success: false };
-    const idx = calendarEvents.findIndex((e) => e.id === data.id);
-    if (idx < 0) return { success: false };
-    const evt = calendarEvents[idx];
-    if (data.title !== undefined) evt.title = String(data.title).trim().slice(0, 100);
-    if (data.date !== undefined) evt.date = data.date;
-    if (data.time !== undefined) evt.time = data.time || null;
-    if (data.color !== undefined && ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0) evt.color = data.color;
-    if (data.reminder !== undefined) evt.reminder = typeof data.reminder === 'number' ? data.reminder : null;
-    firedReminders.delete(evt.id); // allow re-fire if time changed
-    saveCalendarEvents();
-    broadcastCalendar();
-    scheduleReminders();
-    return { success: true };
+    return updateCalendarEvent(data);
   });
 
   ipcMain.handle('calendar-toggle-event', (event, data) => {
     if (!isLocalSender(event)) return { success: false };
-    if (!data || !data.id) return { success: false };
-    const evt = calendarEvents.find((e) => e.id === data.id);
-    if (!evt) return { success: false };
-    evt.done = !evt.done;
-    saveCalendarEvents();
-    broadcastCalendar();
-    return { success: true };
+    return toggleCalendarEvent(data);
   });
 
   ipcMain.handle('calendar-delete-event', (event, data) => {
     if (!isLocalSender(event)) return { success: false };
-    if (!data || !data.id) return { success: false };
-    calendarEvents = calendarEvents.filter((e) => e.id !== data.id);
-    firedReminders.delete(data.id);
-    // Reminder timers use compound key "id:stage" — clear all matching
-    for (const key of Object.keys(reminderTimers)) {
-      if (key === data.id || key.startsWith(data.id + ':')) {
-        clearTimeout(reminderTimers[key]);
-        delete reminderTimers[key];
-      }
-    }
-    delete firedStages[data.id];
-    saveCalendarEvents();
-    broadcastCalendar();
-    scheduleReminders();
-    return { success: true };
+    return deleteCalendarEvent(data);
   });
 
   // --- Google Calendar IPC ---
@@ -6178,6 +7218,7 @@ app.whenReady().then(() => {
     if (streakData.current > 0) win.webContents.send('streak-update', streakData);
     // Send pomo state
     win.webContents.send('pomo-update', { state: pomoState, seconds: pomoSeconds, total: pomoTotal });
+    win.webContents.send('relax-update', relaxViewNow());
     // Try syncing fresh data — if the active token is null (mid-refresh), retry in 5s
     const activeCtx = getActiveCtx();
     const token = activeCtx ? getAccessToken(activeCtx) : null;
@@ -6222,9 +7263,11 @@ app.whenReady().then(() => {
   cleanupTimers.push(tokenRefreshInterval);
 
   startFileWatcher();
+  startPhoneSync();
 
   // --- Power monitor: handle sleep/wake ---
   powerMonitor.on('suspend', () => {
+    relaxEndEarly('system suspended');
     for (const ctx of Object.values(accountCtx)) {
       if (ctx.activeRequest) {
         try { ctx.activeRequest.destroy(); } catch { /* ignore */ }
@@ -6271,7 +7314,12 @@ app.whenReady().then(() => {
 
 });
 
+// Before the windows close: a break window would otherwise veto the quit.
+app.on('before-quit', relaxShutdown);
+
 app.on('will-quit', () => {
+  relaxShutdown();
+  stopPhoneSync();
   globalShortcut.unregisterAll();
   if (fileWatcher) { try { fileWatcher.close(); } catch {} }
   for (const w of linuxSubWatchers) { try { w.close(); } catch {} }

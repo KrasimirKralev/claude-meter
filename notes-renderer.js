@@ -3,6 +3,9 @@
 
 var stickyNotes = [];
 var activeNoteId = null;
+// The open note's text as last loaded or saved: what the editor's own changes are measured from.
+// The phone and the watch now edit notes too (hub 1.6), so a change can arrive while one is open.
+var openedText = null;
 var currentTaskId = null;
 var saveTimer = null;
 var editing = false;
@@ -379,6 +382,7 @@ function openEditor(id) {
   var note = getActiveNote();
   if (!note) return;
   md.value = note.text || '';
+  openedText = md.value;
   editorView.classList.remove('editing');
   editing = false;
   document.getElementById('readBtn').classList.add('on');
@@ -449,14 +453,18 @@ function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSave, 500);
 }
-function flushSave() {
+// `force`: something besides the text changed (the colour), so the note is saved either way.
+function flushSave(force) {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   if (currentTaskId) {
     window.notesAPI.saveTaskNote(currentTaskId, md.value);
   } else {
+    // Nothing typed since it was opened or saved: writing it back could undo a change that came in.
+    if (md.value === openedText && !force) return;
     var note = getActiveNote();
     if (note) note.text = md.value;
     window.notesAPI.saveStickyNotes(stickyNotes);
+    openedText = md.value;
   }
   savedChip.classList.add('show');
   setTimeout(function(){ savedChip.classList.remove('show'); }, 1000);
@@ -477,7 +485,7 @@ function renderColorPick() {
       if (!note) return;
       note.color = c.key;
       renderColorPick();
-      flushSave();
+      flushSave(true);
     });
     colorPick.appendChild(i);
   });
@@ -896,13 +904,57 @@ if (window.notesAPI.onNotesUpdated) {
   window.notesAPI.onNotesUpdated(function(notes) {
     if (!Array.isArray(notes)) return;
     stickyNotes = notes;
-    // Keep local unsaved edits of the currently open note
     if (activeNoteId && editorView.classList.contains('active') && !currentTaskId) {
       var mine = getActiveNote();
-      if (mine) mine.text = md.value;
+      if (mine) takeIncoming(mine);
     }
     if (boardView.classList.contains('active')) renderBoard();
   });
+}
+
+/*
+ * A change to the open note from elsewhere (the other notes window, the phone, the watch).
+ * Nothing typed here: the editor shows it. Typed here too: lines only added there join the text
+ * typed here; any other change is kept as a note of its own - neither side is written over.
+ */
+function takeIncoming(mine) {
+  var incoming = mine.text || '';
+  if (md.value === openedText) {
+    if (incoming !== md.value) { md.value = incoming; openedText = incoming; refresh(); }
+    return;
+  }
+  if (incoming !== openedText) {
+    var added = linesAddedTo(openedText || '', incoming);
+    if (added) {
+      var from = md.selectionStart, to = md.selectionEnd;
+      md.value = md.value.replace(/\s+$/, '') + '\n' + added.join('\n');
+      md.setSelectionRange(from, to);
+    } else if (stickyNotes.length < 50) {
+      stickyNotes.push({ id: genId(), title: '', text: withCopyHeading(incoming), color: mine.color || 'default', createdAt: Date.now() });
+    } else {
+      showToast('Changed on another device too - the board is full, so this text replaces it', true);
+    }
+    openedText = incoming;
+    scheduleSave();
+  }
+  mine.text = md.value;
+}
+
+// The lines `text` adds after `base`, or null when it changed anything else.
+function linesAddedTo(base, text) {
+  var b = base.replace(/\s+$/, '').split('\n');
+  var t = text.replace(/\s+$/, '').split('\n');
+  if (t.length <= b.length) return null;
+  for (var i = 0; i < b.length; i++) if (b[i] !== t[i]) return null;
+  return t.slice(b.length);
+}
+
+function withCopyHeading(text) {
+  var lines = text.split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    if (/^#[ \t]+\S/.test(lines[i])) { lines[i] = lines[i].replace(/[ \t\r]+$/, '') + ' (conflict copy)'; return lines.join('\n'); }
+  }
+  return '# Conflict copy\n' + text;
 }
 
 /* ============ DATA LOAD ============ */
