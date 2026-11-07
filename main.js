@@ -117,6 +117,7 @@ let tasksMovedTimer = null;  // debounced snap timer — cleared on hide to prev
 let claudeStatus = null; // { indicator, description, updatedAt }
 let calWin = null;
 let notesWin = null;
+let mapsFeature = null;  // the Maps window (Balonche), set up with the rest of the IPC
 let notesAppWin = null; // standalone Notes app window (own taskbar identity)
 let addEventWin = null;
 let calendarEvents = [];
@@ -287,6 +288,7 @@ const RELAX_STATE_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-state.json');
 // generated lo-fi (config musicSource), shuffled without repeats.
 const relaxMusic = require('./relax-music');
 const displayScale = require('./display-scale');
+const { createMapsFeature } = require('./maps-window');
 const RELAX_MUSIC_DIR = path.join(os.homedir(), 'Music', 'relax');
 const RELAX_MUSIC_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-music.json');
 const RELAX_TICK_MS = 5000;
@@ -6240,6 +6242,15 @@ app.whenReady().then(() => {
     } catch { return false; }
   };
 
+  mapsFeature = createMapsFeature({
+    BrowserWindow, dialog, ipcMain, isLocalSender,
+    dataDir: CLAUDE_DIR,
+    clampBounds: clampToWorkArea,
+    trackWindow: enableLinuxWindowEvents,
+    iconPath: getAssetPath('icon.png'),
+    getTargets: () => [win, dashWin],
+  });
+
   // IPC
   ipcMain.on('popup-dismiss', (event) => {
     if (!isLocalSender(event)) return;
@@ -7319,6 +7330,7 @@ app.on('before-quit', relaxShutdown);
 
 app.on('will-quit', () => {
   relaxShutdown();
+  if (mapsFeature) mapsFeature.stopServer();
   stopPhoneSync();
   globalShortcut.unregisterAll();
   if (fileWatcher) { try { fileWatcher.close(); } catch {} }

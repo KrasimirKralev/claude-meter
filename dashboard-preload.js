@@ -109,6 +109,10 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
     ipcRenderer.on('relax-update', relaxUpdateHandler);
   },
   openExternal: (url) => ipcRenderer.send('open-external-url', url),
+  openMaps: (request) => ipcRenderer.send('maps-open', request),
+  openNotes: () => ipcRenderer.send('open-notes-window'),
+  getMapsState: () => ipcRenderer.invoke('maps-state'),
+  onMapsUpdate: (cb) => ipcRenderer.on('maps-update', (_e, data) => cb(data)),
   getClaudeStatus: () => ipcRenderer.invoke('get-claude-status'),
   onClaudeStatusUpdate: (cb) => {
     if (claudeStatusHandler) ipcRenderer.removeListener('claude-status-update', claudeStatusHandler);

@@ -11,7 +11,8 @@
   },
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/display-scale.test.js test/usage-limits.test.js",
+    "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/display-scale.test.js test/usage-limits.test.js test/maps-lib.test.js",
+    "bundle:maps": "node scripts/bundle-balonche.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac --publish never",
@@ -28,7 +29,11 @@
       "*.html",
       "relax-biomes/**/*",
       "!relax-biomes/samples/build-pack.py",
-      "assets/**/*"
+      "assets/**/*",
+      "balonche/**/*"
+    ],
+    "asarUnpack": [
+      "balonche/**/*"
     ],
     "win": {
       "target": [
