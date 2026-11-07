@@ -714,7 +714,7 @@ function drawChart() {
         legend: {
           position: 'bottom',
           labels: {
-            color: '#e2e2f0',
+            color: getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#111111',
             font: { size: 12, weight: '500' },
             usePointStyle: true,
             pointStyle: 'circle',
