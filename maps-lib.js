@@ -7,6 +7,7 @@ const MAPS_PORT = 3418;
 const MAPS_ORIGIN = `http://127.0.0.1:${MAPS_PORT}`;
 const MAX_MAPS = 100;
 const MAX_PREVIEW = 12;
+const MAX_LINKS = 24;
 const MAX_TITLE = 200;
 const MAX_ID = 64;
 
@@ -61,7 +62,12 @@ function cleanMapsReport(list) {
     const preview = Array.isArray(entry.preview)
       ? entry.preview.map(cleanPreview).filter(Boolean).slice(0, MAX_PREVIEW)
       : [];
-    maps.push({ id: entry.id, title, updatedAt: finite(entry.updatedAt) ? entry.updatedAt : 0, preview });
+    const links = Array.isArray(entry.links)
+      ? entry.links
+        .filter((link) => Array.isArray(link) && link.length === 2 && link.every((end) => Number.isInteger(end) && end >= 0 && end < preview.length))
+        .slice(0, MAX_LINKS)
+      : [];
+    maps.push({ id: entry.id, title, updatedAt: finite(entry.updatedAt) ? entry.updatedAt : 0, preview, links });
   }
   return maps;
 }

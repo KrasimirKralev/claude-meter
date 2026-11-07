@@ -90,6 +90,15 @@
     return word.charAt(0).toUpperCase() + word.slice(1) + '.';
   }
 
+  function ageText(at, now) {
+    var mins = Math.max(0, Math.round((now - at) / 60000));
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hours = Math.round(mins / 60);
+    if (hours < 48) return hours + 'h ago';
+    return Math.round(hours / 24) + 'd ago';
+  }
+
   // Everything a row shows: its meters, plus up to two pieces of text beside them. The alert goes
   // first, because it is what the reader has to act on.
   function rowState(account, now) {
@@ -101,43 +110,51 @@
     if (isLoggedOut(account)) {
       state.status = 'out';
       state.alert = 'Logged out.';
-    } else if (login && login.state === 'warn' && login.short) {
-      state.alert = 'Login ends ' + login.short + '.';
+    } else if (limited) {
+      state.status = 'limited';
+    } else if (account.error) {
+      state.status = 'error';
     }
-
-    if (limited) {
-      if (state.status === 'ok') state.status = 'limited';
-      state.detail = 'Rate limited, retrying in ' + limited + 'm';
-    }
+    if (limited) state.detail = "Can't read usage, retrying in " + limited + 'm';
 
     if (!meters.main) {
-      if (state.status === 'ok') state.status = account.error ? 'error' : 'waiting';
+      if (state.status === 'ok') state.status = 'waiting';
       if (!state.detail && state.status !== 'out') state.detail = account.error || 'Waiting for first sync';
       return state;
     }
 
-    if (!state.alert) {
-      if (meterClass(meters.main) === 'danger') {
-        state.alert = fullWord(meters.main);
-      } else {
-        for (var i = 0; i < meters.subs.length; i++) {
-          if (meterClass(meters.subs[i]) === 'danger') {
-            state.alert = fullWord(meters.subs[i], shortLabel(meters.subs[i]));
-            break;
-          }
+    // Old numbers shown as current would mislead, so a failed read says so before anything else.
+    if (state.status === 'error') {
+      state.alert = "Can't read usage.";
+      state.detail = account.lastSuccessfulSync ? 'Last read ' + ageText(account.lastSuccessfulSync, now) : account.error;
+      return state;
+    }
+
+    var full = null;
+    if (meterClass(meters.main) === 'danger') {
+      full = meters.main;
+      if (!state.alert) state.alert = fullWord(meters.main);
+    } else {
+      for (var i = 0; i < meters.subs.length && !full; i++) {
+        if (meterClass(meters.subs[i]) === 'danger') {
+          full = meters.subs[i];
+          if (!state.alert) state.alert = fullWord(full, shortLabel(full));
         }
       }
     }
+    if (!state.alert && login && login.state === 'warn' && login.short) state.alert = 'Login ends ' + login.short + '.';
     if (!state.detail) {
-      var refill = refillText(meters.main.resetsAt, now);
-      // A row's main meter has no label of its own, so a session limit has to say what is refilling.
-      if (refill) state.detail = (meters.main === account.usage.session ? 'Session refills ' : 'Refills ') + refill;
+      // The time belongs to the limit the alert names, which may not be the main one.
+      var source = full || meters.main;
+      var refill = refillText(source.resetsAt, now);
+      if (refill) state.detail = (source === account.usage.session ? 'Session refills ' : 'Refills ') + refill;
     }
     return state;
   }
 
+  // Failed reads don't count: their numbers may be old, so they can't be called the roomiest.
   function usable(account) {
-    return !isLoggedOut(account) && !!rowMeters(account.usage).main;
+    return !isLoggedOut(account) && !account.error && !!rowMeters(account.usage).main;
   }
 
   function fullest(account) {
@@ -147,7 +164,8 @@
 
   // One sentence's worth of facts: who has the most room, and when room comes back next.
   function answerParts(accounts, now) {
-    var live = (accounts || []).filter(usable);
+    var all = accounts || [];
+    var live = all.filter(usable);
     if (live.length === 0) return null;
 
     var most = null;
@@ -167,11 +185,45 @@
       var at = resetsAt ? new Date(resetsAt).getTime() : NaN;
       if (at > now && at < nextAt) { nextAt = at; next = account; }
     });
+    var nextMain = next ? rowMeters(next.usage).main : null;
     return {
       most: most,
+      // "The most room" of how many, when some accounts could not be read at all.
+      of: most && live.length < all.length ? live.length : null,
       full: full,
       nextName: next && live.length > 1 ? next.name : null,
-      nextText: next ? refillText(rowMeters(next.usage).main.resetsAt, now) : '',
+      nextKind: next && nextMain === next.usage.session ? 'session' : '',
+      nextText: next ? refillText(nextMain.resetsAt, now) : '',
+    };
+  }
+
+  // The weekly meter stands unlabelled, as in the design. Anything else has to say what it is.
+  function labelMeter(meter, usage) {
+    if (meter === usage.weekAll && !usage.session) return '';
+    return shortLabel(meter);
+  }
+
+  function refillDiffers(meter, main) {
+    if (!meter.resetsAt || !main.resetsAt) return false;
+    return Math.abs(new Date(meter.resetsAt).getTime() - new Date(main.resetsAt).getTime()) > 60000;
+  }
+
+  // A column heading is only true if it holds for every row. Otherwise the rows name themselves.
+  function boardHeads(accounts) {
+    var rows = (accounts || []).filter(function(account) { return !!rowMeters(account.usage).main; });
+    if (rows.length === 0) return { main: 'Weekly, all models', sub: 'Weekly', labelMain: false, labelSub: false };
+    var mains = rows.map(function(account) { return shortLabel(rowMeters(account.usage).main); });
+    var sameMain = mains.every(function(label) { return label === mains[0]; });
+    var subs = rows.map(function(account) {
+      return rowMeters(account.usage).subs.map(shortLabel).join('+');
+    });
+    var sameSub = subs.every(function(label) { return label === subs[0]; }) && subs[0].indexOf('+') === -1 && subs[0] !== '';
+    var mainName = mains[0] === 'All models' ? 'Weekly, all models' : mains[0];
+    return {
+      main: sameMain ? mainName : 'Main limit',
+      sub: sameSub ? 'Weekly, ' + subs[0] : 'Other limits',
+      labelMain: !sameMain,
+      labelSub: !sameSub,
     };
   }
 
@@ -228,8 +280,9 @@
       })
       .sort(function(a, b) {
         if (a.date !== b.date) return a.date.localeCompare(b.date);
-        if (!a.time && b.time) return -1;
-        if (a.time && !b.time) return 1;
+        // Timed first: an all-day holiday must not hide the next meeting all day.
+        if (!a.time && b.time) return 1;
+        if (a.time && !b.time) return -1;
         return (a.time || '').localeCompare(b.time || '');
       });
   }
@@ -262,8 +315,10 @@
     if (known.length === 0) return '';
     var enabled = known.filter(function(account) { return account.usage.extraUsage && account.usage.extraUsage.enabled; });
     if (enabled.length === 0) {
-      if (known.length === 1) return 'Extra usage is off.';
-      return 'Extra usage is off on all ' + (COUNT_WORDS[known.length] || known.length) + ' accounts.';
+      if (known.length === 1 && accounts.length === 1) return 'Extra usage is off.';
+      var count = COUNT_WORDS[known.length] || known.length;
+      if (known.length < accounts.length) return 'Extra usage is off on the ' + count + ' accounts with numbers.';
+      return known.length === 2 ? 'Extra usage is off on both accounts.' : 'Extra usage is off on all ' + count + ' accounts.';
     }
     return 'Extra usage this month: ' + enabled.map(function(account) {
       var extra = account.usage.extraUsage;
@@ -285,6 +340,9 @@
 
   return {
     CELLS: CELLS,
+    boardHeads: boardHeads,
+    labelMeter: labelMeter,
+    refillDiffers: refillDiffers,
     editedText: editedText,
     eventTimeText: eventTimeText,
     extraSummary: extraSummary,

@@ -65,7 +65,7 @@ test('cleanMapsReport keeps a good map', () => {
   const preview = [{ x: 0, y: 1.5, w: 40, h: 18, color: '#FFE14D' }];
   assert.deepStrictEqual(
     cleanMapsReport([{ id: 'a', title: 'Plan', updatedAt: 5, preview }]),
-    [{ id: 'a', title: 'Plan', updatedAt: 5, preview }],
+    [{ id: 'a', title: 'Plan', updatedAt: 5, preview, links: [] }],
   );
 });
 
@@ -118,4 +118,10 @@ test('isMapsUrl allows only the local server, not a lookalike', () => {
   assert.strictEqual(isMapsUrl('http://127.0.0.1:3418.evil.com/'), false);
   assert.strictEqual(isMapsUrl('https://example.com/'), false);
   assert.strictEqual(isMapsUrl('not a url'), false);
+});
+
+test('cleanMapsReport keeps only links between bubbles in the preview', () => {
+  const preview = [{ x: 0, y: 0, w: 1, h: 1, color: '#000' }, { x: 2, y: 0, w: 1, h: 1, color: '#000' }];
+  const [map] = cleanMapsReport([{ id: 'a', preview, links: [[0, 1], [1, 5], [0, 'x'], 'bad', [-1, 0], [0.5, 1]] }]);
+  assert.deepStrictEqual(map.links, [[0, 1]]);
 });

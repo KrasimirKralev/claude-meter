@@ -8,6 +8,9 @@ const {
   extraSummary,
   localDay,
   money,
+  boardHeads,
+  labelMeter,
+  refillDiffers,
   upcomingEvents,
   filledCells,
   meterClass,
@@ -144,17 +147,17 @@ test('a rate-limited account keeps its numbers and says why they may be old', ()
   const state = rowState(account('Personal', weekly(10, 10, 20), { rateLimitedUntil: NOW + 5 * 60000 }), NOW);
   assert.strictEqual(state.status, 'limited');
   assert.strictEqual(state.main.pct, 10);
-  assert.strictEqual(state.detail, 'Rate limited, retrying in 5m');
+  assert.strictEqual(state.detail, "Can't read usage, retrying in 5m");
 });
 
 test('an account with no numbers explains itself', () => {
   assert.strictEqual(rowState(account('Personal', null), NOW).detail, 'Waiting for first sync');
   assert.strictEqual(rowState(account('Personal', null, { error: 'Network down' }), NOW).detail, 'Network down');
-  assert.strictEqual(rowState(account('Personal', null, { rateLimitedUntil: NOW + 60000 }), NOW).detail, 'Rate limited, retrying in 1m');
+  assert.strictEqual(rowState(account('Personal', null, { rateLimitedUntil: NOW + 60000 }), NOW).detail, "Can't read usage, retrying in 1m");
 });
 
 test('answerParts names the roomiest account and the next refill', () => {
-  assert.deepStrictEqual(answerParts(today, NOW), { most: 'Side', full: false, nextName: 'Personal', nextText: 'in 19h 12m' });
+  assert.deepStrictEqual(answerParts(today, NOW), { most: 'Side', of: null, full: false, nextName: 'Personal', nextKind: '', nextText: 'in 19h 12m' });
 });
 
 test('answerParts counts the fullest limit, so a used-up Fable cap is not "room"', () => {
@@ -231,7 +234,8 @@ test('upcomingEvents skips what is done or over, and keeps what just started', (
     { id: 'tomorrow', date: '2026-11-08', time: '09:00' },
     { id: 'yesterday', date: '2026-11-06', time: '09:00' },
   ];
-  assert.deepStrictEqual(upcomingEvents(events, NOW).map((e) => e.id), ['all-day', 'just-started', 'later', 'tomorrow']);
+  // An all-day event must not hide the next meeting behind it.
+  assert.deepStrictEqual(upcomingEvents(events, NOW).map((e) => e.id), ['just-started', 'later', 'all-day', 'tomorrow']);
   assert.deepStrictEqual(upcomingEvents(null, NOW), []);
 });
 
@@ -254,6 +258,8 @@ test('extraSummary says "off" once, not once per account', () => {
   const off = { ...weekly(1, 1, 1), extraUsage: { enabled: false } };
   assert.strictEqual(extraSummary([account('A', off), account('B', off), account('C', off), account('D', off)]), 'Extra usage is off on all four accounts.');
   assert.strictEqual(extraSummary([account('A', off)]), 'Extra usage is off.');
+  assert.strictEqual(extraSummary([account('A', off), account('B', off)]), 'Extra usage is off on both accounts.');
+  assert.strictEqual(extraSummary([account('A', off), account('B', off), account('C', off), account('D', null)]), 'Extra usage is off on the three accounts with numbers.');
   assert.strictEqual(extraSummary([account('A', null)]), '');
 });
 
@@ -269,4 +275,71 @@ test('editedText uses plain days', () => {
   assert.strictEqual(editedText(NOW - 20 * HOUR, NOW), 'Edited yesterday');
   assert.strictEqual(editedText(new Date(2026, 10, 3, 9).getTime(), NOW), 'Edited Nov 3');
   assert.strictEqual(editedText(0, NOW), '');
+});
+
+test('a failing account keeps its last numbers but says they may be old', () => {
+  const state = rowState(account('Personal', weekly(5, 5, 10), { error: 'HTTP 500', lastSuccessfulSync: NOW - 3 * HOUR }), NOW);
+  assert.strictEqual(state.status, 'error');
+  assert.strictEqual(state.main.pct, 5);
+  assert.strictEqual(state.alert, "Can't read usage.");
+  assert.strictEqual(state.detail, 'Last read 3h ago');
+  const noAge = rowState(account('Personal', weekly(5, 5, 10), { error: 'HTTP 500' }), NOW);
+  assert.strictEqual(noAge.detail, 'HTTP 500');
+});
+
+test('a failing account can never be the one with the most room', () => {
+  const parts = answerParts([account('Failing', weekly(5, 5, 10), { error: 'HTTP 500' }), account('A', weekly(50, 50, 20)), account('B', weekly(60, 60, 30))], NOW);
+  assert.strictEqual(parts.most, 'A');
+});
+
+test('answerParts admits when it could only read some of the accounts', () => {
+  const parts = answerParts([account('Out', null, { needsLogin: true }), account('A', weekly(50, 50, 20)), account('B', weekly(60, 60, 30))], NOW);
+  assert.strictEqual(parts.most, 'A');
+  assert.strictEqual(parts.of, 2);
+  assert.strictEqual(answerParts(today, NOW).of, null);
+});
+
+test('answerParts says which limit refills on a plan with a session limit', () => {
+  const usage = { ...weekly(40, 20, 50), session: meter(75, 2, { label: 'Current session' }) };
+  const single = answerParts([account('Personal', usage)], NOW);
+  assert.strictEqual(single.nextKind, 'session');
+  assert.strictEqual(single.nextText, 'in 2h 0m');
+});
+
+test('a full limit gets its own refill time, not the main meter\'s', () => {
+  const usage = weekly(54, 100, 10);
+  usage.weekSonnet = meter(100, 100, { label: 'Current week (Fable)', model: 'Fable', severity: 'critical' });
+  const state = rowState(account('Side', usage), NOW);
+  assert.strictEqual(state.alert, 'Fable full.');
+  assert.strictEqual(state.detail, 'Refills Wed, 3:47pm');
+});
+
+test('a full main meter still outranks a login that ends soon', () => {
+  const state = rowState(account('Personal', weekly(99, 1, 20), { login: { state: 'warn', short: '09 Nov · 2 d' } }), NOW);
+  assert.strictEqual(state.alert, 'Nearly full.');
+});
+
+test('labelMeter names everything but the weekly meter the mock-up leaves bare', () => {
+  const plain = weekly(1, 1, 1);
+  assert.strictEqual(labelMeter(plain.weekAll, plain), '');
+  const usage = { ...plain, session: meter(5, 1, { label: 'Current session' }) };
+  assert.strictEqual(labelMeter(usage.session, usage), 'Session');
+  assert.strictEqual(labelMeter(usage.weekAll, usage), 'All models');
+});
+
+test('refillDiffers ignores small clock gaps between limits', () => {
+  assert.strictEqual(refillDiffers(meter(1, 5), meter(1, 5)), false);
+  assert.strictEqual(refillDiffers(meter(1, 5), meter(1, 50)), true);
+  assert.strictEqual(refillDiffers(meter(1, 5), {}), false);
+});
+
+test('boardHeads names a column only when it is true for every row', () => {
+  assert.deepStrictEqual(boardHeads(today), { main: 'Weekly, all models', sub: 'Weekly, Fable', labelMain: false, labelSub: false });
+  const mixed = [today[1], account('S', { ...weekly(1, 1, 1), session: meter(5, 1, { label: 'Current session' }) })];
+  assert.deepStrictEqual(boardHeads(mixed), { main: 'Main limit', sub: 'Other limits', labelMain: true, labelSub: true });
+  const sessions = [account('S', { ...weekly(1, 1, 1), session: meter(5, 1, { label: 'Current session' }) })];
+  assert.strictEqual(boardHeads(sessions).main, 'Session');
+  const models = [today[1], account('S', { ...weekly(1, 1, 1), weekSonnet: meter(1, 1, { label: 'Current week (Sonnet)', model: 'Sonnet' }) })];
+  assert.deepStrictEqual(boardHeads(models), { main: 'Weekly, all models', sub: 'Other limits', labelMain: false, labelSub: true });
+  assert.strictEqual(boardHeads([account('A', null)]).main, 'Weekly, all models');
 });

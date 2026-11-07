@@ -18,6 +18,12 @@ const {
 } = require('./maps-lib');
 
 const START_TIMEOUT_MS = 8000;
+const NEW_MAP_GUARD_MS = 1500;
+// A server that keeps dying won't be fixed by restarting it forever.
+const MAX_RESTARTS = 3;
+const RESTART_WINDOW_MS = 60000;
+const MAX_RELOADS = 3;
+const ABORTED = -3; // Chromium's code for a load replaced by another one, which is no failure
 const DEFAULT_BOUNDS = { x: 120, y: 80, width: 1280, height: 800 };
 // Maps get their own storage, and the only requests that carry the server's secret come from here.
 const PARTITION = 'persist:maps';
@@ -31,7 +37,15 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
   let server = null;
   let serverExit = Promise.resolve();
   let serverToken = '';
+  // Nothing goes to the port unless our own server holds it right now.
+  let serverReady = false;
   let starting = null;
+  let startingGeneration = -1;
+  // Moves on every stop, so a launch still in flight can tell it is no longer wanted.
+  let generation = 0;
+  let restarts = [];
+  let lastNewMapAt = 0;
+  let reloads = 0;
   let boundsTimer = null;
   let pending = null;
 
@@ -64,6 +78,8 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
   };
 
   const stopServer = () => {
+    generation += 1;
+    serverReady = false;
     if (server) {
       server.kill();
       server = null;
@@ -73,41 +89,56 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
   // Ready means our own child says it holds the port. Asking the port itself would prove nothing:
   // any local program could be listening there and answer, and that page would then get the window.
   const launchServer = async () => {
+    const mine = generation;
     await serverExit; // a server stopped a moment ago may still hold the port
-    serverToken = crypto.randomBytes(32).toString('hex');
+    if (mine !== generation) throw new Error('Opening was cancelled.');
+    const token = crypto.randomBytes(32).toString('hex');
     const child = spawn(process.execPath, [entry], {
-      env: { ...childEnv(process.env, os.homedir()), BALONCHE_TOKEN: serverToken },
+      env: childEnv(process.env, os.homedir()),
       cwd: path.dirname(entry),
-      // The IPC channel carries the ready message, and it closes when this app dies, even from
-      // SIGKILL, which makes the server exit too.
+      // The IPC channel carries the secret and the ready message, and it closes when this app dies,
+      // even from SIGKILL, which makes the server exit too.
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     server = child;
-    const log = (chunk) => console.log(`[maps] ${String(chunk).trimEnd()}`);
-    child.stdout.on('data', log);
-    child.stderr.on('data', log);
+    let lastError = '';
+    child.stdout.on('data', (chunk) => console.log(`[maps] ${String(chunk).trimEnd()}`));
+    child.stderr.on('data', (chunk) => {
+      lastError = String(chunk).trim();
+      console.error(`[maps] ${lastError}`);
+    });
     serverExit = new Promise((resolve) => {
       child.once('exit', resolve);
       child.once('error', resolve);
     });
+    if (child.connected) child.send({ token });
     await new Promise((resolve, reject) => {
-      const fail = () => reject(new Error(`Port ${MAPS_PORT} may be in use by another program.`));
-      const timer = setTimeout(fail, START_TIMEOUT_MS);
+      const timer = setTimeout(() => reject(new Error('The map server took too long to start.')), START_TIMEOUT_MS);
+      const failed = () => {
+        clearTimeout(timer);
+        reject(new Error(/could not start on port|EADDRINUSE/.test(lastError)
+          ? `Port ${MAPS_PORT} is in use by another program.`
+          : 'The map server stopped while starting.'));
+      };
       child.on('message', (message) => {
-        if (message && message.type === 'listening') {
-          clearTimeout(timer);
-          resolve();
-        }
+        if (!message || message.type !== 'listening' || server !== child) return;
+        clearTimeout(timer);
+        serverToken = token;
+        serverReady = true;
+        resolve();
       });
       child.once('error', (error) => {
-        clearTimeout(timer);
         console.error('[maps] the server could not start:', error.message);
-        fail();
+        failed();
       });
       child.once('exit', () => {
-        clearTimeout(timer);
-        if (server === child) server = null;
-        fail();
+        const wasReady = server === child && serverReady;
+        if (server === child) {
+          server = null;
+          serverReady = false;
+        }
+        if (wasReady) onServerLost();
+        else failed();
       });
     }).catch((error) => {
       if (server === child) stopServer();
@@ -116,23 +147,62 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
   };
 
   const startServer = () => {
-    if (server && !starting) return Promise.resolve();
-    starting = starting || launchServer().finally(() => { starting = null; });
-    return starting;
+    if (server && serverReady) return Promise.resolve();
+    if (starting && startingGeneration === generation) return starting;
+    startingGeneration = generation;
+    const attempt = launchServer().finally(() => {
+      if (starting === attempt) starting = null;
+    });
+    starting = attempt;
+    return attempt;
   };
 
-  // The page never sees the secret, so nothing it loads could leak it. It is added on the way out.
+  const closeWithError = (message) => {
+    console.error('[maps] closing:', message);
+    if (mapsWin && !mapsWin.isDestroyed()) mapsWin.close();
+    dialog.showErrorBox('Maps had to close', `${message} Your maps are saved. Try opening Maps again.`);
+  };
+
+  // The server died under an open window. The page keeps working on the next request once a new one
+  // is up. If the port has gone to some other program, the window closes rather than talk to it.
+  async function onServerLost() {
+    if (!mapsWin || mapsWin.isDestroyed()) return;
+    const now = Date.now();
+    restarts = restarts.filter((at) => now - at < RESTART_WINDOW_MS);
+    restarts.push(now);
+    if (restarts.length > MAX_RESTARTS) {
+      closeWithError('The map server keeps stopping.');
+      return;
+    }
+    console.error('[maps] the server stopped unexpectedly, restarting');
+    try {
+      await startServer();
+    } catch (error) {
+      if (mapsWin && !mapsWin.isDestroyed()) closeWithError(error.message);
+    }
+  }
+
+  // The page never sees the secret, so nothing it loads could leak it. It is added on the way out,
+  // and only while our own server holds the port.
   const prepareSession = (() => {
     let prepared = false;
     return () => {
       if (prepared) return;
       prepared = true;
-      session.fromPartition(PARTITION).webRequest.onBeforeSendHeaders(
+      const mapsSession = session.fromPartition(PARTITION);
+      mapsSession.webRequest.onBeforeRequest({ urls: [`${MAPS_ORIGIN}/*`] }, (_details, callback) => {
+        callback({ cancel: !serverReady });
+      });
+      mapsSession.webRequest.onBeforeSendHeaders(
         { urls: [`${MAPS_ORIGIN}/api/*`] },
         (details, callback) => {
           callback({ requestHeaders: { ...details.requestHeaders, 'X-Balonche-Token': serverToken } });
         },
       );
+      // "Copy plan" needs the clipboard. Nothing else on a map needs a browser permission.
+      mapsSession.setPermissionRequestHandler((_contents, permission, callback) => {
+        callback(permission === 'clipboard-sanitized-write');
+      });
     };
   })();
 
@@ -183,14 +253,37 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
       if (!isMapsUrl(url)) event.preventDefault();
     });
     created.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    created.webContents.on('did-finish-load', sendPending);
+    // The app's default menu would let Ctrl+Q here quit the widget too.
+    created.setMenu(null);
+    created.webContents.on('did-finish-load', () => {
+      reloads = 0;
+      sendPending();
+    });
+    // A reload that found no server, which can happen right after it stopped.
+    created.webContents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+      if (!isMainFrame || code === ABORTED) return;
+      reloads += 1;
+      if (reloads > MAX_RELOADS) {
+        closeWithError('The map page could not load.');
+        return;
+      }
+      startServer()
+        .then(() => {
+          if (!created.isDestroyed()) created.loadURL(`${MAPS_ORIGIN}/`);
+        })
+        .catch((error) => {
+          if (!created.isDestroyed()) closeWithError(error.message);
+        });
+    });
     created.on('moved', saveBoundsSoon);
     created.on('resized', saveBoundsSoon);
     trackWindow(created);
     created.on('closed', () => {
-      if (mapsWin === created) mapsWin = null;
-      pending = null;
-      stopServer();
+      if (mapsWin === created) {
+        mapsWin = null;
+        pending = null;
+        stopServer();
+      }
     });
     return created;
   };
@@ -198,6 +291,11 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
   const open = async (rawRequest) => {
     const request = cleanOpenRequest(rawRequest);
     if (!entry) return;
+    // A double click on "New map" means one new map.
+    if (request && request.new) {
+      if (Date.now() - lastNewMapAt < NEW_MAP_GUARD_MS) return;
+      lastNewMapAt = Date.now();
+    }
     if (mapsWin && !mapsWin.isDestroyed()) {
       if (mapsWin.isMinimized()) mapsWin.restore();
       mapsWin.show();
@@ -220,7 +318,7 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
       console.error('[maps] opening failed:', error.message);
       if (created.isDestroyed()) return;
       created.close();
-      dialog.showErrorBox('Maps could not open', `${error.message} Close it and try again.`);
+      dialog.showErrorBox('Maps could not open', `${error.message} Try again in a moment.`);
     }
   };
 

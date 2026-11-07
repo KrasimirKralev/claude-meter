@@ -157,9 +157,14 @@ var boardCells = [];
 function buildBoardRow(acc, index) {
   var state = WL.rowState(acc, Date.now());
   var chosen = acc.id === activeAccountId && accountsData.length > 1;
-  var row = el('tr', (chosen ? 'active' : '') + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : ''));
+  var row = el('tr', (chosen ? 'active' : '')
+    + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : '')
+    + (state.status === 'limited' || state.status === 'error' ? ' stale-row' : ''));
   var name = acc.name || acc.id;
-  row.title = name + (acc.email ? ' · ' + acc.email : '');
+  row.title = name + (acc.email ? ' · ' + acc.email : '') + (acc.error ? '\n' + acc.error : '');
+  row.setAttribute('tabindex', '0');
+  row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
+  row.setAttribute('data-id', acc.id);
 
   var who = el('th');
   who.setAttribute('scope', 'row');
@@ -171,14 +176,19 @@ function buildBoardRow(acc, index) {
   var nameEl = el('div', 'name', name);
   if (chosen) nameEl.appendChild(el('em', null, 'Active'));
   if (acc.cliActive) {
-    var cli = el('em', null, 'CLI');
+    var cli = el('em', 'cli', 'CLI');
     cli.title = cliLauncherName + ' is running on this account';
     nameEl.appendChild(cli);
   }
   label.appendChild(nameEl);
   var login = acc.login;
-  if (login && login.text) {
-    var line = el('div', 'login-line' + (login.state === 'warn' || login.state === 'out' ? ' ' + login.state : ''), login.text);
+  // Once logged out the Refills column says so, and the long command lives in the tooltip.
+  if (login && login.state === 'out') {
+    row.title += '\n' + (login.detail || login.text);
+  } else if (acc.needsLogin) {
+    row.title += '\nRun: ' + ((login && login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login');
+  } else if (login && login.text) {
+    var line = el('div', 'login-line' + (login.state === 'warn' ? ' warn' : ''), login.text);
     line.title = login.detail;
     label.appendChild(line);
   }
@@ -190,12 +200,16 @@ function buildBoardRow(acc, index) {
   var pctCell = el('td', 'tpct');
   var fableCell = el('td', 'tfable');
   if (state.main) {
+    var heads = WL.boardHeads(accountsData);
     meterCell.appendChild(meterCells(state.main, false));
+    if (heads.labelMain) meterCell.appendChild(el('span', 'limit', WL.shortLabel(state.main)));
     pctCell.appendChild(el('b', null, String(state.main.pct)));
     pctCell.appendChild(el('small', null, '%'));
     state.subs.forEach(function(meter) {
       fableCell.appendChild(meterCells(meter, true));
-      fableCell.appendChild(el('span', 'limit', (state.subs.length > 1 ? WL.shortLabel(meter) + ' ' : '') + meter.pct + '%'));
+      // A limit on its own clock says so: nothing else on screen gives that time.
+      var refill = WL.refillDiffers(meter, state.main) ? ' · ' + WL.refillText(meter.resetsAt, Date.now()) : '';
+      fableCell.appendChild(el('span', 'limit', (heads.labelSub ? WL.shortLabel(meter) + ' ' : '') + meter.pct + '%' + refill));
     });
   }
   row.appendChild(meterCell);
@@ -207,21 +221,23 @@ function buildBoardRow(acc, index) {
   row.appendChild(refill);
   boardCells.push({ acc: acc, cell: refill });
 
-  row.addEventListener('click', function() {
+  var choose = function() {
     if (acc.id === activeAccountId || !window.dashboardAPI.setActiveAccount) return;
     window.dashboardAPI.setActiveAccount(acc.id);
+  };
+  row.addEventListener('click', choose);
+  row.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    choose();
   });
   return row;
 }
 
-function boardHeads() {
-  var hasSession = accountsData.some(function(acc) { return acc.usage && acc.usage.session; });
-  var model = null;
-  accountsData.forEach(function(acc) {
-    if (!model && acc.usage && acc.usage.weekSonnet) model = acc.usage.weekSonnet.model;
-  });
-  document.getElementById('boardMainHead').textContent = hasSession ? 'Session' : 'Weekly, all models';
-  document.getElementById('boardSubHead').textContent = hasSession ? 'Other limits' : (model ? 'Weekly, ' + model : 'Other limits');
+function renderBoardHeads() {
+  var heads = WL.boardHeads(accountsData);
+  document.getElementById('boardMainHead').textContent = heads.main;
+  document.getElementById('boardSubHead').textContent = heads.sub;
 }
 
 function renderTimeline() {
@@ -309,6 +325,8 @@ function renderWeekChart() {
 function renderOverviewToday() {
   var list = document.getElementById('overviewToday');
   if (!list) return;
+  // The timer redraws this list, which must not pull keyboard focus out of it.
+  if (list.contains(document.activeElement)) return;
   while (list.firstChild) list.removeChild(list.firstChild);
   var now = Date.now();
   var next = WL.upcomingEvents(typeof calEvents === 'undefined' ? [] : calEvents, now)[0];
@@ -354,6 +372,14 @@ function mapThumb(map) {
   var scale = Math.min(104 / 100, 56 / Math.max(height, 1));
   var left = (120 - 100 * scale) / 2;
   var top = (72 - height * scale) / 2;
+  var centre = function(b) {
+    return [left + (b.x + b.w / 2) * scale, top + (b.y + b.h / 2) * scale];
+  };
+  (map.links || []).forEach(function(link) {
+    var from = centre(bubbles[link[0]]);
+    var to = centre(bubbles[link[1]]);
+    svg.appendChild(svgNode('path', { d: 'M' + from[0].toFixed(1) + ' ' + from[1].toFixed(1) + 'L' + to[0].toFixed(1) + ' ' + to[1].toFixed(1), stroke: '#e5e7eb', 'stroke-width': 1.5, fill: 'none' }));
+  });
   bubbles.forEach(function(b) {
     svg.appendChild(svgNode('rect', {
       x: (left + b.x * scale).toFixed(1), y: (top + b.y * scale).toFixed(1),
@@ -411,9 +437,14 @@ function renderSyncText() {
 
 function renderOverview() {
   var body = document.getElementById('overviewRows');
+  var focused = document.activeElement && document.activeElement.getAttribute('data-id');
   while (body.firstChild) body.removeChild(body.firstChild);
   boardCells = [];
-  accountsData.forEach(function(acc, index) { body.appendChild(buildBoardRow(acc, index)); });
+  accountsData.forEach(function(acc, index) {
+    var row = buildBoardRow(acc, index);
+    body.appendChild(row);
+    if (acc.id === focused) row.focus();
+  });
   if (accountsData.length === 0) {
     var waiting = el('tr');
     var cell = el('td', null, 'Waiting for data...');
@@ -421,7 +452,7 @@ function renderOverview() {
     waiting.appendChild(cell);
     body.appendChild(waiting);
   }
-  boardHeads();
+  renderBoardHeads();
   document.getElementById('overviewFoot').textContent = WL.extraSummary(accountsData);
   renderTimeline();
   renderWeekChart();
@@ -589,10 +620,14 @@ function planLacksMeter(key) {
   return !!(usageData && typeof usageData === 'object' && !usageData[key]);
 }
 
+function cssVar(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
 var chartSeriesDefs = [
   { key: 'session', color: '#d4845a', label: 'Session' },
-  { key: 'weekAll', color: '#7c7cba', label: 'Weekly (all)' },
-  { key: 'weekSonnet', color: '#4ade80', label: 'Weekly (Fable)' },
+  { key: 'weekAll', color: '#111111', label: 'Weekly (all)' },
+  { key: 'weekSonnet', color: '#23a094', label: 'Weekly (Fable)' },
 ];
 
 
@@ -621,6 +656,8 @@ function formatTooltipTitle(ts) {
 
 
 function drawChart() {
+  chartSeriesDefs[1].color = cssVar('--text', '#111111');
+  chartSeriesDefs[2].color = cssVar('--green', '#23a094');
   var canvas = document.getElementById('historyCanvas');
   if (!canvas) return;
 
@@ -714,7 +751,7 @@ function drawChart() {
         legend: {
           position: 'bottom',
           labels: {
-            color: getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#111111',
+            color: cssVar('--text', '#111111'),
             font: { size: 12, weight: '500' },
             usePointStyle: true,
             pointStyle: 'circle',
@@ -749,7 +786,7 @@ function drawChart() {
       scales: {
         x: {
           ticks: {
-            color: '#7e7e98',
+            color: cssVar('--text-dim', '#5f5a4f'),
             font: { size: 10, family: 'monospace' },
             maxTicksLimit: chartDays <= 7 ? 8 : (chartDays <= 14 ? 8 : 6),
             callback: function(val, idx) {
@@ -757,19 +794,19 @@ function drawChart() {
             },
           },
           grid: {
-            color: '#2a2a3d',
+            color: 'rgba(127, 127, 127, 0.25)',
             drawTicks: true,
             tickLength: 4,
           },
           border: {
-            color: '#2a2a3d',
+            color: 'rgba(127, 127, 127, 0.25)',
           },
         },
         y: {
           min: 0,
           max: 100,
           ticks: {
-            color: '#7e7e98',
+            color: cssVar('--text-dim', '#5f5a4f'),
             font: { size: 11, family: 'monospace' },
             stepSize: 25,
             callback: function(val) {
@@ -777,7 +814,7 @@ function drawChart() {
             },
           },
           grid: {
-            color: '#2a2a3d',
+            color: 'rgba(127, 127, 127, 0.25)',
           },
           border: {
             display: false,
@@ -1802,7 +1839,7 @@ function renderAnalytics() {
     var card = el('div');
     card.style.cssText = 'padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;';
     var valEl = el('div');
-    valEl.style.cssText = 'font-size:24px;font-weight:700;color:var(--accent);font-family:"JetBrains Mono",monospace;';
+    valEl.style.cssText = 'font-size:24px;font-weight:700;color:var(--ink);font-family:"JetBrains Mono",monospace;';
     valEl.textContent = value;
     card.appendChild(valEl);
     var labelEl = el('div');
@@ -2527,7 +2564,7 @@ window.dashboardAPI.onUsageUpdate(function(payload) {
       if (accountsData[i].id === activeAccountId) active = accountsData[i];
     }
     if (!active && accountsData.length > 0) active = accountsData[0];
-    if (active && active.usage) usageData = active.usage;
+    usageData = active ? active.usage : null;
   } else if (payload && payload.session) {
     // Defensive: a bare usage object (pre-multi-account payload)
     accountsData = [];

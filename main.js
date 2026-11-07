@@ -4220,7 +4220,7 @@ function openDashboard(tab) {
   const wb = win && !win.isDestroyed() ? win.getBounds() : null;
   const display = wb ? screen.getDisplayMatching(wb) : getWidgetDisplay();
   const wa = display.workArea;
-  const dW = 900, dH = 650;
+  const dW = Math.min(1100, wa.width), dH = Math.min(780, wa.height);
   let dX, dY;
   if (wb) {
     // Try to center on screen but shift if it would overlap the widget
@@ -4239,8 +4239,8 @@ function openDashboard(tab) {
     height: dH,
     x: dX,
     y: dY,
-    minWidth: 700,
-    minHeight: 500,
+    minWidth: 860,
+    minHeight: 560,
     frame: false,
     ...POPUP_GLASS_OPTS_FN(),
     icon: getWindowIcon(),

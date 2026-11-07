@@ -946,7 +946,7 @@
     top: 0; left: -100%;
     width: 100%; height: 100%;
     background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 10%, transparent), transparent);
-    animation: banner-shimmer 3s ease-in-out infinite;
+    animation: banner-shimmer 3s ease-in-out 3;
   }
   @keyframes banner-shimmer {
     0% { left: -100%; }
@@ -1168,7 +1168,9 @@
   .sidebar-nav button.active { background: var(--yellow); color: var(--on-candy); }
   .sidebar-nav button:focus-visible { outline-color: var(--bar-ink); }
   .sidebar-footer { margin-top: auto; padding: 0 10px !important; border-top: 0 !important; -webkit-app-region: no-drag; }
-  .sidebar-version { color: var(--bar-dim) !important; font-size: 12px !important; }
+  .sidebar-version { color: var(--bar-dim) !important; font-size: 12px !important; font-family: inherit !important; }
+  .chart-container { margin-bottom: 16px; }
+  #tab-history .planner { margin-top: 16px; }
 
   .main-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .mhead { display: flex; align-items: center; gap: 20px; padding: 20px 28px 0; flex-shrink: 0; -webkit-app-region: drag; }
@@ -1208,6 +1210,7 @@
   .board tbody th { text-align: left; font-weight: 600; }
   .board tbody tr + tr th, .board tbody tr + tr td { border-top: 2px solid var(--ink); }
   .board tbody tr { cursor: pointer; }
+  .board tbody tr:focus-visible { outline: 2px solid var(--ink); outline-offset: -3px; }
   .board tbody tr:hover th, .board tbody tr:hover td { background: var(--surface2); }
   .board tbody tr.active th, .board tbody tr.active td { background: var(--yellow); color: var(--on-candy); }
   .account-cell { display: flex; align-items: center; gap: 10px; }
@@ -1222,6 +1225,7 @@
   .b-3 { background: #ffffff; }
   .who { min-width: 0; }
   .name { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 800; white-space: nowrap; }
+  .name em.cli, tr.active .name em.cli { background: none; color: inherit; box-shadow: inset 0 0 0 1.5px currentColor; }
   .name em { font-style: normal; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 5px; background: var(--ink); color: var(--surface); }
   tr.active .name em { background: var(--on-candy); color: #fff; }
   .login-line { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
@@ -1235,7 +1239,8 @@
   tr.active.crit .tpct b, tr.active.crit .tpct small { color: #8f1218; }
   .tfable { width: 164px; }
   .tfable span.limit { display: block; font-size: 12px; color: var(--text-dim); margin-top: 3px; }
-  .trefill { white-space: nowrap; }
+  .trefill { min-width: 110px; white-space: nowrap; }
+  .stale-row .tmeter, .stale-row .tfable, .stale-row .tpct { opacity: 0.6; }
   .trefill strong { color: var(--crit-text); font-weight: 700; }
   tr.active .trefill strong { color: #8f1218; }
   .cells { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; height: 13px; }
@@ -1261,8 +1266,9 @@
   .phead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .list { list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
   .list b { font-weight: 700; }
-  .list button { all: unset; cursor: pointer; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .list button { all: unset; cursor: pointer; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
   .list button:hover { text-decoration: underline; }
+  .list button:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; border-radius: 3px; }
   .new {
     height: 30px; padding: 0 12px; flex-shrink: 0; cursor: pointer;
     border: 2px solid var(--ink); border-radius: 10px;
@@ -1286,7 +1292,7 @@
   .tl-empty { font-size: 13px; color: var(--text-dim); padding: 6px 0; }
 
   /* Weekly chart */
-  .keys { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+  .keys { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
   .keys i { width: 14px; height: 3px; border-radius: 2px; margin-left: 8px; }
   .k1 { background: var(--ink); }
   .k2 { background: var(--green); }
@@ -1313,6 +1319,16 @@
   .mapcard { background: var(--surface); border: 2.5px solid var(--ink); border-radius: 12px; padding: 10px; }
   .mapcard .thumb { width: 120px; height: 72px; }
   .maps-empty { font-size: 13.5px; color: var(--text-dim); padding: 4px 0; }
+
+  /* Smaller windows: the bars give way first, so names and refill times stay readable. */
+  @media (max-width: 1040px) {
+    .tmeter { width: 130px; }
+    .trefill { white-space: normal; }
+    .phead h2 { white-space: nowrap; }
+    .tfable { width: 96px; }
+    .lower { grid-template-columns: 1fr 240px; }
+    .board tbody th, .board td { padding-left: 8px; padding-right: 8px; }
+  }
 </style>
 </head>
 <body>
@@ -1379,10 +1395,6 @@
         </div>
       </div>
     </div>
-    <div class="planner">
-      <div class="planner-title">Session Planner</div>
-      <div class="planner-text" id="plannerText">Waiting for data...</div>
-    </div>
   </div>
 
   <div class="tab-content" id="tab-history">
@@ -1403,6 +1415,10 @@
       </div>
     </div>
     <div id="analyticsContent"></div>
+    <div class="planner">
+      <div class="planner-title">Session Planner</div>
+      <div class="planner-text" id="plannerText">Waiting for data...</div>
+    </div>
   </div>
 
   <div class="tab-content" id="tab-alerts">

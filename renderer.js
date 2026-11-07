@@ -2,6 +2,9 @@ var WL = window.WidgetLib;
 var usageData = null;     // the active account's usage: the extra strip and "Synced" follow it
 var lastSyncError = null; // persists error message until next successful sync
 var syncing = false;
+var syncingSince = 0;
+// Some syncs end with no message, so "Syncing..." may not hide how old the numbers are for long.
+var SYNCING_LIMIT_MS = 20000;
 var accountsData = [];    // one entry per enabled account, from the usage-update payload
 var activeAccountId = null;
 // The account the user just clicked. A usage-update already in flight still
@@ -22,11 +25,13 @@ function createElement(tag, cls, text) {
 function showSetupOverlay() {
   document.getElementById('setupOverlay').classList.add('visible');
   document.querySelector('.widget').classList.add('setup');
+  reportMinHeight();
 }
 
 function hideSetupOverlay() {
   document.getElementById('setupOverlay').classList.remove('visible');
   document.querySelector('.widget').classList.remove('setup');
+  reportMinHeight();
 }
 
 
@@ -42,7 +47,7 @@ function renderExtraUsage(eu) {
 
   var strip = document.getElementById('extraStrip');
   var amtEl = document.getElementById('extraAmt');
-  var fillEl = document.getElementById('extraFill');
+  var cellsEl = document.getElementById('extraCells');
   var pctEl = document.getElementById('extraPct');
 
   var used = eu.usedMinor, limit = eu.limitMinor, dec = eu.decimals;
@@ -54,9 +59,13 @@ function renderExtraUsage(eu) {
   var clamped = Math.max(0, Math.min(100, pct));
 
   amtEl.textContent = (used != null) ? fmtMoney(used, dec, eu.currency) : '—';
-  fillEl.style.width = clamped + '%';
-  fillEl.className = 'es-fill' + ((pct >= 100 || eu.severity === 'critical') ? ' crit'
-    : ((pct >= 80 || eu.severity === 'warning') ? ' warn' : ''));
+  while (cellsEl.firstChild) cellsEl.removeChild(cellsEl.firstChild);
+  cellsEl.appendChild(buildCells({
+    label: 'Current extra usage',
+    pct: clamped,
+    severity: (pct >= 100 || eu.severity === 'critical') ? 'critical'
+      : ((pct >= 80 || eu.severity === 'warning') ? 'warning' : 'normal'),
+  }, false));
   pctEl.textContent = pct + '%';
 
   var usedStr = (used != null) ? fmtMoney(used, dec, eu.currency) : '—';
@@ -113,8 +122,34 @@ function accountTooltip(acc) {
       ? login.detail
       : 'Run: ' + ((login && login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login');
   }
-  if (acc.error) return acc.error;
+  if (acc.error) return acc.name + ': ' + acc.error;
   return acc.name + (acc.email ? ' · ' + acc.email : '') + (login && login.detail ? '\n' + login.detail : '');
+}
+
+// Each limit keeps its own refill time here, because the row only prints one of them.
+function meterTooltip(meter, now) {
+  var refill = WL.refillText(meter.resetsAt, now);
+  return WL.shortLabel(meter) + ': ' + meter.pct + '% used' + (refill ? ', refills ' + refill : '');
+}
+
+function loginCommand(acc) {
+  return (acc.login && acc.login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login';
+}
+
+// Copies the command rather than running it: a login has to land in this account's own folder, and
+// CLAUDE.md's rule is to check the e-mail it reports.
+function buildLoginButton(acc) {
+  var button = createElement('button', 'login-btn', 'Copy login command');
+  button.title = loginCommand(acc);
+  button.addEventListener('click', function(e) {
+    e.stopPropagation();
+    navigator.clipboard.writeText(loginCommand(acc)).then(function() {
+      button.textContent = 'Copied, paste it in a terminal';
+    }, function() {
+      button.textContent = loginCommand(acc);
+    });
+  });
+  return button;
 }
 
 // Called every second by the timer, so it only touches the page when the words change.
@@ -136,7 +171,7 @@ function buildAccountRow(acc, index) {
   var chosen = active && accountsData.length > 1;
   var row = createElement('li', 'acct' + (chosen ? ' active' : '')
     + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : '')
-    + (state.status === 'limited' ? ' rate-limited' : ''));
+    + (state.status === 'limited' || state.status === 'error' ? ' stale' : ''));
   row.setAttribute('role', 'button');
   row.setAttribute('tabindex', '0');
   row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
@@ -164,13 +199,23 @@ function buildAccountRow(acc, index) {
 
   var meters = createElement('div', 'meters');
   if (state.main) {
-    meters.appendChild(buildCells(state.main, false));
+    var now = Date.now();
+    var mainLabel = WL.labelMeter(state.main, acc.usage);
+    if (mainLabel) meters.appendChild(createElement('span', 'lab', mainLabel));
+    var mainCells = buildCells(state.main, false);
+    if (!mainLabel) mainCells.classList.add('wide');
+    mainCells.title = meterTooltip(state.main, now);
+    meters.appendChild(mainCells);
     state.subs.forEach(function(meter) {
-      var sub = createElement('div', 'sub');
-      sub.appendChild(createElement('span', null, WL.shortLabel(meter) + ' ' + meter.pct + '%'));
-      sub.appendChild(buildCells(meter, true));
-      meters.appendChild(sub);
+      var lab = createElement('span', 'lab', WL.shortLabel(meter) + ' ' + meter.pct + '%');
+      lab.title = meterTooltip(meter, now);
+      meters.appendChild(lab);
+      var cells = buildCells(meter, true);
+      cells.title = lab.title;
+      meters.appendChild(cells);
     });
+  } else if (state.status === 'out') {
+    meters.appendChild(buildLoginButton(acc));
   }
   row.appendChild(meters);
 
@@ -224,12 +269,14 @@ function renderAnswer() {
     el.appendChild(createElement('b', null, 'Every account is full.'));
   } else if (parts.most) {
     el.appendChild(createElement('b', null, parts.most));
-    el.appendChild(document.createTextNode(' has the most room.'));
+    el.appendChild(document.createTextNode(' has the most room'
+      + (parts.of ? ' of ' + parts.of + ' readable accounts.' : '.')));
   }
   if (parts.nextText) {
     if (el.firstChild) el.appendChild(document.createTextNode(' '));
     el.appendChild(document.createTextNode('Next refill: '));
-    el.appendChild(createElement('b', null, (parts.nextName ? parts.nextName + ', ' : '') + parts.nextText));
+    var who = [parts.nextName, parts.nextKind].filter(Boolean).join(' ');
+    el.appendChild(createElement('b', null, (who ? who + ', ' : '') + parts.nextText));
     el.appendChild(document.createTextNode('.'));
   }
 }
@@ -260,7 +307,7 @@ function updateFooter() {
   if (lastSyncError) {
     footer.textContent = lastSyncError;
     footer.className = 'footer-hint error';
-  } else if (syncing) {
+  } else if (syncing && Date.now() - syncingSince < SYNCING_LIMIT_MS) {
     footer.textContent = 'Syncing...';
     footer.className = 'footer-hint';
   } else if (usageData && usageData.syncTime) {
@@ -286,6 +333,7 @@ function setSyncStatus(status) {
   var badge = document.getElementById('syncStatus');
 
   syncing = status === 'syncing';
+  if (syncing) syncingSince = Date.now();
   if (status === 'syncing') {
     dot.className = 'dot syncing';
     badge.className = 'sync-status syncing';
@@ -373,6 +421,7 @@ window.electronAPI.onUpdateAvailable(function(data) {
   var btn = document.getElementById('updateBtn');
   btn.textContent = 'Update v' + data.latestVersion;
   btn.classList.add('visible');
+  reportMinHeight();
 });
 
 window.electronAPI.onUpdateProgress(function(pct) {
@@ -558,6 +607,7 @@ function updateClaudeStatusBanner(status) {
 
   if (!status || !status.incidents || status.incidents.length === 0 || status.indicator === 'none') {
     banner.className = 'claude-status-banner';
+    reportMinHeight();
     return;
   }
 
@@ -567,6 +617,7 @@ function updateClaudeStatusBanner(status) {
   var started = inc.startedAt ? 'Started ' + relativeTime(inc.startedAt) : '';
   metaEl.textContent = [components, started].filter(Boolean).join(' \u00B7 ');
   banner.className = 'claude-status-banner ' + status.indicator + ' visible';
+  reportMinHeight();
 }
 
 window.electronAPI.getClaudeStatus().then(function(status) {
@@ -712,11 +763,13 @@ window.electronAPI.onEventOverdue(function(data) {
   document.getElementById('overdueBannerText').textContent = data.title;
   document.getElementById('overdueBannerTime').textContent = data.time || 'today';
   banner.classList.add('visible');
+  reportMinHeight();
 });
 
 document.getElementById('overdueBannerClose').addEventListener('click', function(e) {
   e.stopPropagation();
   document.getElementById('overdueBanner').classList.remove('visible');
+  reportMinHeight();
 });
 
 // Clicking the overdue banner itself opens the Calendar (where the event lives)
@@ -778,6 +831,7 @@ function pomoUpdateRing(data) {
   else if (state === 'idle') fillCls += ' idle';
   else fillCls += ' running';
   ringFill.className = fillCls;
+  document.getElementById('pomoRing').classList.toggle('idle', state === 'idle');
   ringText.className = 'pomo-ring-text' + (state === 'running' ? ' active' : (state === 'break' ? ' break' : ''));
 
   // Ring text
@@ -786,7 +840,7 @@ function pomoUpdateRing(data) {
   // Tooltip
   tooltipTime.textContent = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
   tooltipTime.className = 'pomo-tooltip-time' + (state === 'running' ? ' active' : (state === 'break' ? ' break' : ''));
-  tooltipLabel.textContent = state === 'break' ? 'Break' : (state === 'running' ? 'Focus' : (state === 'paused' ? 'Paused' : 'Pomodoro'));
+  tooltipLabel.textContent = state === 'break' ? 'Break' : (state === 'running' ? 'Focus' : (state === 'paused' ? 'Paused' : 'Focus'));
 
   if (state === 'running') startBtn.textContent = 'Pause';
   else if (state === 'paused') startBtn.textContent = 'Resume';
@@ -1005,7 +1059,7 @@ function reportMinHeight() {
     path.setAttribute('d', 'm6 12.5 4 4 8-9');
     path.setAttribute('fill', 'none');
     path.setAttribute('stroke', 'currentColor');
-    path.setAttribute('stroke-width', '2.6');
+    path.setAttribute('stroke-width', '1.8');
     path.setAttribute('stroke-linecap', 'round');
     path.setAttribute('stroke-linejoin', 'round');
     svg.appendChild(path);

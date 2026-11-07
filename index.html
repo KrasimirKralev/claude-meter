@@ -109,7 +109,7 @@
 
   /* ---------- The answer ---------- */
   .answer { padding: 8px 14px; font-size: 14px; color: var(--text-dim); flex-shrink: 0; }
-  .answer b { color: var(--ink); font-weight: 600; }
+  .answer b { color: var(--ink); font-weight: 600; white-space: nowrap; }
 
   /* ---------- Account board ---------- */
   .accts {
@@ -135,8 +135,8 @@
   .acct:hover { background: var(--hover); }
   .acct:focus-visible { outline-offset: -4px; }
   .acct.active, .acct.active:hover { background: var(--yellow); color: var(--on-candy); }
-  /* Throttled by the API, not broken: the numbers stay, slightly faded. */
-  .acct.rate-limited .meters { opacity: 0.6; }
+  /* A failed or throttled read: the last numbers stay, faded, and the row says why. */
+  .acct.stale .meters { opacity: 0.6; }
   .bullet {
     width: 26px; height: 26px; display: grid; place-items: center;
     border: 2px solid var(--on-candy); border-radius: 7px;
@@ -155,13 +155,18 @@
     background: var(--ink); color: var(--surface);
   }
   .acct.active .name em { background: var(--on-candy); color: #ffffff; }
+  /* Outlined, so "where the CLI runs" can't be read as "active". */
+  .name em.cli, .acct.active .name em.cli { background: none; color: inherit; box-shadow: inset 0 0 0 1.5px currentColor; }
   .reset { font-size: 12px; line-height: 1.25; color: var(--text-dim); min-height: 15px; }
-  .acct.active .reset, .acct.active .sub, .acct.active .pct small { color: var(--on-yellow-dim); }
+  .acct.active .reset, .acct.active .lab, .acct.active .pct small { color: var(--on-yellow-dim); }
   .reset strong { color: var(--crit-text); font-weight: 700; }
   .acct.active .reset strong { color: #8f1218; }
-  .meters { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-  .sub { display: grid; grid-template-columns: minmax(62px, auto) 1fr; align-items: center; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
-  .sub > span:first-child { padding-right: 4px; }
+  /* One label column per row, so every bar starts at the same place. */
+  .meters { display: grid; grid-template-columns: minmax(62px, auto) 1fr; row-gap: 6px; align-items: center; min-width: 0; }
+  .meters .wide { grid-column: 1 / -1; }
+  .lab { font-size: 11px; color: var(--text-dim); white-space: nowrap; padding-right: 4px; }
+  .login-btn { grid-column: 1 / -1; justify-self: start; padding: 4px 10px; border: 2px solid var(--ink); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 700; }
+  .login-btn:hover { background: var(--surface2); }
   .pct { text-align: right; line-height: 1; white-space: nowrap; }
   .pct b { font-size: 24px; font-weight: 900; }
   .pct small { font-size: 12px; font-weight: 600; margin-left: 1px; color: var(--text-dim); }
@@ -191,13 +196,10 @@
     border-radius: 9px; padding: 6px 11px; cursor: pointer;
   }
   .extra-strip:hover { background: var(--surface2); }
-  .extra-strip .es-ic { font-size: 13px; line-height: 1; flex-shrink: 0; }
+  .extra-strip .es-ic { width: 15px; height: 15px; flex-shrink: 0; color: var(--ink); }
   .extra-strip .es-lbl { font-size: 12px; font-weight: 700; color: var(--text-dim); flex-shrink: 0; }
   .extra-strip .es-amt { font-weight: 800; font-size: 13px; color: var(--ink); flex-shrink: 0; }
-  .extra-strip .es-track { flex: 1; min-width: 26px; height: 8px; border: 2px solid var(--ink); border-radius: 999px; background: var(--bar-bg); overflow: hidden; }
-  .extra-strip .es-fill { height: 100%; width: 0%; background: var(--green); transition: width 0.7s var(--pop); }
-  .extra-strip .es-fill.warn { background: var(--yellow); }
-  .extra-strip .es-fill.crit { background: var(--red); }
+  .extra-strip .es-cells { flex: 1; min-width: 26px; }
   .extra-strip .es-pct { font-weight: 800; font-size: 12px; color: var(--ink); flex-shrink: 0; min-width: 30px; text-align: right; }
   .usage-rows:not(:has(.extra-section:not([style*="none"]))) { display: none; }
 
@@ -226,7 +228,7 @@
     border: 1.5px solid currentColor;
     background: conic-gradient(currentColor var(--p, 0%), transparent 0);
   }
-  .habits-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .habits-right { margin-left: auto; display: flex; align-items: center; gap: 0; }
   .relax-meta { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; }
   .relax-meta:empty { display: none; }
   .relax-now-btn { height: 26px; padding: 0 8px; font-size: 12px; font-weight: 600; color: var(--text-dim); border-radius: 99px; white-space: nowrap; }
@@ -236,7 +238,7 @@
   .pomo-ring-wrap {
     position: relative;
     display: inline-flex; align-items: center; gap: 5px;
-    height: 26px; padding: 0 6px;
+    height: 26px; padding: 0 10px;
     border-radius: 99px;
     cursor: pointer;
     color: var(--text-dim);
@@ -244,8 +246,12 @@
   }
   .pomo-ring-wrap:hover { color: var(--ink); background: var(--hover); }
   .pomo-ring-svg { width: 14px; height: 14px; transform: rotate(-90deg); pointer-events: none; }
+  .pomo-idle-icon { display: none; width: 14px; height: 14px; pointer-events: none; }
+  .pomo-ring-wrap.idle .pomo-idle-icon { display: block; }
+  .pomo-ring-wrap.idle .pomo-ring-svg { display: none; }
   .pomo-ring-bg { fill: none; stroke: currentColor; opacity: 0.25; stroke-width: 3; }
-  .pomo-ring-fill { fill: none; stroke: var(--green); stroke-width: 4; stroke-linecap: butt; transition: stroke-dashoffset 1s linear; }
+  /* It moves once a second. A transition here would keep it repainting for the whole session. */
+  .pomo-ring-fill { fill: none; stroke: var(--green); stroke-width: 4; stroke-linecap: butt; }
   .pomo-ring-fill.break { stroke: #c78d00; }
   .pomo-ring-fill.idle { stroke: currentColor; stroke-width: 3; }
   .pomo-ring-fill.running { stroke: var(--green); }
@@ -315,7 +321,9 @@
 
   /* ---------- Dock ---------- */
   .dock {
-    display: flex;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
     height: 48px;
     flex-shrink: 0;
     border-top: var(--bw) solid var(--ink);
@@ -323,7 +331,7 @@
     margin-top: auto;
   }
   .dock button {
-    flex: 1; min-width: 0;
+    min-width: 0;
     display: flex; align-items: center; justify-content: center; gap: 6px;
     font-size: 12.5px; font-weight: 800; color: var(--ink);
   }
@@ -385,7 +393,8 @@
     min-height: 0;
   }
   .setup-overlay.visible { display: flex; }
-  .widget.setup .answer, .widget.setup .accts, .widget.setup .usage-rows, .widget.setup .today, .widget.setup .dock { display: none; }
+  /* The other accounts and every tool stay reachable: only this account's numbers need a login. */
+  .widget.setup .answer, .widget.setup .usage-rows { display: none; }
   .setup-overlay .setup-icon { font-size: 34px; margin-bottom: 12px; }
   .setup-overlay .setup-title { font-size: 16px; font-weight: 900; margin-bottom: 6px; color: var(--ink); }
   .setup-overlay .setup-desc { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 16px; font-weight: 600; }
@@ -449,7 +458,7 @@
   @media (max-width: 470px) {
     .acct { grid-template-columns: 30px 1fr 54px; row-gap: 5px; padding-block: 8px; }
     .meters { grid-column: 1 / -1; grid-row: 2; }
-    .dock button { font-size: 0; gap: 0; }
+    .dock button { flex-direction: column; gap: 1px; font-size: 11px; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -518,10 +527,10 @@
   <div class="usage-rows" id="usageRows">
     <div class="extra-section" id="extraSection" style="display:none">
       <div class="extra-strip" id="extraStrip" title="Extra usage this month">
-        <span class="es-ic">&#x26A1;</span>
+        <svg class="es-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 14h6l-1 7 8-11h-6l1-7Z"/></svg>
         <span class="es-lbl">Extra</span>
         <span class="es-amt" id="extraAmt">&mdash;</span>
-        <div class="es-track"><div class="es-fill" id="extraFill"></div></div>
+        <div class="es-cells" id="extraCells"></div>
         <span class="es-pct" id="extraPct"></span>
       </div>
     </div>
@@ -537,7 +546,8 @@
       <div class="habits-right">
         <span class="relax-meta" id="relaxMeta"></span>
         <button class="relax-now-btn" id="relaxNowBtn" hidden>Relax now</button>
-        <div class="pomo-ring-wrap" id="pomoRing" title="Focus timer">
+        <div class="pomo-ring-wrap idle" id="pomoRing" title="Focus timer">
+          <svg class="pomo-idle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 1.5M10 3h4"/></svg>
           <svg class="pomo-ring-svg" viewBox="0 0 28 28" aria-hidden="true">
             <circle class="pomo-ring-bg" cx="14" cy="14" r="11"/>
             <circle class="pomo-ring-fill idle" id="pomoRingFill" cx="14" cy="14" r="11" stroke-dasharray="69.12" stroke-dashoffset="0"/>
