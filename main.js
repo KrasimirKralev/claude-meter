@@ -290,9 +290,11 @@ const RELAX_STATE_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-state.json');
 // generated lo-fi (config musicSource), shuffled without repeats.
 const relaxMusic = require('./relax-music');
 const displayScale = require('./display-scale');
+const { pathToFileURL } = require('url');
 const { createMapsFeature } = require('./maps-view');
+const { isMapsUrl } = require('./maps-lib');
 const { createNotesView } = require('./notes-view');
-const { readJsonOr, writeJsonAtomic } = require('./safe-file');
+const { readJsonOr, writeJsonAtomic, writeTextAtomic } = require('./safe-file');
 const { parseSmartText } = require('./smart-text');
 const calendarLib = require('./calendar-lib');
 const widgetLib = require('./widget-lib');
@@ -1288,24 +1290,14 @@ function saveCachedUsage(ctx) {
 // --- Usage history (per account) ---
 
 function loadHistory(ctx) {
-  try {
-    if (fs.existsSync(ctx.historyFile)) {
-      const data = JSON.parse(fs.readFileSync(ctx.historyFile, 'utf-8'));
-      if (data.version === 1 && Array.isArray(data.points)) {
-        return data.points;
-      }
-    }
-  } catch { /* ignore */ }
-  return [];
+  const data = readJsonOr(ctx.historyFile, null);
+  return data && data.version === 1 && Array.isArray(data.points) ? data.points : [];
 }
 
 function saveHistory(ctx) {
   try {
-    fs.writeFileSync(ctx.historyFile, JSON.stringify({
-      version: 1,
-      points: ctx.history,
-    }, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(ctx.historyFile, { version: 1, points: ctx.history });
+  } catch (err) { console.error('[history] save failed:', err.message); }
 }
 
 function appendHistory(ctx) {
@@ -1362,6 +1354,7 @@ function loadSettings() {
           ALERT_THRESHOLDS.weekSonnet = data.alertThresholds.weekSonnet;
         }
       }
+      if (data.calendarMigrated) calendarMigrated = true;
       if (data.theme && THEMES[data.theme]) {
         currentTheme = data.theme;
       }
@@ -1398,6 +1391,7 @@ function saveSettings() {
       },
     };
     if (currentTheme) obj.theme = currentTheme;
+    if (calendarMigrated) obj.calendarMigrated = true;
     if (accountList.length > 0) {
       obj.accounts = accountList.map((a) => ({
         id: a.id, name: a.name, autoName: a.autoName, dir: a.dir, enabled: a.enabled !== false,
@@ -1849,8 +1843,10 @@ function firstUrlInText(s) {
   return m ? m[0] : null;
 }
 
+// Anyone can send an invite, so an address in a synced title is only words.
 function eventJoinLink(evt) {
-  return (evt && (evt.meetLink || firstUrlInText(evt.title))) || null;
+  if (!evt) return null;
+  return evt.meetLink || (evt.isGoogleEvent ? null : firstUrlInText(evt.title));
 }
 
 // --- Google Calendar: sync logic ---
@@ -1912,7 +1908,8 @@ function startGcalSyncTimer() {
 
 // --- Streak tracking ---
 function loadStreak() {
-  return readJsonOr(STREAK_FILE, { current: 0, lastDate: null });
+  const data = readJsonOr(STREAK_FILE, null);
+  return data && typeof data === 'object' && !Array.isArray(data) ? data : { current: 0, lastDate: null };
 }
 
 function saveStreak() {
@@ -2028,7 +2025,7 @@ function openDailyDigest() {
       preload: path.join(__dirname, 'popup-preload.js') },
   });
   applyLinuxPopupTransparency(alertPopup);
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); ref.webContents.on('render-process-gone', () => { if (!ref.isDestroyed()) ref.destroy(); }); }
   alertPopup.once('ready-to-show', () => { if (alertPopup && !alertPopup.isDestroyed()) alertPopup.showInactive(); });
   alertPopup.loadFile(path.join(__dirname, 'popup.html'));
   alertPopup.webContents.once('did-finish-load', () => {
@@ -2043,6 +2040,7 @@ function openDailyDigest() {
 }
 
 // --- Theme system ---
+let calendarMigrated = false; // events from older versions were brought in line once
 let currentTheme = 'brutal'; // 'brutal', 'karchx', 'dark', 'light', 'nord', 'dracula'
 const THEMES = {
   // brutal — pop brutalism: bone paper, ink borders, candy pink/teal/yellow
@@ -2127,7 +2125,8 @@ function scheduleReminders() {
 
   for (const id of Object.keys(firedStages)) {
     const evt = calendarEvents.find((e) => e.id === id);
-    if (!evt || evt.date < today) delete firedStages[id];
+    // Kept through yesterday, or an event late last night would seem new and remind again after midnight.
+    if (!evt || evt.date < calendarLib.addDays(today, -1)) delete firedStages[id];
   }
 
   for (const evt of calendarEvents) {
@@ -2230,8 +2229,13 @@ function requestPopup(entry) {
     return;
   }
   const sameMeeting = entry.eventId && popupShowing && popupShowing.eventId === entry.eventId;
-  const overridesShowing = entry.eventId && !(popupShowing && popupShowing.sticky);
-  if (sameMeeting || overridesShowing) {
+  if (sameMeeting) {
+    openQueuedPopup(entry);
+    return;
+  }
+  // A meeting starting now is the one thing that goes in front, and what it displaces comes back after.
+  if (entry.sticky && !(popupShowing && popupShowing.sticky)) {
+    if (popupShowing) popupQueue.unshift(popupShowing);
     openQueuedPopup(entry);
     return;
   }
@@ -2240,9 +2244,12 @@ function requestPopup(entry) {
 
 function popupClosed() {
   popupShowing = null;
-  popupQueue = popupQueue.filter((entry) => !entry.stillWanted || entry.stillWanted());
-  const next = popupQueue.shift();
-  if (next) setTimeout(() => openQueuedPopup(next), POPUP_GAP_MS);
+  setTimeout(() => {
+    if (alertPopup && !alertPopup.isDestroyed()) return; // something else opened in the gap
+    popupQueue = popupQueue.filter((entry) => !entry.stillWanted || entry.stillWanted());
+    const next = popupQueue.shift();
+    if (next) openQueuedPopup(next);
+  }, POPUP_GAP_MS);
 }
 
 function showReminderPopup(evt, stage) {
@@ -2252,7 +2259,7 @@ function showReminderPopup(evt, stage) {
     sticky: stage.key === '0m' || stage.key === '10m' || stage.key === '5m',
     stillWanted: () => {
       const current = calendarEvents.find((e) => e.id === evt.id);
-      return Boolean(current) && !current.done;
+      return Boolean(current) && calendarLib.stillCurrent(current, Date.now());
     },
     open: () => openReminderPopup(evt, stage),
   });
@@ -2290,7 +2297,7 @@ function openReminderPopup(evt, stage) {
   });
   applyLinuxPopupTransparency(alertPopup);
 
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); ref.webContents.on('render-process-gone', () => { if (!ref.isDestroyed()) ref.destroy(); }); }
   alertPopup.once('ready-to-show', () => {
     // Without taking the keyboard: someone may be typing, and the keys must stay where they are.
     if (alertPopup && !alertPopup.isDestroyed()) alertPopup.showInactive();
@@ -2424,19 +2431,20 @@ function extendRepeatingEvents() {
   const today = localDateStr(new Date());
   const until = calendarLib.addDays(today, REPEAT_HORIZON_DAYS);
   let added = false;
-  for (const parent of calendarEvents.filter((e) => e.recurrence && !e.isGoogleEvent)) {
+  for (const parent of calendarEvents.filter((e) => e.recurrence && !e.isGoogleEvent && !e.ended)) {
+    const pattern = parent.template || parent;
     const taken = new Set(calendarEvents.filter((e) => e.recurringParentId === parent.id).map((e) => e.date));
     for (const date of parent.skipDates || []) taken.add(date);
-    for (const date of calendarLib.occurrences(parent.date, parent.recurrence, today, until)) {
+    for (const date of calendarLib.occurrences(parent.anchor || parent.date, parent.recurrence, today, until)) {
       if (taken.has(date)) continue;
       calendarEvents.push({
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        title: parent.title,
+        title: pattern.title,
         date,
-        time: parent.time,
-        duration: parent.duration,
-        color: parent.color,
-        reminder: parent.reminder,
+        time: pattern.time,
+        duration: pattern.duration,
+        color: pattern.color,
+        reminder: pattern.reminder,
         recurrence: null, // instances don't recurse
         recurringParentId: parent.id,
         googleEventId: null,
@@ -2486,6 +2494,10 @@ function updateCalendarEvent(data) {
   if (data.date !== undefined && !isRealDate(data.date)) return { success: false };
   const oldDate = evt.date;
   const oldTime = evt.time;
+  // The first date also holds what new dates copy. Changing only that date mustn't change them.
+  if (evt.recurrence && !data.wholeSeries && !evt.template) {
+    evt.template = { title: evt.title, time: evt.time, duration: evt.duration, color: evt.color, reminder: evt.reminder };
+  }
   if (data.title !== undefined) evt.title = String(data.title).trim().slice(0, 100);
   if (data.date !== undefined) evt.date = data.date;
   if (data.time !== undefined) evt.time = typeof data.time === 'string' && TIME_RE.test(data.time) ? data.time : null;
@@ -2499,8 +2511,11 @@ function updateCalendarEvent(data) {
   if (evt.date !== oldDate) repeatingEventMoved(evt, oldDate);
   if (data.wholeSeries) {
     const today = localDateStr(new Date());
+    const rootId = evt.recurringParentId || evt.id;
     for (const other of seriesOf(evt)) {
-      if (other === evt || other.done || other.date < today) continue;
+      // The first date always follows, however long ago it was, because new dates copy it.
+      if (other.id === rootId) delete other.template;
+      if (other === evt || (other.id !== rootId && (other.done || other.date < today))) continue;
       other.title = evt.title;
       other.time = evt.time;
       other.duration = evt.duration;
@@ -2525,6 +2540,7 @@ function repeatingEventMoved(evt, oldDate) {
     const today = localDateStr(new Date());
     calendarEvents = calendarEvents.filter((e) => !(e.recurringParentId === evt.id && !e.done && e.date >= today));
     evt.skipDates = [];
+    delete evt.anchor;
     extendRepeatingEvents();
   }
 }
@@ -2561,6 +2577,9 @@ function deleteCalendarEvent(data) {
         next.recurrence = evt.recurrence;
         next.recurringParentId = null;
         next.skipDates = evt.skipDates || [];
+        // The pattern still counts from where it began, not from this date.
+        next.anchor = evt.anchor || evt.date;
+        if (evt.template) next.template = evt.template;
         for (const other of rest.slice(1)) other.recurringParentId = next.id;
       }
     }
@@ -2671,7 +2690,7 @@ function openAlertPopup(label, pct, resetsAt, accountLabel) {
   });
   applyLinuxPopupTransparency(alertPopup);
 
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); ref.webContents.on('render-process-gone', () => { if (!ref.isDestroyed()) ref.destroy(); }); }
 
   alertPopup.once('ready-to-show', () => {
     if (alertPopup && !alertPopup.isDestroyed()) {
@@ -3814,10 +3833,6 @@ function createWindow() {
   });
 
   // Navigation guards — block external URLs and new windows
-  win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) e.preventDefault();
-  });
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   win.on('close', (e) => {
     e.preventDefault();
@@ -4169,10 +4184,6 @@ function openDashboard(tab) {
   dashWin.setMenu(null);
   dashWin.loadFile('dashboard.html');
 
-  dashWin.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) e.preventDefault();
-  });
-  dashWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   dashWin.webContents.on('did-finish-load', () => {
     dashWin.webContents.send('usage-update', buildUsagePayload());
@@ -5501,10 +5512,6 @@ function openTasksWindow() {
   });
   tasksWin.loadFile('tasks.html');
 
-  tasksWin.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) e.preventDefault();
-  });
-  tasksWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   const initWidgetBounds = win && !win.isDestroyed() ? win.getBounds() : null;
   tasksWin.once('ready-to-show', () => {
@@ -5532,7 +5539,7 @@ function openTasksWindow() {
 }
 
 ipcMain.on('calendar-window-close', (event) => {
-  try { if (!event.senderFrame || !event.senderFrame.url.startsWith('file://')) return; } catch { return; }
+  if (!isLocalSender(event)) return;
   if (calWin && !calWin.isDestroyed()) {
     calWin.hide();
     calWasVisible = false;
@@ -5540,7 +5547,7 @@ ipcMain.on('calendar-window-close', (event) => {
 });
 
 ipcMain.on('tasks-window-close', (event) => {
-  try { if (!event.senderFrame || !event.senderFrame.url.startsWith('file://')) return; } catch { return; }
+  if (!isLocalSender(event)) return;
   if (tasksMovedTimer) { clearTimeout(tasksMovedTimer); tasksMovedTimer = null; }
   if (tasksWin && !tasksWin.isDestroyed()) {
     tasksUserHidden = true;
@@ -5953,6 +5960,26 @@ function stopPhoneSync() {
 // --- App lifecycle ---
 
 // Single instance lock - prevent multiple instances
+// Only this app's own pages count as local. A file from anywhere else on the disk is a stranger.
+const APP_PAGE_PREFIX = pathToFileURL(__dirname).href + '/';
+
+function isLocalSender(event) {
+  try {
+    return Boolean(event.senderFrame) && event.senderFrame.url.startsWith(APP_PAGE_PREFIX);
+  } catch {
+    return false;
+  }
+}
+
+// No page of this app ever goes anywhere. Without this, a link or a file dropped on a window replaces its
+// page, and the new page keeps that window's bridge to everything the app holds.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-navigate', (event, url) => {
+    if (!(isMapsUrl(url) && isMapsUrl(contents.getURL()))) event.preventDefault();
+  });
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+});
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -6074,6 +6101,12 @@ app.whenReady().then(() => {
   calendarEvents = loadCalendarEvents();
   gcalAccounts = loadGcalConfig();
   streakData = loadStreak();
+  if (!calendarMigrated) {
+    calendarLib.migrateEvents(calendarEvents, localDateStr(new Date()));
+    calendarMigrated = true;
+    saveCalendarEvents();
+    saveSettings();
+  }
   if (extendRepeatingEvents()) saveCalendarEvents();
   updateStreak();
   // Discover/merge accounts, then hydrate each one's cached usage + history
@@ -6100,8 +6133,6 @@ app.whenReady().then(() => {
   startClaudeStatusPoller();
   scheduleReminders();
   scheduleDailyDigest();
-  // Re-check reminders every 5 minutes (catches missed reminders from sleep/boot)
-  setInterval(scheduleReminders, 5 * 60 * 1000);
 
   // Google Calendar: initial sync + timer
   if (gcalAccounts.length > 0) {
@@ -6132,13 +6163,6 @@ app.whenReady().then(() => {
 
   // Quick-task hotkey: add a task from anywhere
   try { globalShortcut.register('Control+]', openQuickTaskCapture); } catch { /* ignore */ }
-
-  // IPC sender validation helper
-  const isLocalSender = (event) => {
-    try {
-      return event.senderFrame && event.senderFrame.url.startsWith('file://');
-    } catch { return false; }
-  };
 
   mapsFeature = createMapsFeature({
     WebContentsView, ipcMain, session, isLocalSender,
@@ -6233,7 +6257,8 @@ app.whenReady().then(() => {
   });
 
   // Auth status check for first-launch onboarding
-  ipcMain.handle('check-auth-status', () => {
+  ipcMain.handle('check-auth-status', (event) => {
+    if (!isLocalSender(event)) return null;
     // The overlay is about the active account — any other account's expiry is
     // reported on its own tab instead.
     const ctx = getActiveCtx();
@@ -6255,7 +6280,8 @@ app.whenReady().then(() => {
 
   // Launch claude auth login from the app
   let reAuthWatcher = null;
-  ipcMain.handle('launch-auth-login', () => {
+  ipcMain.handle('launch-auth-login', (event) => {
+    if (!isLocalSender(event)) return { success: false };
     try {
       const { execFileSync } = require('child_process');
       const cmd = process.platform === 'win32' ? 'where' : 'which';
@@ -6462,7 +6488,8 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('get-settings', async () => {
+  ipcMain.handle('get-settings', async (event) => {
+    if (!isLocalSender(event)) return null;
     return {
       hotkey: currentHotkey,
       version: (APP_VERSION || app.getVersion()),
@@ -6499,7 +6526,8 @@ app.whenReady().then(() => {
     return { success: true };
   });
 
-  ipcMain.handle('get-autostart', async () => {
+  ipcMain.handle('get-autostart', async (event) => {
+    if (!isLocalSender(event)) return { enabled: false };
     return { enabled: getAutoStartEnabled() };
   });
 
@@ -6656,7 +6684,8 @@ app.whenReady().then(() => {
     broadcastPomo(true);
   });
 
-  ipcMain.handle('pomo-get', () => {
+  ipcMain.handle('pomo-get', (event) => {
+    if (!isLocalSender(event)) return null;
     return { state: pomoState, seconds: pomoSeconds, total: pomoTotal };
   });
 
@@ -6722,15 +6751,18 @@ app.whenReady().then(() => {
   });
 
   // Meeting popup dismiss
-  ipcMain.on('meeting-popup-dismiss', () => {
+  ipcMain.on('meeting-popup-dismiss', (event) => {
+    if (!isLocalSender(event)) return;
     if (alertPopup && !alertPopup.isDestroyed()) alertPopup.close();
   });
 
   // Pomo popup buttons
-  ipcMain.on('pomo-popup-dismiss', () => {
+  ipcMain.on('pomo-popup-dismiss', (event) => {
+    if (!isLocalSender(event)) return;
     if (pomoPopupWin && !pomoPopupWin.isDestroyed()) pomoPopupWin.close();
   });
-  ipcMain.on('pomo-popup-start-next', () => {
+  ipcMain.on('pomo-popup-start-next', (event) => {
+    if (!isLocalSender(event)) return;
     if (pomoState === 'break_pending') {
       pomoState = 'break';
       pomoSeconds = POMO_BREAK_SECS;
@@ -6760,7 +6792,8 @@ app.whenReady().then(() => {
     openNotesAppWindow();
   });
 
-  ipcMain.handle('notes-get', () => {
+  ipcMain.handle('notes-get', (event) => {
+    if (!isLocalSender(event)) return '';
     try { return fs.readFileSync(NOTES_FILE, 'utf-8'); } catch { return ''; }
   });
 
@@ -6768,11 +6801,11 @@ app.whenReady().then(() => {
     if (!isLocalSender(event)) return;
     var content = typeof text === 'string' ? text : '';
     if (content.length > 500000) content = content.slice(0, 500000);
-    try { fs.writeFileSync(NOTES_FILE, content); } catch { /* ignore */ }
+    try { writeTextAtomic(NOTES_FILE, content); } catch (err) { console.error('[notes] save failed:', err.message); }
   });
 
   // Multi-note sticky notes
-  ipcMain.handle('sticky-notes-get', () => readStickyNotes());
+  ipcMain.handle('sticky-notes-get', (event) => (isLocalSender(event) ? readStickyNotes() : null));
 
   ipcMain.on('sticky-notes-save', (event, notes) => {
     if (!isLocalSender(event)) return;
@@ -6833,7 +6866,7 @@ app.whenReady().then(() => {
   });
 
   // Notes archive — deleted notes go here for recovery
-  ipcMain.handle('notes-archive-get', () => readNotesArchive());
+  ipcMain.handle('notes-archive-get', (event) => (isLocalSender(event) ? readNotesArchive() : []));
 
   ipcMain.on('notes-archive-add', (event, note) => {
     if (!isLocalSender(event)) return;
@@ -6845,19 +6878,13 @@ app.whenReady().then(() => {
     archiveRemoveNote(noteId);
   });
 
-  ipcMain.handle('get-theme', () => currentTheme);
+  ipcMain.handle('get-theme', (event) => (isLocalSender(event) ? currentTheme : null));
   ipcMain.handle('set-theme', (event, themeName) => {
     if (!isLocalSender(event)) return;
     if (THEMES[themeName]) {
       currentTheme = themeName;
       broadcastTheme();
-      // Save to settings
-      try {
-        const settings = fs.existsSync(SETTINGS_FILE)
-          ? JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8')) : {};
-        settings.theme = themeName;
-        fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-      } catch { /* ignore */ }
+      saveSettings();
     }
   });
 
@@ -6938,8 +6965,8 @@ app.whenReady().then(() => {
     try {
       const dir = path.join(CLAUDE_DIR, 'task-notes');
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, taskId + '.txt'), typeof text === 'string' ? text : '');
-    } catch { /* ignore */ }
+      writeTextAtomic(path.join(dir, taskId + '.txt'), typeof text === 'string' ? text : '');
+    } catch (err) { console.error('[notes] save failed:', err.message); }
   });
 
   ipcMain.on('open-task-note', (event, taskId, taskText) => {
@@ -6975,7 +7002,8 @@ app.whenReady().then(() => {
 
   // --- Google Calendar IPC ---
 
-  ipcMain.handle('gcal-get-accounts', () => {
+  ipcMain.handle('gcal-get-accounts', (event) => {
+    if (!isLocalSender(event)) return [];
     return gcalAccounts.map((a) => ({ email: a.email }));
   });
 
@@ -7014,14 +7042,16 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('gcal-get-status', () => {
+  ipcMain.handle('gcal-get-status', (event) => {
+    if (!isLocalSender(event)) return { accounts: [] };
     return {
       accounts: gcalAccounts.map((a) => ({ email: a.email })),
       lastSync: gcalLastSync,
     };
   });
 
-  ipcMain.handle('check-for-updates', async () => {
+  ipcMain.handle('check-for-updates', async (event) => {
+    if (!isLocalSender(event)) return { hasUpdate: false };
     const result = await checkForUpdates();
     if (result.hasUpdate) {
       lastUpdateResult = result;
@@ -7181,8 +7211,7 @@ app.whenReady().then(() => {
   startFileWatcher();
   startPhoneSync();
 
-  // Timers only exist for the next day's reminders, and a late one is only noticed when something
-  // looks. So this looks: without it, an app left running never reminded anyone of later events.
+  // Timers only exist for the next day's reminders, and missed ones are only noticed when something looks.
   let calendarDay = localDateStr(new Date());
   cleanupTimers.push(setInterval(() => {
     const today = localDateStr(new Date());

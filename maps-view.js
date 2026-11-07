@@ -229,8 +229,9 @@ function createMapsFeature({ WebContentsView, ipcMain, session, isLocalSender, d
       if (prepared) return;
       prepared = true;
       const mapsSession = session.fromPartition(PARTITION);
-      mapsSession.webRequest.onBeforeRequest({ urls: [`${MAPS_ORIGIN}/*`] }, (_details, callback) => {
-        callback({ cancel: !serverReady });
+      // This page has no business with any other address.
+      mapsSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, callback) => {
+        callback({ cancel: !serverReady || !isMapsUrl(details.url) });
       });
       mapsSession.webRequest.onBeforeSendHeaders(
         { urls: [`${MAPS_ORIGIN}/api/*`] },

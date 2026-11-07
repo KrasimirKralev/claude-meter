@@ -118,6 +118,40 @@ test('meeting links: Meet, then a video entry, then a known address in the text'
   assert.strictEqual(C.extractMeetLink({ location: 'https://evil.example/x' }), null);
 });
 
+test('a provider named only in the path is no meeting link', () => {
+  assert.strictEqual(C.extractMeetLink({ location: 'https://evil.example/zoom.us/j/1' }), null);
+  assert.strictEqual(C.extractMeetLink({ location: 'https://zoom.us.evil.example/j/1' }), null);
+  assert.strictEqual(C.extractMeetLink({ description: 'First https://evil.example/x then https://meet.google.com/abc' }), 'https://meet.google.com/abc');
+});
+
+test('a waiting reminder stops being worth showing once its moment has gone', () => {
+  assert.strictEqual(C.stillCurrent(evt(), at('14:20')), true);
+  assert.strictEqual(C.stillCurrent(evt(), at('14:31')), false);
+  assert.strictEqual(C.stillCurrent(evt({ done: true }), at('14:00')), false);
+});
+
+test('events from older versions: future ones without a reminder keep getting one', () => {
+  const events = [
+    { id: 'p', date: '2026-11-20', reminder: null },
+    { id: 'o', date: '2026-11-01', reminder: null },
+    { id: 'g', date: '2026-11-20', reminder: null, isGoogleEvent: true },
+    { id: 'n', date: '2026-11-20', reminder: 60 },
+  ];
+  C.migrateEvents(events, '2026-11-07');
+  assert.deepStrictEqual(events.map((e) => e.reminder), [15, null, null, 60]);
+});
+
+test('series from older versions: gaps stay gaps, and long-finished ones stay finished', () => {
+  const parent = { id: 'w', date: '2026-10-05', recurrence: 'weekly', reminder: 15 };
+  const instance = (date) => ({ id: date, date, recurringParentId: 'w' });
+  const old = { id: 'x', date: '2025-01-06', recurrence: 'weekly', reminder: 15 };
+  const events = [parent, instance('2026-10-12'), instance('2026-10-26'), old, { id: 'y', date: '2025-01-13', recurringParentId: 'x' }];
+  C.migrateEvents(events, '2026-11-07');
+  assert.deepStrictEqual(parent.skipDates, ['2026-10-19']);
+  assert.strictEqual(parent.ended, undefined);
+  assert.strictEqual(old.ended, true);
+});
+
 test('a failed sync keeps that account\'s events, and done marks survive a sync', () => {
   const local = { id: 'l' };
   const failing = { id: 'gcal:bad:1', isGoogleEvent: true, googleAccount: 'bad' };

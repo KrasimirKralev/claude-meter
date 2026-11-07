@@ -99,7 +99,12 @@ function makeWorld(t, theme = { name: 'brutal', winBg: '#f0ede4' }) {
 
   world.requestBlocked = () => {
     let cancel;
-    world.onBeforeRequest({}, (answer) => { cancel = answer.cancel; });
+    world.onBeforeRequest({ url: 'http://127.0.0.1:3418/x' }, (answer) => { cancel = answer.cancel; });
+    return cancel;
+  };
+  world.outsideBlocked = () => {
+    let cancel;
+    world.onBeforeRequest({ url: 'https://evil.example/x' }, (answer) => { cancel = answer.cancel; });
     return cancel;
   };
   world.headerToken = () => {
@@ -168,6 +173,13 @@ test('the page loads only after our own server says it is listening', async (t) 
   assert.strictEqual(view.loads.length, 1);
   assert.strictEqual(world.requestBlocked(), false);
   assert.strictEqual(world.lastStatus().state, 'ready');
+});
+
+test('the page reaches its own server and nothing else', async (t) => {
+  const world = makeWorld(t);
+  await opened(world);
+  assert.strictEqual(world.requestBlocked(), false);
+  assert.strictEqual(world.outsideBlocked(), true);
 });
 
 test('the view sits in the dashboard, where the section says, shown only once the page drew', async (t) => {

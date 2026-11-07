@@ -86,6 +86,7 @@ test('a meeting link comes from the sync or from the title, and only over https'
   assert.strictEqual(P.meetingLink({ title: 'Call https://zoom.example/1 now' }), 'https://zoom.example/1');
   assert.strictEqual(P.meetingLink({ title: 'Call http://plain.example' }), null);
   assert.strictEqual(P.meetingLink({ title: 'Lunch' }), null);
+  assert.strictEqual(P.meetingLink({ title: 'Sync https://evil.example/login', isGoogleEvent: true }), null);
 });
 
 test('a link names where it goes', () => {

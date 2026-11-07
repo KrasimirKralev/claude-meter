@@ -57,6 +57,11 @@ function eventMoment(evt) {
   return new Date(`${evt.date}T${evt.time || '09:00'}`).getTime();
 }
 
+// Whether a reminder still waiting its turn is worth showing, or its moment has gone.
+function stillCurrent(evt, now) {
+  return !evt.done && now - eventMoment(evt) < MISSED_WINDOW;
+}
+
 // What to do about one event right now: stages to fire, stages to set timers for, and missed ones to
 // forget. Of the stages missed while asleep only the latest fires, or waking up would bring a burst.
 function planReminders(evt, now, fired) {
@@ -115,6 +120,38 @@ function occurrences(baseDate, recurrence, from, until) {
   return dates;
 }
 
+const MEETING_HOSTS = ['meet.google.com', 'zoom.us', 'teams.microsoft.com', 'teams.live.com', 'webex.com', 'whereby.com', 'meet.jit.si'];
+
+function isMeetingHost(address) {
+  try {
+    const host = new URL(address).hostname.toLowerCase();
+    return MEETING_HOSTS.some((known) => host === known || host.endsWith(`.${known}`));
+  } catch {
+    return false;
+  }
+}
+
+// Brings events saved by older versions in line, once. Those versions reminded of everything, whatever
+// the event said, and they stored none for events from the phone, so a future event with none keeps its
+// reminders. They made a repeating event's dates once: a date missing from that run was deleted, and a
+// series that ran out long ago stays finished rather than coming back with a burst of reminders.
+function migrateEvents(events, today) {
+  for (const evt of events) {
+    if (!evt.isGoogleEvent && (evt.reminder === null || evt.reminder === undefined) && evt.date >= today) {
+      evt.reminder = DEFAULT_REMINDER;
+    }
+  }
+  for (const parent of events.filter((e) => e.recurrence && !e.isGoogleEvent)) {
+    const dates = new Set(events.filter((e) => e.recurringParentId === parent.id).map((e) => e.date));
+    const last = [...dates].sort().pop() || parent.date;
+    if (last < addDays(today, -30)) {
+      parent.ended = true;
+      continue;
+    }
+    parent.skipDates = occurrences(parent.date, parent.recurrence, parent.date, last).filter((date) => !dates.has(date));
+  }
+}
+
 // The joinable meeting address on a Google event: Meet's own link, then a video entry point, then a
 // known provider's address in the location or description.
 function extractMeetLink(item) {
@@ -124,11 +161,11 @@ function extractMeetLink(item) {
     const video = entries.find((e) => e && e.entryPointType === 'video' && e.uri);
     if (video) return video.uri;
   }
-  const known = /https:\/\/[^\s<>"']*(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|teams\.live\.com|webex\.com|whereby\.com|meet\.jit\.si)[^\s<>"']*/i;
+  // By the address's real host: "https://evil.example/zoom.us/j/1" only mentions Zoom.
   for (const field of [item.location, item.description]) {
-    if (typeof field === 'string') {
-      const match = field.match(known);
-      if (match) return match[0];
+    if (typeof field !== 'string') continue;
+    for (const candidate of field.match(/https:\/\/[^\s<>"']+/gi) || []) {
+      if (isMeetingHost(candidate)) return candidate;
     }
   }
   return null;
@@ -203,7 +240,9 @@ module.exports = {
   extractMeetLink,
   mapGoogleItem,
   mergeGoogleEvents,
+  migrateEvents,
   occurrences,
   planReminders,
   reminderStages,
+  stillCurrent,
 };

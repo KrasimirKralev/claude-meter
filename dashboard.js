@@ -1288,13 +1288,13 @@ function setUpdateButtons(text, disabled) {
 
 function showUpdateFound(result) {
   pendingUpdate = result;
-  setUpdateButtons('Update to v' + result.latestVersion, false);
+  setUpdateButtons((result.downloadUrl ? 'Update to v' : 'Get v') + result.latestVersion, false);
   document.getElementById('updateNowBtn').classList.add('visible');
   document.getElementById('sidebarVersion').textContent = 'v' + currentAppVersion + ' to v' + result.latestVersion;
   var banner = document.getElementById('updateBanner');
   UI.clear(banner);
-  banner.appendChild(el('span', null, 'Version ' + result.latestVersion + ' is ready to install.'));
-  var install = el('button', 'btn small', 'Update');
+  banner.appendChild(el('span', null, 'Version ' + result.latestVersion + (result.downloadUrl ? ' is ready to install.' : ' is out.')));
+  var install = el('button', 'btn small', result.downloadUrl ? 'Update' : 'See the release');
   install.type = 'button';
   install.addEventListener('click', startUpdate);
   banner.appendChild(install);
@@ -1303,9 +1303,9 @@ function showUpdateFound(result) {
 
 function startUpdate() {
   if (!pendingUpdate || updateRunning) return;
+  // This system has no installer in the release, so the release page is the way to it.
   if (!pendingUpdate.downloadUrl) {
-    setUpdateButtons('No installer found', true);
-    setTimeout(function() { setUpdateButtons('Update to v' + pendingUpdate.latestVersion, false); }, 3000);
+    if (pendingUpdate.url) window.dashboardAPI.openExternal(pendingUpdate.url);
     return;
   }
   updateRunning = true;

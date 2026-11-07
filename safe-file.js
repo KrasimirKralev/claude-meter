@@ -6,11 +6,19 @@
 const fs = require('fs');
 
 // The new content is complete on disk before it takes the old file's place.
+function writeTextAtomic(file, text) {
+  const temp = `${file}.tmp`;
+  try {
+    fs.writeFileSync(temp, text, { mode: 0o600 });
+    fs.renameSync(temp, file);
+  } catch (error) {
+    try { fs.unlinkSync(temp); } catch { /* it never got that far */ }
+    throw error;
+  }
+}
+
 function writeJsonAtomic(file, value) {
-  const temp = `${file}.tmp-${process.pid}`;
-  try { fs.unlinkSync(temp); } catch { /* not there */ }
-  fs.writeFileSync(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
-  fs.renameSync(temp, file);
+  writeTextAtomic(file, JSON.stringify(value, null, 2));
 }
 
 // The value in the file, or the fallback when there isn't one. A damaged file is moved aside, not lost:
@@ -35,4 +43,4 @@ function readJsonOr(file, fallback) {
   }
 }
 
-module.exports = { readJsonOr, writeJsonAtomic };
+module.exports = { readJsonOr, writeJsonAtomic, writeTextAtomic };

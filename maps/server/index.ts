@@ -18,6 +18,15 @@ if (!existsSync(dist)) {
 const serve = (token?: string): void => {
   const app = createApp(undefined, token);
 
+  // The page loads only its own files, and sends data only to this server.
+  app.use((_req, res, next) => {
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'",
+    );
+    next();
+  });
+
   // Asset names change with their content, so they can be kept for good. The page itself must not
   // be, or a new tab after a rebuild would ask for files that no longer exist.
   app.use('/assets', express.static(join(dist, 'assets'), { immutable: true, maxAge: '1y' }));

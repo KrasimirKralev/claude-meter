@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { readJsonOr, writeJsonAtomic } = require('../safe-file');
+const { readJsonOr, writeJsonAtomic, writeTextAtomic } = require('../safe-file');
 
 function folder(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-file-'));
@@ -43,6 +43,16 @@ test('a file emptied by a crash counts as damaged', (t) => {
   fs.writeFileSync(file, '');
   assert.strictEqual(readJsonOr(file, 'fallback'), 'fallback');
   assert.strictEqual(fs.existsSync(file), false);
+});
+
+test('plain text saves the same way, and a failed save leaves nothing lying around', (t) => {
+  const dir = folder(t);
+  const file = path.join(dir, 'note.txt');
+  writeTextAtomic(file, 'words');
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'words');
+  assert.deepStrictEqual(fs.readdirSync(dir), ['note.txt']);
+  assert.throws(() => writeTextAtomic(path.join(dir, 'missing', 'x.txt'), 'words'));
+  assert.deepStrictEqual(fs.readdirSync(dir), ['note.txt']);
 });
 
 test('a failed save leaves the old file whole', (t) => {

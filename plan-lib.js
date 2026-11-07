@@ -124,6 +124,8 @@
   // A meeting link: the one a sync found, or any https address pasted into the title.
   function meetingLink(evt) {
     if (evt.meetLink) return evt.meetLink;
+    // Anyone can send an invite, so an address in a synced title is only words.
+    if (evt.isGoogleEvent) return null;
     var match = typeof evt.title === 'string' && evt.title.match(/https:\/\/[^\s<>"']+/);
     return match ? match[0] : null;
   }

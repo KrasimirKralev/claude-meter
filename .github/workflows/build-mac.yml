@@ -17,14 +17,20 @@ on:
       - '.gitignore'
   workflow_dispatch:
 
+# Building runs every dependency's install script, so it gets no write access. Publishing runs nothing of
+# the project's, so it can safely hold the one token that can change a release.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-mac:
     runs-on: macos-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -54,13 +60,25 @@ jobs:
           name: claude-meter-macos
           path: dist/*.dmg
 
-      # A pull request proves the build. Only main publishes one.
+  # A pull request proves the build. Only main publishes one.
+  publish:
+    needs: build-mac
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the DMGs
+        uses: actions/download-artifact@v4
+        with:
+          name: claude-meter-macos
+          path: dist
+
       - name: Publish GitHub Release
-        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.v.outputs.version }}
-          name: Claude Meter for macOS v${{ steps.v.outputs.version }}
+          tag_name: v${{ needs.build-mac.outputs.version }}
+          name: Claude Meter for macOS v${{ needs.build-mac.outputs.version }}
           make_latest: true
           files: dist/*.dmg
           body: |

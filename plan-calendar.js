@@ -27,7 +27,13 @@
       select.appendChild(node);
     });
     select.value = value === null || value === undefined ? '' : String(value);
-    if (select.selectedIndex < 0) select.selectedIndex = 0;
+    // A value from elsewhere that isn't on the list stays, or saving would quietly change it.
+    if (select.selectedIndex < 0) {
+      var own = el('option', null, label === 'Length' ? L.durationText(value) : L.reminderText(value));
+      own.value = String(value);
+      select.appendChild(own);
+      select.value = own.value;
+    }
     return select;
   }
 
@@ -87,7 +93,10 @@
       var day = L.parseDay(date);
       viewYear = day.getFullYear();
       viewMonth = day.getMonth();
-      if (editing === 'new') editing = null;
+      if (editing === 'new') {
+        editing = null;
+        renderForm();
+      }
       render();
     }
 

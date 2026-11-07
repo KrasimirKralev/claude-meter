@@ -109,6 +109,11 @@ window.meetingPopupAPI.onData(function(data) {
   var joinBtn = document.getElementById('joinBtn');
   if (data.meetLink) {
     joinBtn.hidden = false;
+    // The button says where it goes, because a calendar invite can come from anyone.
+    var host = '';
+    try { host = new URL(data.meetLink).hostname.replace(/^www\./, ''); } catch (error) { host = ''; }
+    joinBtn.lastChild.nodeValue = host ? 'Join ' + host : 'Join';
+    joinBtn.title = data.meetLink;
     // One primary action: with a link, joining is the one he reaches for.
     okBtn.classList.remove('primary');
     joinBtn.onclick = function() {

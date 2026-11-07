@@ -429,7 +429,7 @@ var pendingWidgetUpdate = null;
 window.electronAPI.onUpdateAvailable(function(data) {
   pendingWidgetUpdate = data;
   var btn = document.getElementById('updateBtn');
-  btn.textContent = 'Update v' + data.latestVersion;
+  btn.textContent = (data.downloadUrl ? 'Update v' : 'Get v') + data.latestVersion;
   btn.classList.add('visible');
   reportMinHeight();
 });
@@ -444,11 +444,9 @@ document.getElementById('updateBtn').addEventListener('click', function() {
   if (!pendingWidgetUpdate) return;
   var btn = document.getElementById('updateBtn');
 
+  // This system has no installer in the release, so the release page is the way to it.
   if (!pendingWidgetUpdate.downloadUrl) {
-    btn.textContent = 'No installer found';
-    setTimeout(function() {
-      btn.textContent = 'Update v' + pendingWidgetUpdate.latestVersion;
-    }, 3000);
+    if (pendingWidgetUpdate.url) window.electronAPI.openExternalUrl(pendingWidgetUpdate.url);
     return;
   }
 
@@ -461,7 +459,6 @@ document.getElementById('updateBtn').addEventListener('click', function() {
       btn.textContent = 'Installing...';
       btn.classList.remove('downloading');
       btn.style.backgroundSize = '';
-      btn.style.background = 'linear-gradient(90deg, #6366f1, #a855f7, #ec4899)';
     } else {
       btn.textContent = 'Failed. Try again';
       btn.classList.remove('downloading');
@@ -913,9 +910,7 @@ var tasksLeft = null;
 var nextJoinLink = null;
 
 function eventJoinLink(evt) {
-  if (evt.meetLink) return evt.meetLink;
-  var match = typeof evt.title === 'string' && evt.title.match(/https:\/\/[^\s<>"']+/);
-  return match ? match[0] : null;
+  return PlanLib.meetingLink(evt);
 }
 
 function renderToday() {
