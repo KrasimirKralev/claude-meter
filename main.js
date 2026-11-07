@@ -13,6 +13,7 @@ const {
   shell,
   clipboard,
   Notification,
+  session,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -6243,7 +6244,7 @@ app.whenReady().then(() => {
   };
 
   mapsFeature = createMapsFeature({
-    BrowserWindow, dialog, ipcMain, isLocalSender,
+    BrowserWindow, dialog, ipcMain, session, isLocalSender,
     dataDir: CLAUDE_DIR,
     clampBounds: clampToWorkArea,
     trackWindow: enableLinuxWindowEvents,

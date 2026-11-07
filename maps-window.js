@@ -3,8 +3,8 @@
 // while that window is open, so a closed window costs no memory.
 
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
-const http = require('http');
 const os = require('os');
 const path = require('path');
 const {
@@ -17,39 +17,20 @@ const {
   serverEntry,
 } = require('./maps-lib');
 
-const HEALTH_TIMEOUT_MS = 500;
 const START_TIMEOUT_MS = 8000;
-const START_POLL_MS = 40;
 const DEFAULT_BOUNDS = { x: 120, y: 80, width: 1280, height: 800 };
+// Maps get their own storage, and the only requests that carry the server's secret come from here.
+const PARTITION = 'persist:maps';
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Only Balonche's own health answer counts: anything else on this port is some other program.
-const serverIsHealthy = () => new Promise((resolve) => {
-  const request = http.get(`${MAPS_ORIGIN}/api/health`, { timeout: HEALTH_TIMEOUT_MS }, (response) => {
-    let body = '';
-    response.setEncoding('utf8');
-    response.on('data', (chunk) => { body += chunk; });
-    response.on('end', () => {
-      try {
-        const parsed = JSON.parse(body);
-        resolve(response.statusCode === 200 && parsed.ok === true && 'provider' in parsed);
-      } catch {
-        resolve(false);
-      }
-    });
-  });
-  request.on('timeout', () => { request.destroy(); resolve(false); });
-  request.on('error', () => resolve(false));
-});
-
-function createMapsFeature({ BrowserWindow, dialog, ipcMain, isLocalSender, dataDir, clampBounds, trackWindow, iconPath, getTargets }) {
+function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSender, dataDir, clampBounds, trackWindow, iconPath, getTargets }) {
   const entry = serverEntry(__dirname, fs.existsSync);
   const listFile = path.join(dataDir, 'usage-widget-maps.json');
   const boundsFile = path.join(dataDir, 'usage-widget-maps-bounds.json');
 
   let mapsWin = null;
   let server = null;
+  let serverExit = Promise.resolve();
+  let serverToken = '';
   let starting = null;
   let boundsTimer = null;
   let pending = null;
@@ -89,40 +70,71 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, isLocalSender, data
     }
   };
 
+  // Ready means our own child says it holds the port. Asking the port itself would prove nothing:
+  // any local program could be listening there and answer, and that page would then get the window.
   const launchServer = async () => {
-    if (await serverIsHealthy()) return;
+    await serverExit; // a server stopped a moment ago may still hold the port
+    serverToken = crypto.randomBytes(32).toString('hex');
     const child = spawn(process.execPath, [entry], {
-      env: childEnv(process.env, os.homedir()),
+      env: { ...childEnv(process.env, os.homedir()), BALONCHE_TOKEN: serverToken },
       cwd: path.dirname(entry),
-      // The IPC channel makes the server exit when this app dies, even from SIGKILL.
+      // The IPC channel carries the ready message, and it closes when this app dies, even from
+      // SIGKILL, which makes the server exit too.
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     server = child;
     const log = (chunk) => console.log(`[maps] ${String(chunk).trimEnd()}`);
     child.stdout.on('data', log);
     child.stderr.on('data', log);
-    let exited = false;
-    child.on('error', (error) => {
-      exited = true;
-      console.error('[maps] the server could not start:', error.message);
+    serverExit = new Promise((resolve) => {
+      child.once('exit', resolve);
+      child.once('error', resolve);
     });
-    child.on('exit', () => {
-      exited = true;
-      if (server === child) server = null;
+    await new Promise((resolve, reject) => {
+      const fail = () => reject(new Error(`Port ${MAPS_PORT} may be in use by another program.`));
+      const timer = setTimeout(fail, START_TIMEOUT_MS);
+      child.on('message', (message) => {
+        if (message && message.type === 'listening') {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      child.once('error', (error) => {
+        clearTimeout(timer);
+        console.error('[maps] the server could not start:', error.message);
+        fail();
+      });
+      child.once('exit', () => {
+        clearTimeout(timer);
+        if (server === child) server = null;
+        fail();
+      });
+    }).catch((error) => {
+      if (server === child) stopServer();
+      throw error;
     });
-    const deadline = Date.now() + START_TIMEOUT_MS;
-    while (!exited && Date.now() < deadline) {
-      if (await serverIsHealthy()) return;
-      await delay(START_POLL_MS);
-    }
-    if (server === child) stopServer();
-    throw new Error(`Port ${MAPS_PORT} may be in use by another program.`);
   };
 
   const startServer = () => {
+    if (server && !starting) return Promise.resolve();
     starting = starting || launchServer().finally(() => { starting = null; });
     return starting;
   };
+
+  // The page never sees the secret, so nothing it loads could leak it. It is added on the way out.
+  const prepareSession = (() => {
+    let prepared = false;
+    return () => {
+      if (prepared) return;
+      prepared = true;
+      session.fromPartition(PARTITION).webRequest.onBeforeSendHeaders(
+        { urls: [`${MAPS_ORIGIN}/api/*`] },
+        (details, callback) => {
+          callback({ requestHeaders: { ...details.requestHeaders, 'X-Balonche-Token': serverToken } });
+        },
+      );
+    };
+  })();
 
   const loadBounds = () => {
     try {
@@ -149,9 +161,9 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, isLocalSender, data
   };
 
   const createWindow = () => {
-    const bounds = loadBounds();
+    prepareSession();
     const created = new BrowserWindow({
-      ...bounds,
+      ...loadBounds(),
       minWidth: 720,
       minHeight: 480,
       title: 'Balonche',
@@ -161,6 +173,7 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, isLocalSender, data
       icon: iconPath,
       webPreferences: {
         preload: path.join(__dirname, 'maps-preload.js'),
+        partition: PARTITION,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
