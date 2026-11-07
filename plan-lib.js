@@ -128,6 +128,13 @@
     return match ? match[0] : null;
   }
 
+  // The title to show. A pasted meeting link becomes the Join button, so it needn't show twice.
+  function eventTitle(evt) {
+    var title = String(evt.title || '');
+    var without = title.replace(/https:\/\/[^\s<>"']+/g, ' ').replace(/\s+/g, ' ').trim();
+    return without || title;
+  }
+
   // "Design review 3pm 1h" into a title, a time and a duration.
   function parseQuickAdd(input) {
     var title = input;
@@ -253,6 +260,7 @@
     dueInfo: dueInfo,
     durationText: durationText,
     eventColor: eventColor,
+    eventTitle: eventTitle,
     eventsOn: eventsOn,
     habitDays: habitDays,
     habitStreak: habitStreak,

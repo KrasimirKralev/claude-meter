@@ -33,11 +33,17 @@ function getMeterClass(meter) {
   return getBarClass(meter.pct);
 }
 
+// The first theme message comes as the page finishes loading, so this can't wait for anything.
+window.dashboardAPI.onThemeUpdate(function(theme) {
+  UI.applyTheme(theme);
+  if (typeof currentTab !== 'undefined' && currentTab === 'history') drawChart();
+});
+
 // --- Navigation: four sections, each with its own tabs ---
 
 var SECTIONS = [
   { id: 'usage', title: 'Usage', tabs: [['overview', 'Overview'], ['history', 'History'], ['alerts', 'Alerts'], ['status', 'Status']] },
-  { id: 'plan', title: 'Plan', tabs: [['calendar', 'Calendar'], ['tasks', 'Tasks'], ['habits', 'Habits']], notes: true },
+  { id: 'plan', title: 'Plan', tabs: [['calendar', 'Calendar'], ['tasks', 'Tasks'], ['habits', 'Habits'], ['notes', 'Notes']] },
   { id: 'maps', title: 'Maps', tabs: [['maps', 'Maps']] },
   { id: 'settings', title: 'Settings', tabs: [['settings', 'Settings']] },
 ];
@@ -67,24 +73,21 @@ function renderSectionTabs(section, tab) {
     button.addEventListener('click', function() { showTab(entry[0]); });
     holder.appendChild(button);
   });
-  if (section.notes) {
-    var notes = el('button', '', 'Notes');
-    notes.addEventListener('click', function() { window.dashboardAPI.openNotes(); });
-    holder.appendChild(notes);
-  }
 }
 
 function afterTabShown(tab) {
   if (tab === 'overview') renderOverview();
   // Redraw chart and fix pill slider when history tab becomes visible
   if (tab === 'history') {
-    requestAnimationFrame(function() { updateSlider(); });
     drawChart();
     renderAnalytics();
   }
   if (tab === 'calendar') renderCalendar();
   if (tab === 'habits') renderHabits();
-  if (tab === 'maps') window.dashboardAPI.showMaps(mapsHostBounds());
+  if (tab === 'maps') window.dashboardAPI.showMaps(hostBounds('mapsHost'));
+  if (tab === 'notes') window.dashboardAPI.showNotes(hostBounds('notesHost'));
+  if (tab === 'alerts') renderAlerts();
+  if (tab === 'settings') renderSettingsAccounts();
   if (tab === 'status') {
     if (!claudeStatusData) {
       window.dashboardAPI.getClaudeStatus().then(function(data) {
@@ -100,9 +103,10 @@ function showTab(requested) {
   var section = sectionOfTab(tab);
   if (!section) return;
   if (currentTab === 'maps' && tab !== 'maps') window.dashboardAPI.hideMaps();
+  if (currentTab === 'notes' && tab !== 'notes') window.dashboardAPI.hideNotes();
   currentTab = tab;
   lastTabOf[section.id] = tab;
-  document.querySelector('.main').classList.toggle('flush', tab === 'maps');
+  document.querySelector('.main').classList.toggle('flush', tab === 'maps' || tab === 'notes');
   var panels = document.querySelectorAll('.tab-content');
   for (var i = 0; i < panels.length; i++) {
     panels[i].classList.toggle('active', panels[i].id === 'tab-' + tab);
@@ -438,9 +442,9 @@ function renderMaps() {
   mapsState.maps.slice(0, 2).forEach(function(map) { overview.appendChild(mapButton(map)); });
 }
 
-// The map page lies over #mapsHost in its own view, so main needs to know where that box is.
-function mapsHostBounds() {
-  var box = document.getElementById('mapsHost').getBoundingClientRect();
+// The map and notes pages lie over these boxes in their own views, so main needs to know where they are.
+function hostBounds(id) {
+  var box = document.getElementById(id).getBoundingClientRect();
   return { x: box.left, y: box.top, width: box.width, height: box.height };
 }
 
@@ -453,11 +457,14 @@ function renderMapsStatus(status) {
 }
 
 new ResizeObserver(function() {
-  if (currentTab === 'maps') window.dashboardAPI.placeMaps(mapsHostBounds());
+  if (currentTab === 'maps') window.dashboardAPI.placeMaps(hostBounds('mapsHost'));
 }).observe(document.getElementById('mapsHost'));
+new ResizeObserver(function() {
+  if (currentTab === 'notes') window.dashboardAPI.placeNotes(hostBounds('notesHost'));
+}).observe(document.getElementById('notesHost'));
 window.dashboardAPI.onMapsStatus(renderMapsStatus);
 document.getElementById('mapsRetry').addEventListener('click', function() {
-  window.dashboardAPI.showMaps(mapsHostBounds());
+  window.dashboardAPI.showMaps(hostBounds('mapsHost'));
 });
 
 function takeMapsState(state) {
@@ -512,15 +519,21 @@ function getPlannerStatus(pct, hoursToLimit, remainingHours) {
 }
 
 function getPlannerStatusLabel(status) {
-  if (status === 'at-risk') return 'At Risk';
+  if (status === 'at-risk') return 'At risk';
   if (status === 'watch') return 'Watch';
-  return 'On Track';
+  return 'On track';
 }
 
 function getStatDotColor(pct) {
   if (pct >= 85) return 'var(--red)';
   if (pct >= 60) return 'var(--yellow)';
   return 'var(--green)';
+}
+
+function plannerBadge(status, text) {
+  var header = el('div', 'planner-header');
+  header.appendChild(el('div', 'planner-badge ' + status, text));
+  return header;
 }
 
 function renderPlanner() {
@@ -533,12 +546,7 @@ function renderPlanner() {
   }
   if (!usageData.session) {
     // The plan reports no 5-hour window (Ultra): nothing to pace within it.
-    var headerNs = el('div', 'planner-header');
-    var badgeNs = el('div', 'planner-badge on-track');
-    badgeNs.appendChild(el('span', 'planner-badge-dot'));
-    badgeNs.appendChild(document.createTextNode('No session limit'));
-    headerNs.appendChild(badgeNs);
-    container.appendChild(headerNs);
+    container.appendChild(plannerBadge('on-track', 'No session limit'));
     container.appendChild(el('div', 'planner-recommendation',
       'This plan has no 5-hour session limit. Only the weekly limits apply.'));
     return;
@@ -549,12 +557,7 @@ function renderPlanner() {
 
   if (pct === 0) {
     // Simple state — show badge + message
-    var header0 = el('div', 'planner-header');
-    var badge0 = el('div', 'planner-badge on-track');
-    badge0.appendChild(el('span', 'planner-badge-dot'));
-    badge0.appendChild(document.createTextNode('On Track'));
-    header0.appendChild(badge0);
-    container.appendChild(header0);
+    container.appendChild(plannerBadge('on-track', 'On track'));
     container.appendChild(el('div', 'planner-recommendation', 'No session usage yet. You have a full 5-hour window available.'));
     return;
   }
@@ -564,12 +567,7 @@ function renderPlanner() {
   var remainingMs = resetTime > 0 ? resetTime - now : 0;
 
   if (resetsAt && remainingMs <= 0) {
-    var header1 = el('div', 'planner-header');
-    var badge1 = el('div', 'planner-badge on-track');
-    badge1.appendChild(el('span', 'planner-badge-dot'));
-    badge1.appendChild(document.createTextNode('On Track'));
-    header1.appendChild(badge1);
-    container.appendChild(header1);
+    container.appendChild(plannerBadge('on-track', 'On track'));
     container.appendChild(el('div', 'planner-recommendation', 'Session is resetting now.'));
     return;
   }
@@ -586,12 +584,7 @@ function renderPlanner() {
   var status = getPlannerStatus(pct, hoursToLimit, remainingHoursDecimal);
 
   // Header with badge
-  var header = el('div', 'planner-header');
-  var badge = el('div', 'planner-badge ' + status);
-  badge.appendChild(el('span', 'planner-badge-dot'));
-  badge.appendChild(document.createTextNode(getPlannerStatusLabel(status)));
-  header.appendChild(badge);
-  container.appendChild(header);
+  container.appendChild(plannerBadge(status, getPlannerStatusLabel(status)));
 
   // Stat grid
   var stats = el('div', 'planner-stats');
@@ -609,7 +602,7 @@ function renderPlanner() {
 
   // Stat 2: Burn rate
   var stat2 = el('div', 'planner-stat');
-  stat2.appendChild(el('div', 'planner-stat-label', 'Burn Rate'));
+  stat2.appendChild(el('div', 'planner-stat-label', 'Burn rate'));
   var val2 = el('div', 'planner-stat-value');
   val2.appendChild(document.createTextNode('~' + ratePerHour.toFixed(1) + '%/hr'));
   stat2.appendChild(val2);
@@ -617,15 +610,14 @@ function renderPlanner() {
 
   // Stat 3: Time to limit
   var stat3 = el('div', 'planner-stat');
-  stat3.appendChild(el('div', 'planner-stat-label', 'Time to Limit'));
+  stat3.appendChild(el('div', 'planner-stat-label', 'Time to limit'));
   var val3 = el('div', 'planner-stat-value');
   if (hoursToLimit !== null && hoursToLimit < remainingHoursDecimal) {
     var limitH = Math.floor(hoursToLimit);
     var limitM = Math.round((hoursToLimit - limitH) * 60);
-    val3.style.color = 'var(--red)';
+    val3.classList.add('bad');
     val3.appendChild(document.createTextNode(limitH + 'h ' + limitM + 'm'));
   } else {
-    val3.style.color = 'var(--green)';
     val3.appendChild(document.createTextNode('Safe'));
   }
   stat3.appendChild(val3);
@@ -638,7 +630,7 @@ function renderPlanner() {
   if (hoursToLimit !== null && hoursToLimit < remainingHoursDecimal) {
     var lH = Math.floor(hoursToLimit);
     var lM = Math.round((hoursToLimit - lH) * 60);
-    rec.textContent = 'Slow down \u2014 limit in ' + lH + 'h ' + lM + 'm. ';
+    rec.textContent = 'Slow down: the limit is ' + lH + 'h ' + lM + 'm away. ';
     if (remainingMs > 0) {
       var rH = Math.floor(remainingMs / 3600000);
       var rM = Math.floor((remainingMs % 3600000) / 60000);
@@ -867,167 +859,102 @@ function drawChart() {
 }
 
 // Pill slider position — hoisted to module scope so tab-switch handler can call it
-function updateSlider() {
-  var pillBtns = document.querySelectorAll('.pill-btn');
-  var slider = document.getElementById('pillSlider');
-  if (!slider || pillBtns.length === 0) return;
-  var activeBtn = null;
-  for (var i = 0; i < pillBtns.length; i++) {
-    if (pillBtns[i].classList.contains('active')) {
-      activeBtn = pillBtns[i];
-      break;
-    }
+(function() {
+  var buttons = document.querySelectorAll('.pill-btn');
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].addEventListener('click', function() {
+      for (var j = 0; j < buttons.length; j++) {
+        buttons[j].classList.toggle('active', buttons[j] === this);
+        buttons[j].setAttribute('aria-pressed', buttons[j] === this ? 'true' : 'false');
+      }
+      chartDays = parseInt(this.getAttribute('data-days'), 10);
+      drawChart();
+    });
   }
-  if (activeBtn) {
-    slider.style.left = activeBtn.offsetLeft + 'px';
-    slider.style.width = activeBtn.offsetWidth + 'px';
-  }
-}
-
-// Pill toggle controls
-function initPillToggle() {
-  var pillBtns = document.querySelectorAll('.pill-btn');
-  var slider = document.getElementById('pillSlider');
-  if (!slider || pillBtns.length === 0) return;
-
-  for (var i = 0; i < pillBtns.length; i++) {
-    (function(btn) {
-      btn.addEventListener('click', function() {
-        for (var j = 0; j < pillBtns.length; j++) {
-          pillBtns[j].classList.remove('active');
-        }
-        btn.classList.add('active');
-        chartDays = parseInt(btn.getAttribute('data-days'), 10);
-        updateSlider();
-        drawChart();
-      });
-    })(pillBtns[i]);
-  }
-
-  // Initial slider position (defer to next frame so layout is ready)
-  requestAnimationFrame(updateSlider);
-}
-initPillToggle();
+})();
 
 // --- Alerts ---
 
-function renderAlerts() {
-  var container = document.getElementById('alertRows');
-  while (container.firstChild) container.removeChild(container.firstChild);
+var ALERT_PRESETS = [
+  { label: 'Relaxed', session: 60, weekAll: 60, weekSonnet: 60 },
+  { label: 'Standard', session: 80, weekAll: 90, weekSonnet: 90 },
+  { label: 'Late', session: 95, weekAll: 95, weekSonnet: 95 },
+];
 
-  var presets = [
-    { icon: '\uD83D\uDEE1', label: 'Relaxed', session: 60, weekAll: 60, weekSonnet: 60 },
-    { icon: '\u2696', label: 'Standard', session: 80, weekAll: 90, weekSonnet: 90 },
-    { icon: '\u26A1', label: 'Aggressive', session: 95, weekAll: 95, weekSonnet: 95 },
-  ];
-
-  function isPresetActive(preset) {
-    return alertThresholds.session === preset.session
-      && alertThresholds.weekAll === preset.weekAll
-      && alertThresholds.weekSonnet === preset.weekSonnet;
-  }
-
-  var presetsRow = el('div', 'alert-presets');
-  for (var p = 0; p < presets.length; p++) {
-    (function(preset) {
-      var chip = el('button', 'preset-chip');
-      var iconSpan = el('span', 'preset-icon', preset.icon);
-      chip.appendChild(iconSpan);
-      chip.appendChild(document.createTextNode(preset.label));
-      if (isPresetActive(preset)) chip.classList.add('active');
-      chip.addEventListener('click', function() {
-        alertThresholds.session = preset.session;
-        alertThresholds.weekAll = preset.weekAll;
-        alertThresholds.weekSonnet = preset.weekSonnet;
-        saveAlertThresholds();
-        renderAlerts();
-      });
-      presetsRow.appendChild(chip);
-    })(presets[p]);
-  }
-  container.appendChild(presetsRow);
-
-  var alerts = [
-    { key: 'session', label: 'Session' },
-    { key: 'weekAll', label: 'Weekly (all)' },
-    { key: 'weekSonnet', label: 'Weekly (Fable)' },
-  ];
-
-  for (var i = 0; i < alerts.length; i++) {
-    (function(alert) {
-      var row = el('div', 'alert-row');
-      var header = el('div', 'alert-row-header');
-      header.appendChild(el('div', 'alert-label', alert.label));
-      var valueEl = el('div', 'alert-value', alertThresholds[alert.key] + '%');
-      header.appendChild(valueEl);
-      row.appendChild(header);
-
-      // Slider
-      var track = el('div', 'alert-slider-track');
-      var fill = el('div', 'alert-slider-fill');
-      var thumb = el('div', 'alert-slider-thumb');
-      var pct = alertThresholds[alert.key];
-      fill.style.width = pct + '%';
-      thumb.style.left = pct + '%';
-      track.appendChild(fill);
-      track.appendChild(thumb);
-
-      function updateFromX(clientX) {
-        var rect = track.getBoundingClientRect();
-        var raw = (clientX - rect.left) / rect.width;
-        var val = Math.round(Math.min(100, Math.max(5, raw * 100)) / 5) * 5;
-        alertThresholds[alert.key] = val;
-        fill.style.width = val + '%';
-        thumb.style.left = val + '%';
-        valueEl.textContent = val + '%';
-      }
-
-      track.addEventListener('mousedown', function(e) {
-        e.preventDefault();
-        updateFromX(e.clientX);
-        function onMove(ev) { updateFromX(ev.clientX); }
-        function onUp() {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          saveAlertThresholds();
-          updatePresetHighlights();
-        }
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-
-      row.appendChild(track);
-
-      // Tick marks
-      var ticks = el('div', 'alert-ticks');
-      var tickValues = [0, 25, 50, 75, 100];
-      for (var t = 0; t < tickValues.length; t++) {
-        ticks.appendChild(el('span', 'alert-tick', tickValues[t] + '%'));
-      }
-      row.appendChild(ticks);
-
-      container.appendChild(row);
-    })(alerts[i]);
-  }
+function presetIsActive(preset) {
+  return alertThresholds.session === preset.session
+    && alertThresholds.weekAll === preset.weekAll
+    && alertThresholds.weekSonnet === preset.weekSonnet;
 }
 
 function updatePresetHighlights() {
-  var presets = [
-    { session: 60, weekAll: 60, weekSonnet: 60 },
-    { session: 80, weekAll: 90, weekSonnet: 90 },
-    { session: 95, weekAll: 95, weekSonnet: 95 },
-  ];
-  var chips = document.querySelectorAll('.preset-chip');
+  var chips = document.querySelectorAll('.alert-presets button');
   for (var i = 0; i < chips.length; i++) {
-    if (i < presets.length) {
-      var p = presets[i];
-      var match = alertThresholds.session === p.session
-        && alertThresholds.weekAll === p.weekAll
-        && alertThresholds.weekSonnet === p.weekSonnet;
-      if (match) chips[i].classList.add('active');
-      else chips[i].classList.remove('active');
-    }
+    var on = presetIsActive(ALERT_PRESETS[i]);
+    chips[i].classList.toggle('active', on);
+    chips[i].setAttribute('aria-pressed', on ? 'true' : 'false');
   }
+}
+
+function alertRow(key, label) {
+  var row = el('div', 'alert-row');
+  var labelEl = el('label', 'alert-label', label);
+  labelEl.htmlFor = 'alert-' + key;
+  row.appendChild(labelEl);
+  var range = document.createElement('input');
+  range.type = 'range';
+  range.className = 'alert-range';
+  range.id = 'alert-' + key;
+  range.min = '5';
+  range.max = '100';
+  range.step = '5';
+  range.value = String(alertThresholds[key]);
+  var value = el('div', 'alert-value', alertThresholds[key] + '%');
+  var paint = function() {
+    range.style.setProperty('--pct', ((Number(range.value) - 5) / 95 * 100) + '%');
+    value.textContent = range.value + '%';
+  };
+  paint();
+  range.addEventListener('input', function() {
+    alertThresholds[key] = Number(range.value);
+    paint();
+    updatePresetHighlights();
+  });
+  range.addEventListener('change', saveAlertThresholds);
+  row.appendChild(range);
+  row.appendChild(value);
+  return row;
+}
+
+function renderAlerts() {
+  var container = document.getElementById('alertRows');
+  UI.clear(container);
+
+  var presets = el('div', 'seg alert-presets');
+  presets.setAttribute('role', 'group');
+  presets.setAttribute('aria-label', 'Presets');
+  ALERT_PRESETS.forEach(function(preset) {
+    var chip = el('button', null, preset.label);
+    chip.type = 'button';
+    chip.addEventListener('click', function() {
+      alertThresholds.session = preset.session;
+      alertThresholds.weekAll = preset.weekAll;
+      alertThresholds.weekSonnet = preset.weekSonnet;
+      saveAlertThresholds();
+      renderAlerts();
+    });
+    presets.appendChild(chip);
+  });
+  container.appendChild(presets);
+
+  var card = el('div', 'alert-card card raised');
+  // A plan with no session limit has no use for that level. It stays saved for one that does.
+  if (!planLacksMeter('session')) card.appendChild(alertRow('session', 'Session'));
+  card.appendChild(alertRow('weekAll', 'Weekly, all models'));
+  var scoped = usageData && usageData.weekSonnet && usageData.weekSonnet.model;
+  card.appendChild(alertRow('weekSonnet', 'Weekly, ' + (scoped || 'one model')));
+  container.appendChild(card);
+  updatePresetHighlights();
 }
 
 function saveAlertThresholds() {
@@ -1103,7 +1030,7 @@ function renderAnalytics() {
   while (container.firstChild) container.removeChild(container.firstChild);
 
   if (!historyData || historyData.length < 2) {
-    container.appendChild(el('div', 'setting-value', 'Not enough data yet. Usage history builds over time.'));
+    container.appendChild(el('p', 'page-note', 'Not enough data yet. Usage history builds over time.'));
     return;
   }
 
@@ -1160,472 +1087,341 @@ function renderAnalytics() {
     if (avg > peakHourAvg) { peakHourAvg = avg; peakHour = hh; }
   }
 
-  // Stats cards
-  var grid = el('div');
-  grid.style.cssText = 'display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px;';
-
-  function statCard(label, value, sub) {
-    var card = el('div');
-    card.style.cssText = 'padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;';
-    var valEl = el('div');
-    valEl.style.cssText = 'font-size:24px;font-weight:700;color:var(--ink);font-family:"JetBrains Mono",monospace;';
-    valEl.textContent = value;
-    card.appendChild(valEl);
-    var labelEl = el('div');
-    labelEl.style.cssText = 'font-size:11px;color:var(--text-dim);margin-top:4px;';
-    labelEl.textContent = label;
-    card.appendChild(labelEl);
-    if (sub) {
-      var subEl = el('div');
-      subEl.style.cssText = 'font-size:9px;color:var(--text-dim);margin-top:2px;';
-      subEl.textContent = sub;
-      card.appendChild(subEl);
-    }
-    return card;
+  var grid = el('div', 'stat-grid card');
+  function stat(value, label, sub) {
+    var box = el('div', 'stat');
+    box.appendChild(el('b', null, String(value)));
+    box.appendChild(el('span', null, label));
+    box.appendChild(el('small', null, sub));
+    grid.appendChild(box);
   }
-
-  grid.appendChild(statCard('Avg ' + statName + ' (7d)', avgSession7 + '%', 'Average ' + statName.toLowerCase() + ' utilization'));
-  grid.appendChild(statCard('Peak ' + statName, peakSession + '%', 'All-time highest'));
-  grid.appendChild(statCard('Peak Hour', peakHour + ':00', Math.round(peakHourAvg) + '% avg ' + statName.toLowerCase() + ' at this hour'));
-  grid.appendChild(statCard('Limit Days', limitDays.size, 'Days ' + statName.toLowerCase() + ' hit \u226595%'));
-  grid.appendChild(statCard('Data Points', historyData.length, last30.length + ' in last 30 days'));
-  grid.appendChild(statCard('Streak', (typeof streakData !== 'undefined' && streakData.current) || 0, 'Consecutive task-complete days'));
-
+  var lower = statName.toLowerCase();
+  stat(avgSession7 + '%', 'Average, ' + lower, 'Last 7 days');
+  stat(peakSession + '%', 'Highest, ' + lower, 'All the history here');
+  stat(peakHour + ':00', 'Busiest hour', Math.round(peakHourAvg) + '% on average at this hour');
+  stat(limitDays.size, 'Days at the limit', 'Days ' + lower + ' reached 95%');
+  stat(historyData.length, 'Readings', last30.length + ' in the last 30 days');
+  stat(streakData.current || 0, 'Task streak', 'Days in a row with a task done');
   container.appendChild(grid);
 
-  // Hourly usage heatmap
-  var heatTitle = el('div');
-  heatTitle.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;';
-  heatTitle.textContent = 'Usage by Hour';
-  container.appendChild(heatTitle);
-
-  var heatGrid = el('div');
-  heatGrid.style.cssText = 'display:flex;gap:2px;height:40px;align-items:flex-end;';
+  var hours = el('div', 'hours card');
+  hours.appendChild(el('h3', null, 'Usage by hour'));
+  var bars = el('div', 'hour-bars');
   var maxAvg = 1;
   for (var ha = 0; ha < 24; ha++) {
     var a = hourCounts[ha] > 0 ? hourBuckets[ha] / hourCounts[ha] : 0;
     if (a > maxAvg) maxAvg = a;
   }
   for (var hb = 0; hb < 24; hb++) {
-    var bar = el('div');
-    var pct = hourCounts[hb] > 0 ? (hourBuckets[hb] / hourCounts[hb]) / maxAvg * 100 : 0;
-    var color = pct > 75 ? '#f87171' : (pct > 50 ? '#fb923c' : (pct > 25 ? '#facc15' : '#4ade80'));
-    bar.style.cssText = 'flex:1;border-radius:2px 2px 0 0;min-height:2px;background:' + color + ';height:' + Math.max(2, pct) + '%;';
-    bar.title = hb + ':00 - ' + Math.round(hourCounts[hb] > 0 ? hourBuckets[hb] / hourCounts[hb] : 0) + '% avg';
-    heatGrid.appendChild(bar);
+    var average = hourCounts[hb] > 0 ? hourBuckets[hb] / hourCounts[hb] : 0;
+    var pct = average / maxAvg * 100;
+    var bar = el('i', pct > 75 ? 'hot' : (pct > 50 ? 'warm' : null));
+    bar.style.height = Math.max(4, pct) + '%';
+    bar.title = hb + ':00, ' + Math.round(average) + '% on average';
+    bars.appendChild(bar);
   }
-  container.appendChild(heatGrid);
-
-  var hourLabels = el('div');
-  hourLabels.style.cssText = 'display:flex;gap:2px;font-size:7px;color:var(--text-dim);margin-top:2px;';
-  for (var hl = 0; hl < 24; hl += 3) {
-    var lbl = el('span');
-    lbl.style.cssText = 'flex:3;text-align:center;';
-    lbl.textContent = hl + 'h';
-    hourLabels.appendChild(lbl);
-  }
-  container.appendChild(hourLabels);
+  hours.appendChild(bars);
+  var labels = el('div', 'hour-labels');
+  for (var hl = 0; hl < 24; hl += 3) labels.appendChild(el('span', null, hl + ':00'));
+  hours.appendChild(labels);
+  container.appendChild(hours);
 }
 
-// Render analytics on tab click
 var streakData = {};
+window.dashboardAPI.getStreak().then(function(data) { streakData = data || {}; });
 
-function renderSettings() {
-  var container = document.getElementById('settingRows');
-  while (container.firstChild) container.removeChild(container.firstChild);
+var THEME_CHOICES = [
+  ['brutal', 'Brutal', '#f0ede4', '#ff90e8'],
+  ['karchx', 'Karchx', '#ece4d6', '#3b2a3a'],
+  ['light', 'Light', '#fafafc', '#b45e35'],
+  ['dark', 'Dark', '#0c0c12', '#d4845a'],
+  ['nord', 'Nord', '#2e3440', '#88c0d0'],
+  ['dracula', 'Dracula', '#282a36', '#bd93f9'],
+];
 
-  // Theme setting
-  var themeRow = el('div', 'setting-row');
-  var themeInfo = el('div', 'setting-info');
-  themeInfo.appendChild(el('div', 'setting-label', 'Theme'));
-  themeInfo.appendChild(el('div', 'setting-value', 'Choose your visual theme'));
-  themeRow.appendChild(themeInfo);
-  var themeSelect = document.createElement('select');
-  themeSelect.style.cssText = 'padding:6px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--text);font-family:inherit;outline:none;';
-  var themeOpts = [['brutal', 'Brutal'], ['karchx', 'Karchx'], ['dark', 'Dark'], ['light', 'Light'], ['nord', 'Nord'], ['dracula', 'Dracula']];
-  for (var ti = 0; ti < themeOpts.length; ti++) {
-    var to = document.createElement('option');
-    to.value = themeOpts[ti][0];
-    to.textContent = themeOpts[ti][1];
-    themeSelect.appendChild(to);
-  }
-  window.dashboardAPI.getTheme().then(function(name) { themeSelect.value = name || 'dark'; });
-  themeSelect.addEventListener('change', function() { window.dashboardAPI.setTheme(themeSelect.value); });
-  themeRow.appendChild(themeSelect);
-  container.appendChild(themeRow);
+function setRow(title, description, control) {
+  var row = el('div', 'set-row');
+  var info = el('div', 'set-info');
+  info.appendChild(el('div', 'set-title', title));
+  var desc = el('div', 'set-desc', description || '');
+  if (description !== null) info.appendChild(desc);
+  row.appendChild(info);
+  if (control) row.appendChild(control);
+  row.desc = desc;
+  return row;
+}
 
-  // Add theme listener for dashboard itself
-  window.dashboardAPI.onThemeUpdate(function(theme) {
-    var root = document.documentElement;
-    root.style.setProperty('--bg', theme.bg);
-    root.style.setProperty('--surface', theme.surface);
-    root.style.setProperty('--surface2', theme.surface2);
-    root.style.setProperty('--border', theme.border);
-    root.style.setProperty('--text', theme.text);
-    root.style.setProperty('--text-dim', theme.textDim);
-    root.style.setProperty('--ink', theme.text);
-    root.style.setProperty('--crit-text', theme.name === 'brutal' ? '#c8232b' : (theme.red || '#e5484d'));
-    root.style.setProperty('--accent', theme.accent);
-    if (theme.green) root.style.setProperty('--green', theme.green);
-    if (theme.red) root.style.setProperty('--red', theme.red);
-    if (theme.yellow) root.style.setProperty('--yellow', theme.yellow);
-    if (theme.barBg) root.style.setProperty('--bar-bg', theme.barBg);
+function setGroup(title, rows) {
+  var group = el('section', 'set-group');
+  group.appendChild(el('h2', null, title));
+  var card = el('div', 'set-card card raised');
+  rows.forEach(function(row) { card.appendChild(row); });
+  group.appendChild(card);
+  return group;
+}
+
+function setDesc(node, text, tone) {
+  node.textContent = text;
+  node.className = 'set-desc' + (tone ? ' ' + tone : '');
+}
+
+function themeRow() {
+  var picker = el('div', 'theme-picker');
+  picker.setAttribute('role', 'group');
+  picker.setAttribute('aria-label', 'Theme');
+  var chips = [];
+  THEME_CHOICES.forEach(function(choice) {
+    var chip = el('button', 'theme-chip');
+    chip.type = 'button';
+    chip.setAttribute('data-theme-name', choice[0]);
+    var swatch = el('i');
+    swatch.style.setProperty('--a', choice[2]);
+    swatch.style.setProperty('--b', choice[3]);
+    chip.appendChild(swatch);
+    chip.appendChild(document.createTextNode(choice[1]));
+    chip.addEventListener('click', function() {
+      window.dashboardAPI.setTheme(choice[0]);
+      mark(choice[0]);
+    });
+    chips.push(chip);
+    picker.appendChild(chip);
   });
+  function mark(name) {
+    chips.forEach(function(chip) {
+      chip.setAttribute('aria-pressed', chip.getAttribute('data-theme-name') === name ? 'true' : 'false');
+    });
+  }
+  window.dashboardAPI.getTheme().then(function(name) { mark(name || 'brutal'); });
+  return setRow('Theme', null, picker);
+}
 
-  // Hotkey setting
-  var hotkeyRow = el('div', 'setting-row');
-  var hotkeyInfo = el('div', 'setting-info');
-  hotkeyInfo.appendChild(el('div', 'setting-label', 'Toggle widget'));
-  hotkeyRow.appendChild(hotkeyInfo);
+function hotkeyRow() {
+  var box = el('div', 'set-actions');
+  var cap = el('span', 'key-cap', currentDisplayHotkey);
+  var change = el('button', 'btn small', 'Change');
+  change.type = 'button';
+  box.appendChild(cap);
+  box.appendChild(change);
+  var row = setRow('Show and hide the widget', 'A shortcut that works from anywhere.', box);
+  var listener = null;
 
-  var hotkeyContainer = el('div', 'hotkey-container');
-  var hotkeyDisplay = el('div', 'hotkey-display', currentDisplayHotkey);
-  var changeBtn = el('button', 'hotkey-change-btn', 'Change');
-  var statusEl = el('div', 'hotkey-status');
+  function stopRecording() {
+    isRecordingHotkey = false;
+    cap.classList.remove('recording');
+    change.textContent = 'Change';
+    if (listener) document.removeEventListener('keydown', listener, true);
+    listener = null;
+  }
 
-  var keydownHandler = null;
-
-  changeBtn.addEventListener('click', function() {
+  change.addEventListener('click', function() {
     if (isRecordingHotkey) {
-      // Cancel
-      isRecordingHotkey = false;
-      hotkeyDisplay.classList.remove('recording');
-      hotkeyDisplay.textContent = currentDisplayHotkey;
-      changeBtn.textContent = 'Change';
-      if (keydownHandler) {
-        document.removeEventListener('keydown', keydownHandler, true);
-        keydownHandler = null;
-      }
+      stopRecording();
+      cap.textContent = currentDisplayHotkey;
       return;
     }
-
     isRecordingHotkey = true;
-    hotkeyDisplay.classList.add('recording');
-    hotkeyDisplay.textContent = 'Press shortcut...';
-    changeBtn.textContent = 'Cancel';
-    statusEl.textContent = '';
-    statusEl.className = 'hotkey-status';
-
-    keydownHandler = function(e) {
+    cap.classList.add('recording');
+    cap.textContent = 'Press keys...';
+    change.textContent = 'Cancel';
+    setDesc(row.desc, 'Press the new shortcut, with Ctrl, Alt or Shift. Esc cancels.');
+    listener = function(e) {
       e.preventDefault();
       e.stopPropagation();
-
       if (e.key === 'Escape') {
-        // Cancel recording
-        isRecordingHotkey = false;
-        hotkeyDisplay.classList.remove('recording');
-        hotkeyDisplay.textContent = currentDisplayHotkey;
-        changeBtn.textContent = 'Change';
-        document.removeEventListener('keydown', keydownHandler, true);
-        keydownHandler = null;
+        stopRecording();
+        cap.textContent = currentDisplayHotkey;
+        setDesc(row.desc, 'A shortcut that works from anywhere.');
         return;
       }
-
       var accelerator = formatElectronAccelerator(e);
-      if (!accelerator) return; // modifier-only press, wait for full combo
-
-      isRecordingHotkey = false;
-      hotkeyDisplay.classList.remove('recording');
-      hotkeyDisplay.textContent = accelerator;
-      changeBtn.textContent = 'Change';
-      document.removeEventListener('keydown', keydownHandler, true);
-      keydownHandler = null;
-
-      // Send to main process
-      statusEl.textContent = 'Registering...';
-      statusEl.className = 'hotkey-status';
-
+      if (!accelerator) return; // modifier-only press, wait for the whole combination
+      stopRecording();
+      cap.textContent = accelerator;
+      setDesc(row.desc, 'Saving...');
       window.dashboardAPI.changeHotkey(accelerator).then(function(result) {
         if (result.success) {
           currentDisplayHotkey = accelerator;
-          statusEl.textContent = 'Hotkey updated!';
-          statusEl.className = 'hotkey-status success';
+          setDesc(row.desc, 'Shortcut changed.', 'ok');
         } else {
-          hotkeyDisplay.textContent = currentDisplayHotkey;
-          statusEl.textContent = result.error || 'Failed to register';
-          statusEl.className = 'hotkey-status error';
+          cap.textContent = currentDisplayHotkey;
+          setDesc(row.desc, result.error || 'That shortcut could not be set.', 'bad');
         }
-        setTimeout(function() {
-          statusEl.textContent = '';
-          statusEl.className = 'hotkey-status';
-        }, 3000);
       });
     };
-
-    document.addEventListener('keydown', keydownHandler, true);
+    document.addEventListener('keydown', listener, true);
   });
+  return row;
+}
 
-  hotkeyContainer.appendChild(hotkeyDisplay);
-  hotkeyContainer.appendChild(changeBtn);
-  hotkeyRow.appendChild(hotkeyContainer);
-  hotkeyRow.appendChild(statusEl);
-  container.appendChild(hotkeyRow);
+function autostartRow() {
+  var toggle = el('label', 'toggle');
+  var input = document.createElement('input');
+  input.type = 'checkbox';
+  input.setAttribute('aria-label', 'Start on login');
+  toggle.appendChild(input);
+  toggle.appendChild(el('span'));
+  window.dashboardAPI.getAutostart().then(function(result) { input.checked = result.enabled; });
+  input.addEventListener('change', function() { window.dashboardAPI.setAutostart(input.checked); });
+  return setRow('Start on login', 'Open the widget when you log in.', toggle);
+}
 
-  // Auto-start setting
-  var autoRow = el('div', 'setting-row');
-  var autoInfo = el('div', 'setting-info');
-  autoInfo.appendChild(el('div', 'setting-label', 'Start on login'));
-  autoInfo.appendChild(el('div', 'setting-value', 'Launch automatically when you log in'));
-  autoRow.appendChild(autoInfo);
-  var toggleWrap = el('label', 'toggle');
-  var toggleInput = document.createElement('input');
-  toggleInput.type = 'checkbox';
-  toggleInput.className = 'toggle-input';
-  var toggleSlider = el('span', 'toggle-slider');
-  toggleWrap.appendChild(toggleInput);
-  toggleWrap.appendChild(toggleSlider);
-  autoRow.appendChild(toggleWrap);
-  container.appendChild(autoRow);
-  // Load current state
-  window.dashboardAPI.getAutostart().then(function(result) {
-    toggleInput.checked = result.enabled;
-  });
-  toggleInput.addEventListener('change', function() {
-    window.dashboardAPI.setAutostart(toggleInput.checked);
-  });
+// One update, whichever button started it: the Settings row and the rail's button both show it.
+var updateRowButton = null;
+var updateRunning = false;
 
-  // Check for updates
-  var updateRow = el('div', 'setting-row');
-  var updateInfo = el('div', 'setting-info');
-  updateInfo.appendChild(el('div', 'setting-label', 'Updates'));
-  var updateMeta = el('div', 'setting-value', 'Current version: v' + currentAppVersion);
-  updateInfo.appendChild(updateMeta);
-  updateRow.appendChild(updateInfo);
-  var updateBtn = el('button', 'update-btn', 'Check for Updates');
-  var updateCheckResult = null;
-  updateBtn.addEventListener('click', function() {
-    // If we already found an update, trigger download
-    if (updateCheckResult && updateCheckResult.hasUpdate) {
-      if (!updateCheckResult.downloadUrl) {
-        updateBtn.textContent = 'No installer found';
-        setTimeout(function() {
-          updateBtn.textContent = 'Update to v' + updateCheckResult.latestVersion;
-        }, 3000);
+function setUpdateButtons(text, disabled) {
+  var rail = document.getElementById('updateNowBtn');
+  rail.textContent = text;
+  rail.disabled = disabled;
+  if (updateRowButton) {
+    updateRowButton.textContent = text;
+    updateRowButton.disabled = disabled;
+  }
+}
+
+function showUpdateFound(result) {
+  pendingUpdate = result;
+  setUpdateButtons('Update to v' + result.latestVersion, false);
+  document.getElementById('updateNowBtn').classList.add('visible');
+  document.getElementById('sidebarVersion').textContent = 'v' + currentAppVersion + ' to v' + result.latestVersion;
+  var banner = document.getElementById('updateBanner');
+  UI.clear(banner);
+  banner.appendChild(el('span', null, 'Version ' + result.latestVersion + ' is ready to install.'));
+  var install = el('button', 'btn small', 'Update');
+  install.type = 'button';
+  install.addEventListener('click', startUpdate);
+  banner.appendChild(install);
+  banner.classList.add('visible');
+}
+
+function startUpdate() {
+  if (!pendingUpdate || updateRunning) return;
+  if (!pendingUpdate.downloadUrl) {
+    setUpdateButtons('No installer found', true);
+    setTimeout(function() { setUpdateButtons('Update to v' + pendingUpdate.latestVersion, false); }, 3000);
+    return;
+  }
+  updateRunning = true;
+  setUpdateButtons('Downloading...', true);
+  document.getElementById('updateProgress').classList.add('visible');
+  var failed = function() {
+    updateRunning = false;
+    document.getElementById('updateProgress').classList.remove('visible');
+    setUpdateButtons('Failed. Try again', false);
+  };
+  window.dashboardAPI.installUpdate().then(function(result) {
+    if (result && result.success) setUpdateButtons('Installing...', true);
+    else failed();
+  }, failed);
+}
+
+function updateRow() {
+  var button = el('button', 'btn small', 'Check for updates');
+  button.type = 'button';
+  updateRowButton = button;
+  var row = setRow('Updates', 'This is version ' + currentAppVersion + '.', button);
+  button.addEventListener('click', function() {
+    if (pendingUpdate) {
+      startUpdate();
+      return;
+    }
+    button.textContent = 'Checking...';
+    button.disabled = true;
+    window.dashboardAPI.checkForUpdates().then(function(result) {
+      if (result && result.hasUpdate) {
+        showUpdateFound(result);
         return;
       }
-      updateBtn.textContent = 'Downloading...';
-      updateBtn.disabled = true;
-      updateBtn.classList.add('downloading');
-      document.getElementById('updateProgress').classList.add('visible');
-      window.dashboardAPI.installUpdate().then(function(result) {
-        if (result.success) {
-          updateBtn.textContent = 'Installing...';
-          updateBtn.classList.remove('downloading');
-        } else {
-          updateBtn.textContent = 'Failed — retry';
-          updateBtn.classList.remove('downloading');
-          document.getElementById('updateProgress').classList.remove('visible');
-          setTimeout(function() {
-            updateBtn.textContent = 'Update to v' + updateCheckResult.latestVersion;
-            updateBtn.disabled = false;
-          }, 3000);
-        }
-      }).catch(function() {
-        updateBtn.textContent = 'Failed — retry';
-        updateBtn.classList.remove('downloading');
-        document.getElementById('updateProgress').classList.remove('visible');
-        updateBtn.disabled = false;
-      });
-      return;
-    }
-
-    // First click — check for updates
-    updateBtn.textContent = 'Checking...';
-    updateBtn.disabled = true;
-    updateBtn.style.background = '';
-    updateBtn.style.borderColor = '';
-    window.dashboardAPI.checkForUpdates().then(function(result) {
-      var banner = document.getElementById('updateBanner');
-      if (result && result.hasUpdate) {
-        updateCheckResult = result;
-        while (banner.firstChild) banner.removeChild(banner.firstChild);
-        var icon = document.createElement('div');
-        icon.className = 'update-banner-icon';
-        icon.textContent = '\u2B06';
-        banner.appendChild(icon);
-        var txt = document.createElement('div');
-        txt.className = 'update-banner-text';
-        txt.appendChild(document.createTextNode('v' + result.latestVersion + ' available'));
-        var sub = document.createElement('span');
-        sub.textContent = 'New version ready to install';
-        txt.appendChild(sub);
-        banner.appendChild(txt);
-        banner.classList.add('visible');
-        updateBtn.textContent = 'Update to v' + result.latestVersion;
-        updateBtn.disabled = false;
-      } else {
-        updateBtn.textContent = '\u2713 Up to date';
-        updateBtn.style.background = 'rgba(74, 222, 128, 0.12)';
-        updateBtn.style.borderColor = 'rgba(74, 222, 128, 0.25)';
-        updateBtn.style.color = '#4ade80';
-        updateBtn.disabled = true;
-        setTimeout(function() {
-          updateBtn.textContent = 'Check for Updates';
-          updateBtn.style.background = '';
-          updateBtn.style.borderColor = '';
-          updateBtn.style.color = '';
-          updateBtn.disabled = false;
-        }, 5000);
-      }
-    }).catch(function() {
-      updateBtn.textContent = 'Check failed';
-      setTimeout(function() {
-        updateBtn.textContent = 'Check for Updates';
-        updateBtn.disabled = false;
-      }, 3000);
+      setDesc(row.desc, 'Version ' + currentAppVersion + ' is the newest.', 'ok');
+      button.textContent = 'Check for updates';
+      button.disabled = false;
+    }, function() {
+      setDesc(row.desc, 'The check failed. Are you online?', 'bad');
+      button.textContent = 'Check for updates';
+      button.disabled = false;
     });
   });
-  updateRow.appendChild(updateBtn);
-  container.appendChild(updateRow);
+  return row;
+}
 
-  // --- Main Account ---
-  var mainAcctRow = el('div', 'setting-row');
-  mainAcctRow.style.flexDirection = 'column';
-  mainAcctRow.style.alignItems = 'stretch';
+// With several accounts each has its own login folder, so the rows say where each stands.
+// With one, the sign-in buttons act on it directly.
+var settingsAccountsBox = null;
+var settingsAccountsKey = null;
 
-  var mainAcctHeader = el('div', 'setting-info');
-  mainAcctHeader.appendChild(el('div', 'setting-label', 'Main Account'));
-  mainAcctHeader.appendChild(el('div', 'setting-value', 'Your Claude subscription'));
-  mainAcctRow.appendChild(mainAcctHeader);
-
-  var mainAcctBtnRow = el('div');
-  mainAcctBtnRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:12px;';
-
-  var mainSignInBtn = el('button', 'update-btn', 'Re-Sign In');
-  var mainSignOutBtn = el('button', 'update-btn', 'Sign Out');
-  mainSignOutBtn.style.cssText = 'background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.3);color:#ef4444;';
-
-  var mainAcctStatus = el('div');
-  mainAcctStatus.style.cssText = 'font-size:11px;flex:1;color:var(--text-dim);';
-
-  mainAcctBtnRow.appendChild(mainSignInBtn);
-  mainAcctBtnRow.appendChild(mainSignOutBtn);
-  mainAcctBtnRow.appendChild(mainAcctStatus);
-  mainAcctRow.appendChild(mainAcctBtnRow);
-  container.appendChild(mainAcctRow);
-
-  window.dashboardAPI.checkAuthStatus().then(function(result) {
-    if (result && result.authenticated) {
-      mainAcctStatus.textContent = 'Connected';
-      mainAcctStatus.style.color = '#4ade80';
-    } else {
-      mainAcctStatus.textContent = 'Not signed in';
-      mainAcctStatus.style.color = '#ef4444';
-      mainSignInBtn.textContent = 'Sign In';
-    }
-  });
-
-  mainSignInBtn.addEventListener('click', function() {
+function singleAccountRow() {
+  var box = el('div', 'set-actions');
+  var signIn = el('button', 'btn small', 'Sign in');
+  var signOut = el('button', 'btn small danger', 'Sign out');
+  signIn.type = 'button';
+  signOut.type = 'button';
+  box.appendChild(signIn);
+  box.appendChild(signOut);
+  var row = setRow('Account', 'Checking...', box);
+  function show(authenticated) {
+    setDesc(row.desc, authenticated ? 'Signed in.' : 'Not signed in.', authenticated ? 'ok' : 'bad');
+    signIn.textContent = authenticated ? 'Sign in again' : 'Sign in';
+    signIn.disabled = false;
+    signOut.disabled = !authenticated;
+  }
+  window.dashboardAPI.checkAuthStatus().then(function(result) { show(result && result.authenticated); });
+  signIn.addEventListener('click', function() {
     window.dashboardAPI.launchAuthLogin().then(function(result) {
       if (result && result.success) {
-        mainSignInBtn.disabled = true;
-        mainAcctStatus.textContent = 'Sign in with Claude in the browser\u2026';
-        mainAcctStatus.style.color = 'var(--text-dim)';
+        signIn.disabled = true;
+        setDesc(row.desc, 'Finish signing in in your browser.');
       } else {
-        mainAcctStatus.textContent = (result && result.error) || 'Failed to launch sign-in';
-        mainAcctStatus.style.color = '#ef4444';
+        setDesc(row.desc, (result && result.error) || 'Sign-in could not start.', 'bad');
       }
     });
   });
-
-  window.dashboardAPI.onAuthStatusChanged(function(data) {
-    if (data && data.authenticated) {
-      mainSignInBtn.disabled = false;
-      mainSignInBtn.textContent = 'Re-Sign In';
-      mainAcctStatus.textContent = 'Connected';
-      mainAcctStatus.style.color = '#4ade80';
-    } else {
-      mainSignInBtn.textContent = 'Sign In';
-      mainAcctStatus.textContent = 'Not signed in';
-      mainAcctStatus.style.color = '#ef4444';
-    }
+  signOut.addEventListener('click', function() {
+    signOut.disabled = true;
+    setDesc(row.desc, 'Signing out...');
+    window.dashboardAPI.signOut().then(function() { show(false); });
   });
+  row.showAuth = show;
+  return row;
+}
 
-  mainSignOutBtn.addEventListener('click', function() {
-    mainSignOutBtn.disabled = true;
-    mainAcctStatus.textContent = 'Signing out\u2026';
-    mainAcctStatus.style.color = 'var(--text-dim)';
-    window.dashboardAPI.signOut().then(function() {
-      mainSignOutBtn.disabled = false;
-      mainSignInBtn.textContent = 'Sign In';
-      mainAcctStatus.textContent = 'Signed out';
-      mainAcctStatus.style.color = 'var(--text-dim)';
-    });
-  });
+var singleAccount = null;
+window.dashboardAPI.onAuthStatusChanged(function(data) {
+  if (singleAccount) singleAccount.showAuth(Boolean(data && data.authenticated));
+});
 
-  // --- Google Calendar ---
-  var gcalSection = el('div', 'setting-row');
-  gcalSection.style.flexDirection = 'column';
-  gcalSection.style.alignItems = 'stretch';
-
-  var gcalHeader = el('div', 'setting-info');
-  gcalHeader.appendChild(el('div', 'setting-label', 'Google Calendar'));
-  gcalHeader.appendChild(el('div', 'setting-value', 'Sync events from your Google accounts'));
-  gcalSection.appendChild(gcalHeader);
-
-  var gcalAccountsList = el('div');
-  gcalAccountsList.style.cssText = 'margin-top:10px;';
-
-  var gcalBtnRow = el('div');
-  gcalBtnRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:12px;';
-
-  var gcalAddBtn = el('button', 'update-btn', '+ Add Google Account');
-  gcalAddBtn.style.cssText += 'background:linear-gradient(135deg,#4285f4,#34a853);border:none;color:#fff;';
-  var gcalSyncBtn = el('button', 'update-btn', 'Sync Now');
-  var gcalStatus = el('div');
-  gcalStatus.style.cssText = 'font-size:11px;flex:1;color:var(--text-dim);';
-
-  gcalBtnRow.appendChild(gcalAddBtn);
-  gcalBtnRow.appendChild(gcalSyncBtn);
-  gcalBtnRow.appendChild(gcalStatus);
-  gcalSection.appendChild(gcalAccountsList);
-  gcalSection.appendChild(gcalBtnRow);
-  container.appendChild(gcalSection);
-
-  function renderGcalAccounts(accounts, lastSync) {
-    while (gcalAccountsList.firstChild) gcalAccountsList.removeChild(gcalAccountsList.firstChild);
-    if (!accounts || accounts.length === 0) {
-      var empty = el('div');
-      empty.style.cssText = 'font-size:11px;color:var(--text-dim);padding:4px 0;';
-      empty.textContent = 'No Google accounts connected';
-      gcalAccountsList.appendChild(empty);
-      return;
-    }
-    for (var i = 0; i < accounts.length; i++) {
-      (function(acct) {
-        var row = el('div');
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;margin-bottom:4px;background:var(--surface);border:1px solid var(--border);border-radius:6px;';
-
-        var icon = el('span');
-        icon.textContent = '\uD83D\uDCC5';
-        icon.style.cssText = 'font-size:14px;';
-        row.appendChild(icon);
-
-        var emailEl = el('span');
-        emailEl.textContent = acct.email;
-        emailEl.style.cssText = 'flex:1;font-size:12px;color:var(--text);';
-        row.appendChild(emailEl);
-
-        var removeBtn = el('button');
-        removeBtn.textContent = 'Remove';
-        removeBtn.style.cssText = 'padding:3px 10px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.25);border-radius:4px;font-size:10px;color:#ef4444;cursor:pointer;font-family:inherit;';
-        removeBtn.addEventListener('click', function() {
-          removeBtn.disabled = true;
-          removeBtn.textContent = 'Removing\u2026';
-          window.dashboardAPI.gcalRemoveAccount(acct.email).then(function() {
-            window.dashboardAPI.gcalGetStatus().then(function(s) {
-              renderGcalAccounts(s.accounts, s.lastSync);
-            });
-          });
-        });
-        row.appendChild(removeBtn);
-        gcalAccountsList.appendChild(row);
-      })(accounts[i]);
-    }
-    if (lastSync) {
-      gcalStatus.textContent = 'Last sync: ' + formatRelativeTime(lastSync);
-    }
+function renderSettingsAccounts() {
+  var box = settingsAccountsBox;
+  if (!box) return;
+  var several = accountsData.length > 1;
+  var key = several ? JSON.stringify(accountsData.map(function(acc) { return [acc.id, acc.name, acc.needsLogin, acc.login && acc.login.text]; })) : 'one';
+  if (key === settingsAccountsKey) return;
+  settingsAccountsKey = key;
+  UI.clear(box);
+  singleAccount = null;
+  if (!several) {
+    singleAccount = singleAccountRow();
+    box.appendChild(singleAccount);
+    return;
   }
+  accountsData.forEach(function(acc) {
+    var login = acc.login || {};
+    var out = acc.needsLogin || login.state === 'out';
+    var row = setRow(acc.name, login.text || (out ? 'Logged out.' : 'Signed in.'), out || login.state === 'warn' ? buildLoginButton(acc) : null);
+    if (out || login.state === 'warn') setDesc(row.desc, login.text || 'Logged out.', 'bad');
+    box.appendChild(row);
+  });
+}
+
+function googleRows() {
+  var list = el('div');
+  var add = el('button', 'btn small', 'Add a Google account');
+  var sync = el('button', 'btn small', 'Sync now');
+  add.type = 'button';
+  sync.type = 'button';
+  var box = el('div', 'set-actions');
+  box.appendChild(add);
+  box.appendChild(sync);
+  var main = setRow('Google Calendar', 'Show events from your Google accounts.', box);
 
   function formatRelativeTime(ts) {
     var diff = Date.now() - ts;
@@ -1635,79 +1431,78 @@ function renderSettings() {
     return new Date(ts).toLocaleString();
   }
 
-  // Load initial state
-  window.dashboardAPI.gcalGetStatus().then(function(s) {
-    renderGcalAccounts(s.accounts, s.lastSync);
-  });
+  function showAccounts(accounts, lastSync) {
+    UI.clear(list);
+    (accounts || []).forEach(function(account) {
+      var remove = el('button', 'btn small danger', 'Remove');
+      remove.type = 'button';
+      remove.addEventListener('click', function() {
+        remove.disabled = true;
+        remove.textContent = 'Removing...';
+        window.dashboardAPI.gcalRemoveAccount(account.email).then(refresh);
+      });
+      list.appendChild(setRow(account.email, null, remove));
+    });
+    sync.disabled = !accounts || accounts.length === 0;
+    if (lastSync) setDesc(main.desc, 'Last synced ' + formatRelativeTime(lastSync) + '.');
+  }
 
-  // Listen for sync updates
+  function refresh() {
+    window.dashboardAPI.gcalGetStatus().then(function(status) { showAccounts(status.accounts, status.lastSync); });
+  }
+  refresh();
+
   window.dashboardAPI.onGcalSyncStatus(function(data) {
-    renderGcalAccounts(data.accounts, data.lastSync);
-    if (data.errors && data.errors.length > 0) {
-      gcalStatus.textContent = 'Error: ' + data.errors[0].error;
-      gcalStatus.style.color = '#ef4444';
-    } else {
-      gcalStatus.style.color = 'var(--text-dim)';
-    }
+    showAccounts(data.accounts, data.lastSync);
+    if (data.errors && data.errors.length > 0) setDesc(main.desc, data.errors[0].error, 'bad');
   });
 
-  gcalAddBtn.addEventListener('click', function() {
-    gcalAddBtn.disabled = true;
-    gcalAddBtn.textContent = 'Waiting for Google\u2026';
-    gcalStatus.textContent = 'Complete sign-in in your browser';
-    gcalStatus.style.color = '#4285f4';
+  add.addEventListener('click', function() {
+    add.disabled = true;
+    add.textContent = 'Waiting for Google...';
+    setDesc(main.desc, 'Finish signing in in your browser.');
     window.dashboardAPI.gcalAddAccount().then(function(result) {
-      gcalAddBtn.disabled = false;
-      gcalAddBtn.textContent = '+ Add Google Account';
+      add.disabled = false;
+      add.textContent = 'Add a Google account';
       if (result.success) {
-        gcalStatus.textContent = 'Connected: ' + result.email;
-        gcalStatus.style.color = '#4ade80';
-        window.dashboardAPI.gcalGetStatus().then(function(s) {
-          renderGcalAccounts(s.accounts, s.lastSync);
-        });
+        setDesc(main.desc, 'Connected ' + result.email + '.', 'ok');
+        refresh();
       } else {
-        gcalStatus.textContent = result.error || 'Failed';
-        gcalStatus.style.color = '#ef4444';
+        setDesc(main.desc, result.error || 'That did not work.', 'bad');
       }
     });
   });
 
-  gcalSyncBtn.addEventListener('click', function() {
-    gcalSyncBtn.disabled = true;
-    gcalSyncBtn.textContent = 'Syncing\u2026';
-    gcalStatus.textContent = 'Syncing calendars\u2026';
-    gcalStatus.style.color = 'var(--text-dim)';
+  sync.addEventListener('click', function() {
+    sync.disabled = true;
+    sync.textContent = 'Syncing...';
     window.dashboardAPI.gcalSyncNow().then(function(result) {
-      gcalSyncBtn.disabled = false;
-      gcalSyncBtn.textContent = 'Sync Now';
-      if (result.success) {
-        gcalStatus.textContent = 'Last sync: just now';
-        gcalStatus.style.color = '#4ade80';
-      } else {
-        gcalStatus.textContent = result.error || 'Sync failed';
-        gcalStatus.style.color = '#ef4444';
-      }
+      sync.disabled = false;
+      sync.textContent = 'Sync now';
+      if (result.success) setDesc(main.desc, 'Last synced just now.', 'ok');
+      else setDesc(main.desc, result.error || 'The sync failed.', 'bad');
     });
   });
 
-  // Version info
-  var versionEl = document.getElementById('versionInfo');
-  if (versionEl) versionEl.textContent = 'Claude Meter v' + currentAppVersion;
+  return [main, list];
+}
+
+// Built once. Each listener above belongs to these rows for the life of the window.
+function renderSettings() {
+  var container = document.getElementById('settingRows');
+  UI.clear(container);
+  container.appendChild(setGroup('Look', [themeRow()]));
+  container.appendChild(setGroup('Behaviour', [hotkeyRow(), autostartRow()]));
+  settingsAccountsBox = el('div');
+  container.appendChild(setGroup('Accounts', [settingsAccountsBox]));
+  renderSettingsAccounts();
+  container.appendChild(setGroup('Calendar', googleRows()));
+  container.appendChild(setGroup('App', [updateRow()]));
 }
 
 // --- Status tab ---
 
-function formatStatusTime(ts) {
-  if (!ts) return '';
-  var d = new Date(ts);
-  var now = Date.now();
-  var diff = now - ts;
-  var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
-  if (diff < 60000) return 'just now';
-  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
-  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
-  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' ' + d.toLocaleDateString();
-}
+var statusOpenDays = {};
 
 function dateKey(isoStr) {
   var d = new Date(isoStr);
@@ -1727,155 +1522,98 @@ function dateLabel(key) {
 }
 
 function buildIncidentCard(inc) {
-  var impactColors = { minor: 'var(--yellow)', major: 'var(--red)', critical: 'var(--red)' };
-  var card = el('div', 'status-incident-card');
-
-  var row1 = el('div', 'status-inc-row1');
-  var dot = el('div', 'status-inc-dot');
-  dot.style.background = inc.resolvedAt ? 'var(--text-dim)' : (impactColors[inc.impact] || 'var(--yellow)');
-  row1.appendChild(dot);
-  row1.appendChild(el('div', 'status-inc-name', inc.name));
-
-  var badge = el('div', 'status-inc-badge', inc.impact || 'incident');
-  if (inc.impact === 'minor') {
-    badge.style.cssText = 'background:rgba(250,204,21,0.1);color:var(--yellow);';
-  } else {
-    badge.style.cssText = 'background:rgba(248,113,113,0.1);color:var(--red);';
-  }
-  row1.appendChild(badge);
-  card.appendChild(row1);
-
-  // Meta line: components · time · duration
+  var card = el('div', 'status-card card');
+  var top = el('div', 'status-card-top');
+  top.appendChild(el('b', null, inc.name));
+  top.appendChild(el('span', inc.resolvedAt ? 'tag' : 'tag late', inc.resolvedAt ? 'Resolved' : 'Ongoing'));
+  card.appendChild(top);
   var meta = [];
+  if (inc.impact) meta.push(inc.impact.charAt(0).toUpperCase() + inc.impact.slice(1));
   if (inc.components && inc.components.length) meta.push(inc.components.join(', '));
-  var startTs = inc.startedAt ? new Date(inc.startedAt).getTime() : 0;
   if (inc.startedAt) {
-    var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
-    var sd = new Date(inc.startedAt);
-    meta.push(pad(sd.getHours()) + ':' + pad(sd.getMinutes()));
+    var started = new Date(inc.startedAt);
+    meta.push(String(started.getHours()).padStart(2, '0') + ':' + String(started.getMinutes()).padStart(2, '0'));
   }
   if (inc.startedAt && inc.resolvedAt) {
-    var dur = Math.round((new Date(inc.resolvedAt) - new Date(inc.startedAt)) / 60000);
-    meta.push(dur < 60 ? dur + 'm' : Math.floor(dur / 60) + 'h ' + (dur % 60) + 'm');
-  } else if (!inc.resolvedAt) {
-    meta.push('ongoing');
+    var minutes = Math.round((new Date(inc.resolvedAt) - new Date(inc.startedAt)) / 60000);
+    meta.push(minutes < 60 ? minutes + 'm' : Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm');
   }
-  if (meta.length) card.appendChild(el('div', 'status-inc-meta', meta.join(' \u00B7 ')));
-
-  if (inc.latestUpdate) {
-    card.appendChild(el('div', 'status-inc-update', inc.latestUpdate));
-  }
+  if (meta.length) card.appendChild(el('p', null, meta.join(' · ')));
+  if (inc.latestUpdate) card.appendChild(el('p', null, inc.latestUpdate));
   return card;
+}
+
+function renderStatusHealth(card) {
+  var cs = claudeStatusData;
+  var indicator = (cs && cs.indicator) || 'none';
+  var grade = { none: 'healthy', minor: 'intermittent', major: 'degraded', critical: 'degraded' };
+  var words = { none: 'All systems working', minor: 'Minor outage', major: 'Major outage', critical: 'Critical outage' };
+  var health = el('div', 'status-health card raised');
+  health.appendChild(el('div', 'status-dot ' + (cs ? (grade[indicator] || 'intermittent') : '')));
+  var text = el('div');
+  text.appendChild(el('h2', null, cs ? (words[indicator] || indicator) : 'Checking...'));
+  var current = (cs && cs.incidents) || [];
+  if (current.length) {
+    current.forEach(function(inc) {
+      text.appendChild(el('p', 'status-incident-now', inc.name));
+      if (inc.components && inc.components.length) text.appendChild(el('p', null, inc.components.join(', ')));
+    });
+  } else if (cs) {
+    text.appendChild(el('p', null, 'No current incidents.'));
+  }
+  health.appendChild(text);
+  var link = el('button', 'btn small');
+  link.type = 'button';
+  link.appendChild(document.createTextNode('status.claude.com'));
+  link.appendChild(UI.icon('link'));
+  link.querySelector('svg').style.cssText = 'width:14px;height:14px;';
+  link.addEventListener('click', function() { window.dashboardAPI.openExternal('https://status.claude.com'); });
+  health.appendChild(link);
+  card.appendChild(health);
 }
 
 function renderStatusTab() {
   var healthCard = document.getElementById('statusHealthCard');
   var groupsContainer = document.getElementById('statusIncidentGroups');
-  if (!healthCard || !groupsContainer) return;
+  UI.clear(healthCard);
+  UI.clear(groupsContainer);
+  renderStatusHealth(healthCard);
 
-  while (healthCard.firstChild) healthCard.removeChild(healthCard.firstChild);
-  while (groupsContainer.firstChild) groupsContainer.removeChild(groupsContainer.firstChild);
-
-  // --- Current status card ---
-  var officialCard = el('div', 'status-health-card');
   var cs = claudeStatusData;
-  var csIndicator = (cs && cs.indicator) || 'none';
-  var csStatusMap = { none: 'healthy', minor: 'intermittent', major: 'degraded', critical: 'degraded' };
-  var csDotClass = cs ? (csStatusMap[csIndicator] || 'intermittent') : 'unknown';
-  var csLabels = { none: 'Operational', minor: 'Minor outage', major: 'Major outage', critical: 'Critical' };
-
-  var csIndicatorEl = el('div', 'status-health-indicator');
-  var csDot = el('div', 'status-health-dot ' + csDotClass);
-  csDot.appendChild(el('div', 'status-health-dot-inner'));
-  csIndicatorEl.appendChild(csDot);
-  csIndicatorEl.appendChild(el('div', 'status-health-label ' + csDotClass, csLabels[csIndicator] || csIndicator));
-  officialCard.appendChild(csIndicatorEl);
-
-  var csInfo = el('div', 'status-stat');
-  csInfo.style.flex = '1';
-
-  if (!cs) {
-    csInfo.appendChild(el('div', 'status-stat-sub', 'Fetching...'));
-  } else if ((cs.incidents || []).length === 0) {
-    var okEl = el('div', null, 'All Systems Operational');
-    okEl.style.cssText = 'font-size:13px;font-weight:500;color:var(--green);';
-    csInfo.appendChild(okEl);
-  } else {
-    for (var ii = 0; ii < cs.incidents.length; ii++) {
-      var cinc = cs.incidents[ii];
-      var incName = el('div', null, cinc.name);
-      incName.style.cssText = 'font-size:13px;font-weight:600;margin-bottom:2px;';
-      csInfo.appendChild(incName);
-      if (cinc.components && cinc.components.length) {
-        csInfo.appendChild(el('div', 'status-stat-sub', cinc.components.join(', ')));
-      }
-    }
-  }
-
-  var csLink = el('button', null, 'status.claude.com \u2197');
-  csLink.style.cssText = 'background:none;border:none;color:var(--accent);font-size:10px;cursor:pointer;padding:0;font-family:inherit;margin-top:6px;';
-  csLink.addEventListener('click', function() {
-    window.dashboardAPI.openExternal('https://status.claude.com');
-  });
-  csInfo.appendChild(csLink);
-  officialCard.appendChild(csInfo);
-  healthCard.appendChild(officialCard);
-
-  // --- Incidents grouped by date ---
-  var allInc = [].concat(
-    (cs && cs.incidents) || [],
-    (cs && cs.pastIncidents) || []
-  );
-
-  if (allInc.length === 0) {
-    groupsContainer.appendChild(el('div', 'status-empty', 'No incidents in the last 10 days'));
+  var all = [].concat((cs && cs.incidents) || [], (cs && cs.pastIncidents) || []);
+  if (all.length === 0) {
+    if (cs) groupsContainer.appendChild(el('div', 'status-empty', 'No incidents in the last 10 days.'));
     return;
   }
 
-  // Group by date (using startedAt)
   var groups = {};
-  var groupOrder = [];
-  for (var gi = 0; gi < allInc.length; gi++) {
-    var inc = allInc[gi];
+  all.forEach(function(inc) {
     var key = inc.startedAt ? dateKey(inc.startedAt) : dateKey(new Date().toISOString());
-    if (!groups[key]) { groups[key] = []; groupOrder.push(key); }
-    groups[key].push(inc);
-  }
-  // Sort groups newest first
-  groupOrder.sort(function(a, b) { return b.localeCompare(a); });
-
+    (groups[key] = groups[key] || []).push(inc);
+  });
   var todayKey = dateKey(new Date().toISOString());
-
-  for (var di = 0; di < groupOrder.length; di++) {
-    (function(dayKey, dayInc) {
-      var isToday = dayKey === todayKey;
-      var group = el('div', 'status-date-group');
-
-      var header = el('div', 'status-date-header' + (isToday ? ' today' : ''));
-      if (!isToday) header.classList.add('collapsed');
-      var chevron = el('span', 'chevron', '\u25BC');
-      header.appendChild(chevron);
-      header.appendChild(el('span', 'date-label', dateLabel(dayKey)));
-      header.appendChild(el('span', 'date-count', dayInc.length + ' incident' + (dayInc.length > 1 ? 's' : '')));
-      group.appendChild(header);
-
-      var body = el('div', 'status-date-body');
-      if (!isToday) body.classList.add('collapsed');
-      for (var ci = 0; ci < dayInc.length; ci++) {
-        body.appendChild(buildIncidentCard(dayInc[ci]));
-      }
-      group.appendChild(body);
-
-      if (!isToday) {
-        header.addEventListener('click', function() {
-          header.classList.toggle('collapsed');
-          body.classList.toggle('collapsed');
-        });
-      }
-
-      groupsContainer.appendChild(group);
-    })(groupOrder[di], groups[groupOrder[di]]);
-  }
+  Object.keys(groups).sort(function(a, b) { return b.localeCompare(a); }).forEach(function(key) {
+    var list = groups[key];
+    var open = statusOpenDays[key] !== undefined ? statusOpenDays[key] : key === todayKey;
+    var group = el('section');
+    var head = el('button', 'status-day');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    head.appendChild(UI.icon(open ? 'down' : 'next'));
+    head.appendChild(document.createTextNode(dateLabel(key)));
+    head.appendChild(el('small', null, PlanLib.countText(list.length, 'incident', 'incidents')));
+    head.addEventListener('click', function() {
+      statusOpenDays[key] = !open;
+      renderStatusTab();
+    });
+    group.appendChild(head);
+    if (open) {
+      var cards = el('div', 'status-cards');
+      list.forEach(function(inc) { cards.appendChild(buildIncidentCard(inc)); });
+      group.appendChild(cards);
+    }
+    groupsContainer.appendChild(group);
+  });
 }
 
 // --- IPC handlers ---
@@ -1902,6 +1640,7 @@ window.dashboardAPI.onUsageUpdate(function(payload) {
     return;
   }
   renderOverview();
+  if (currentTab === 'settings') renderSettingsAccounts();
 });
 
 window.dashboardAPI.onHistoryUpdate(function(data) {
@@ -1938,83 +1677,15 @@ document.getElementById('tbClose').addEventListener('click', function() {
 
 var pendingUpdate = null;
 
-window.dashboardAPI.onUpdateAvailable(function(data) {
-  pendingUpdate = data;
-  var btn = document.getElementById('updateNowBtn');
-  btn.textContent = 'Update to v' + data.latestVersion;
-  btn.classList.add('visible');
-  var ver = document.getElementById('sidebarVersion');
-  ver.textContent = 'v' + currentAppVersion + ' \u2192 v' + data.latestVersion;
-  // Populate overview banner
-  var banner = document.getElementById('updateBanner');
-  while (banner.firstChild) banner.removeChild(banner.firstChild);
-  var icon = document.createElement('div');
-  icon.className = 'update-banner-icon';
-  icon.textContent = '\u2B06';
-  banner.appendChild(icon);
-  var txt = document.createElement('div');
-  txt.className = 'update-banner-text';
-  txt.appendChild(document.createTextNode('v' + data.latestVersion + ' available'));
-  var sub = document.createElement('span');
-  sub.textContent = 'New version ready to install';
-  txt.appendChild(sub);
-  banner.appendChild(txt);
-  banner.classList.add('visible');
-});
+window.dashboardAPI.onUpdateAvailable(showUpdateFound);
 
 window.dashboardAPI.onUpdateProgress(function(pct) {
-  var bar = document.getElementById('updateProgress');
-  var fill = document.getElementById('updateProgressFill');
-  var btn = document.getElementById('updateNowBtn');
-  bar.classList.add('visible');
-  fill.style.width = pct + '%';
-  btn.textContent = pct + '% downloaded';
-  btn.style.backgroundSize = pct + '% 100%, 100% 100%';
-});
-
-document.getElementById('updateNowBtn').addEventListener('click', function() {
-  if (!pendingUpdate) return;
-  var btn = document.getElementById('updateNowBtn');
-
-  if (!pendingUpdate.downloadUrl) {
-    btn.textContent = 'No installer found';
-    setTimeout(function() {
-      btn.textContent = 'Update to v' + pendingUpdate.latestVersion;
-    }, 3000);
-    return;
-  }
-
-  btn.textContent = 'Downloading...';
-  btn.disabled = true;
-  btn.classList.add('downloading');
   document.getElementById('updateProgress').classList.add('visible');
-
-  window.dashboardAPI.installUpdate().then(function(result) {
-    if (result.success) {
-      btn.textContent = 'Installing...';
-      btn.classList.remove('downloading');
-      btn.style.backgroundSize = '';
-      btn.style.background = 'linear-gradient(90deg, #6366f1, #a855f7, #ec4899)';
-    } else {
-      btn.textContent = 'Failed — retry';
-      btn.classList.remove('downloading');
-      btn.style.backgroundSize = '';
-      btn.style.background = '';
-      document.getElementById('updateProgress').classList.remove('visible');
-      setTimeout(function() {
-        btn.textContent = 'Update to v' + pendingUpdate.latestVersion;
-        btn.disabled = false;
-      }, 3000);
-    }
-  }).catch(function() {
-    btn.textContent = 'Failed — retry';
-    btn.classList.remove('downloading');
-    btn.style.backgroundSize = '';
-    btn.style.background = '';
-    document.getElementById('updateProgress').classList.remove('visible');
-    btn.disabled = false;
-  });
+  document.getElementById('updateProgressFill').style.width = pct + '%';
+  setUpdateButtons(pct + '% downloaded', true);
 });
+
+document.getElementById('updateNowBtn').addEventListener('click', startUpdate);
 
 // --- Init ---
 

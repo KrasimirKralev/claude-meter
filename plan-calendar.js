@@ -258,7 +258,7 @@
       row.appendChild(swatch);
 
       var body = el('div', 'pc-body');
-      body.appendChild(el('div', 'pc-title', evt.title));
+      body.appendChild(el('div', 'pc-title', L.eventTitle(evt)));
       var meta = [];
       var length = L.durationText(evt.duration);
       if (length) meta.push(length);

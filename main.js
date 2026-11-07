@@ -120,6 +120,7 @@ let claudeStatus = null; // { indicator, description, updatedAt }
 let calWin = null;
 let notesWin = null;
 let mapsFeature = null;  // the Maps section's view and server, set up with the rest of the IPC
+let notesView = null;  // the Plan section's Notes page, set up with the rest of the IPC
 let notesAppWin = null; // standalone Notes app window (own taskbar identity)
 let addEventWin = null;
 let calendarEvents = [];
@@ -291,6 +292,7 @@ const RELAX_STATE_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-state.json');
 const relaxMusic = require('./relax-music');
 const displayScale = require('./display-scale');
 const { createMapsFeature } = require('./maps-view');
+const { createNotesView } = require('./notes-view');
 const RELAX_MUSIC_DIR = path.join(os.homedir(), 'Music', 'relax');
 const RELAX_MUSIC_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-music.json');
 const RELAX_TICK_MS = 5000;
@@ -2115,6 +2117,7 @@ function broadcastTheme() {
     }
   }
   if (mapsFeature) mapsFeature.themeChanged();
+  if (notesView) notesView.themeChanged();
 }
 
 // --- Smart text parser: "Meeting with John tomorrow 3pm 1h" → { title, date, time, duration, priority } ---
@@ -2702,10 +2705,15 @@ function saveStickyNotes(notes, senderContents) {
     createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
   }));
   try { fs.writeFileSync(STICKY_NOTES_FILE, JSON.stringify(clean, null, 2)); } catch { /* ignore */ }
-  // Keep the other notes window (panel vs app) in sync
-  for (const w of [notesWin, notesAppWin]) {
-    if (w && !w.isDestroyed() && w.webContents !== senderContents) {
-      try { w.webContents.send('sticky-notes-updated', clean); } catch { /* ignore */ }
+  // Keep the other notes pages (panel, app, Plan section) in sync
+  const pages = [notesWin, notesAppWin]
+    .filter((w) => w && !w.isDestroyed())
+    .map((w) => w.webContents);
+  const inPlan = notesView && notesView.contents();
+  if (inPlan && !inPlan.isDestroyed()) pages.push(inPlan);
+  for (const page of pages) {
+    if (page !== senderContents) {
+      try { page.send('sticky-notes-updated', clean); } catch { /* ignore */ }
     }
   }
   return clean;
@@ -4286,6 +4294,7 @@ function openDashboard(tab) {
   dashWin.on('closed', () => {
     dashWin = null;
     if (mapsFeature) mapsFeature.dashboardClosed();
+    if (notesView) notesView.dashboardClosed();
   });
 }
 
@@ -6267,6 +6276,14 @@ app.whenReady().then(() => {
     getTheme: () => ({ name: currentTheme, ...(THEMES[currentTheme] || THEMES.dark) }),
     getTargets: () => [win, dashWin],
   });
+  notesView = createNotesView({
+    WebContentsView, ipcMain,
+    getDashboard: () => dashWin,
+    getTheme: () => ({ name: currentTheme, ...(THEMES[currentTheme] || THEMES.dark) }),
+    dirname: __dirname,
+  });
+
+  ipcMain.handle('streak-get', (event) => (isLocalSender(event) ? streakData : {}));
 
   // IPC
   ipcMain.on('popup-dismiss', (event) => {

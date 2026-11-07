@@ -49,7 +49,8 @@
   .pt-row .pt-actions { grid-column: 3; justify-content: flex-start; margin-left: -6px; }
   .pt-row.is-done { grid-template-columns: auto 1fr; }
   .pt-row.is-done .pt-actions { grid-column: 2; }
-  .pt-schedule { grid-template-columns: 1fr 1fr; }
+  .pt-schedule { grid-template-columns: minmax(0, 1fr) auto; }
+  .pt-schedule .field { grid-column: 1 / -1; }
   .pt-add .btn { display: none; }
 }
 
@@ -59,6 +60,9 @@
 .pc-left { display: flex; flex-direction: column; gap: 8px; flex: none; }
 .pc-month { padding: 8px 10px 10px; display: none; }
 .month-open .pc-month { display: block; }
+/* With the month open in a small panel, the whole panel scrolls rather than squeezing the day. */
+.month-open .pc-inner { overflow-y: auto; padding-right: 4px; }
+.month-open .pc-day, .month-open .pc-events { flex: none; overflow: visible; }
 .pc-monthhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .pc-monthhead h2 { margin: 0; font-size: 14px; font-weight: 800; }
 .pc-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
@@ -135,7 +139,9 @@
 
 /* Wide: the month is always there, beside the day. */
 @container (min-width: 620px) {
-  .pc-inner { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 16px; }
+  .pc-inner, .month-open .pc-inner { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 16px; overflow: hidden; padding-right: 0; }
+  .month-open .pc-day { flex: 1; }
+  .month-open .pc-events { flex: 1; overflow-y: auto; }
   .pc-week { display: none; }
   .pc-month { display: block; box-shadow: var(--shadow-sm); }
   .pc-left { margin-right: 4px; }

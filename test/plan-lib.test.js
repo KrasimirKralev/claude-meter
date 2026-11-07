@@ -32,7 +32,7 @@ test('a month grid is whole weeks, starting Monday, and marks the days around it
   const feb = P.monthGrid(2027, 1);
   assert.strictEqual(feb.length, 28);
   assert.strictEqual(feb[0].date, '2027-02-01');
-  // January 2027's grid must end in January's last week, even across the new year.
+  // December's grid ends in the new year.
   const dec = P.monthGrid(2026, 11);
   assert.strictEqual(dec.at(-1).date, '2027-01-03');
 });
@@ -85,6 +85,12 @@ test('a meeting link comes from the sync or from the title, and only over https'
   assert.strictEqual(P.meetingLink({ title: 'Call https://zoom.example/1 now' }), 'https://zoom.example/1');
   assert.strictEqual(P.meetingLink({ title: 'Call http://plain.example' }), null);
   assert.strictEqual(P.meetingLink({ title: 'Lunch' }), null);
+});
+
+test('the shown title leaves out a pasted meeting link, unless it is all there is', () => {
+  assert.strictEqual(P.eventTitle({ title: 'Design review https://meet.example/abc' }), 'Design review');
+  assert.strictEqual(P.eventTitle({ title: 'https://meet.example/abc' }), 'https://meet.example/abc');
+  assert.strictEqual(P.eventTitle({ title: 'Lunch' }), 'Lunch');
 });
 
 test('quick add finds the time and duration and leaves the title', () => {

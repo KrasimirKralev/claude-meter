@@ -11,7 +11,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/display-scale.test.js test/usage-limits.test.js test/maps-lib.test.js test/widget-lib.test.js test/maps-view.test.js",
+    "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/display-scale.test.js test/usage-limits.test.js test/maps-lib.test.js test/widget-lib.test.js test/maps-view.test.js test/plan-lib.test.js",
     "bundle:maps": "node scripts/bundle-maps.js",
     "build": "npm run bundle:maps && electron-builder",
     "build:win": "npm run bundle:maps && electron-builder --win",
