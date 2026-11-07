@@ -36,7 +36,11 @@ function getMeterClass(meter) {
 // The first theme message comes as the page finishes loading, so this can't wait for anything.
 window.dashboardAPI.onThemeUpdate(function(theme) {
   UI.applyTheme(theme);
-  if (typeof currentTab !== 'undefined' && currentTab === 'history') drawChart();
+  var chips = document.querySelectorAll('.theme-chip');
+  for (var i = 0; i < chips.length; i++) {
+    chips[i].setAttribute('aria-pressed', chips[i].getAttribute('data-theme-name') === theme.name ? 'true' : 'false');
+  }
+  if (currentTab === 'history') drawChart();
 });
 
 // --- Navigation: four sections, each with its own tabs ---

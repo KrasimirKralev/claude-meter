@@ -87,6 +87,12 @@ test('a meeting link comes from the sync or from the title, and only over https'
   assert.strictEqual(P.meetingLink({ title: 'Lunch' }), null);
 });
 
+test('a link names where it goes', () => {
+  assert.strictEqual(P.linkHost('https://www.meet.example/abc?x=1'), 'meet.example');
+  assert.strictEqual(P.linkHost('https://accounts.google.com.evil.example/x'), 'accounts.google.com.evil.example');
+  assert.strictEqual(P.linkHost('not a url'), '');
+});
+
 test('the shown title leaves out a pasted meeting link, unless it is all there is', () => {
   assert.strictEqual(P.eventTitle({ title: 'Design review https://meet.example/abc' }), 'Design review');
   assert.strictEqual(P.eventTitle({ title: 'https://meet.example/abc' }), 'https://meet.example/abc');

@@ -66,9 +66,8 @@ function createNotesView({ WebContentsView, ipcMain, getDashboard, getTheme, dir
       view.setBorderRadius(CORNER_RADIUS);
       const contents = view.webContents;
       const mine = view;
-      contents.on('will-navigate', (event, url) => {
-        if (!url.startsWith('file://')) event.preventDefault();
-      });
+      // This page has no reason to go anywhere else, not even to another file.
+      contents.on('will-navigate', (event) => event.preventDefault());
       contents.setWindowOpenHandler(() => ({ action: 'deny' }));
       contents.on('did-finish-load', () => {
         if (view !== mine) return;

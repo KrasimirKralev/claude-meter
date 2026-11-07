@@ -38,6 +38,8 @@ export const claudeConfigDir = (home = homedir(), env = process.env): string | u
     // No launcher here, which is the normal case.
   }
   candidates.push(env.CLAUDE_CONFIG_DIR);
+  // Set by the desktop app: its account with the most room, for when nothing above is logged in.
+  candidates.push(env.BALONCHE_FALLBACK_CONFIG_DIR);
   return candidates.find((dir): dir is string => Boolean(dir) && isLoggedIn(dir as string));
 };
 

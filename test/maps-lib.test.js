@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const path = require('node:path');
 const {
   MAPS_ORIGIN,
-  childEnv, cleanBounds, mapsThemeFor,
+  childEnv, cleanBounds, mapsThemeFor, roomiestDir,
   cleanMapsReport,
   cleanOpenRequest,
   isMapsUrl,
@@ -139,4 +139,13 @@ test('every app theme maps to one the map page draws', () => {
   assert.strictEqual(mapsThemeFor('nord'), 'dark');
   assert.strictEqual(mapsThemeFor('dracula'), 'dark');
   assert.strictEqual(mapsThemeFor('unknown'), 'brutal');
+});
+
+test('the account with the most room lends its login, never one that is logged out', () => {
+  assert.strictEqual(roomiestDir([{ dir: '/a', usage: { weekAll: { pct: 50 } } }, { dir: '/b', usage: { weekAll: { pct: 5 } } }]), '/b');
+  assert.strictEqual(roomiestDir([{ dir: '/a', needsLogin: true, usage: { weekAll: { pct: 1 } } }, { dir: '/b', usage: { weekAll: { pct: 80 } } }]), '/b');
+  assert.strictEqual(roomiestDir([{ dir: '/a', usage: null }]), '/a');
+  assert.strictEqual(roomiestDir([{ needsLogin: true, dir: '/a' }]), null);
+  assert.strictEqual(roomiestDir([]), null);
+  assert.strictEqual(roomiestDir(null), null);
 });

@@ -267,11 +267,12 @@
       var reminder = L.reminderText(evt.reminder);
       if (reminder) meta.push(reminder);
       if (evt.isGoogleEvent) meta.push(evt.googleAccount ? 'Google, ' + evt.googleAccount : 'Google');
+      var link = L.meetingLink(evt);
+      if (link) meta.push(L.linkHost(link));
       if (meta.length) body.appendChild(el('div', 'pc-meta', meta.join(' · ')));
       row.appendChild(body);
 
       var actions = el('div', 'pc-actions');
-      var link = L.meetingLink(evt);
       if (link) {
         var join = el('button', 'btn small primary', 'Join');
         join.type = 'button';

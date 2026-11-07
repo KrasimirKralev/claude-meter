@@ -128,6 +128,15 @@
     return match ? match[0] : null;
   }
 
+  // Where a link really goes, shown beside its button because the title leaves the address out.
+  function linkHost(url) {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch (error) {
+      return '';
+    }
+  }
+
   // The title to show. A pasted meeting link becomes the Join button, so it needn't show twice.
   function eventTitle(evt) {
     var title = String(evt.title || '');
@@ -266,6 +275,7 @@
     habitStreak: habitStreak,
     isLate: isLate,
     isValidDay: isValidDay,
+    linkHost: linkHost,
     meetingLink: meetingLink,
     monthGrid: monthGrid,
     monthTitle: monthTitle,

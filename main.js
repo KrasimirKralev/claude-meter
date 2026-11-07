@@ -6238,6 +6238,7 @@ app.whenReady().then(() => {
     openDashboard,
     getTheme: () => ({ name: currentTheme, ...(THEMES[currentTheme] || THEMES.dark) }),
     getTargets: () => [win, dashWin],
+    getAccounts: () => buildUsagePayload().accounts,
   });
   notesView = createNotesView({
     WebContentsView, ipcMain,

@@ -139,6 +139,7 @@ function makeWorld(t, theme = { name: 'brutal', winBg: '#f0ede4' }) {
     openDashboard: (tab) => world.tabs.push(tab),
     getTheme: () => world.theme,
     getTargets: () => [],
+    getAccounts: () => world.accounts || [],
   });
   fs.existsSync = realExists;
   t.after(() => { childProcess.spawn = realSpawn; });
@@ -229,6 +230,16 @@ test('a dashboard opened later gets a fresh view and server', async (t) => {
   assert.strictEqual(world.children.length, 2);
   assert.deepStrictEqual(world.dashboard.children, [second]);
   assert.strictEqual(second.visible, true);
+});
+
+test('Digitize can use the account with the most room when there is no default login', async (t) => {
+  const world = makeWorld(t);
+  world.accounts = [
+    { dir: '/a', usage: { weekAll: { pct: 90 } } },
+    { dir: '/b', usage: { weekAll: { pct: 10 } } },
+  ];
+  await opened(world);
+  assert.strictEqual(world.children[0].env.BALONCHE_FALLBACK_CONFIG_DIR, '/b');
 });
 
 test('the secret travels by message, never through the environment', async (t) => {

@@ -17,6 +17,7 @@ const {
   cleanOpenRequest,
   isMapsUrl,
   mapsThemeFor,
+  roomiestDir,
   serverEntry,
 } = require('./maps-lib');
 
@@ -32,7 +33,7 @@ const PARTITION = 'persist:maps';
 // The dashboard's corner, so the page doesn't poke out of the rounded window.
 const CORNER_RADIUS = 12;
 
-function createMapsFeature({ WebContentsView, ipcMain, session, isLocalSender, dataDir, getDashboard, openDashboard, getTheme, getTargets }) {
+function createMapsFeature({ WebContentsView, ipcMain, session, isLocalSender, dataDir, getDashboard, openDashboard, getTheme, getTargets, getAccounts }) {
   const entry = serverEntry(__dirname, fs.existsSync);
   const listFile = path.join(dataDir, 'usage-widget-maps.json');
 
@@ -110,7 +111,7 @@ function createMapsFeature({ WebContentsView, ipcMain, session, isLocalSender, d
     if (mine !== generation) throw new Error('Opening was cancelled.');
     const token = crypto.randomBytes(32).toString('hex');
     const child = spawn(process.execPath, [entry], {
-      env: childEnv(process.env, os.homedir()),
+      env: childEnv(process.env, os.homedir(), roomiestDir(getAccounts())),
       cwd: path.dirname(entry),
       // The IPC channel carries the secret and the ready message, and it closes when this app dies,
       // even from SIGKILL, which makes the server exit too.

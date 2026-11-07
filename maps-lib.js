@@ -17,7 +17,19 @@ const APPIMAGE_VARS = ['LD_LIBRARY_PATH', 'LD_PRELOAD', 'APPDIR', 'APPIMAGE', 'A
 
 const withoutMounts = (value) => (value || '').split(':').filter((p) => p && !p.includes('/.mount_'));
 
-function childEnv(env, home) {
+// With several accounts there's often no default login, so Digitize would have no way to reach the AI.
+// The app knows which account has the most room. Null when none is usable.
+function roomiestDir(accounts) {
+  let best = null;
+  for (const account of accounts || []) {
+    if (!account || !account.dir || account.needsLogin) continue;
+    const used = account.usage && account.usage.weekAll ? account.usage.weekAll.pct : 100;
+    if (best === null || used < best.used) best = { dir: account.dir, used };
+  }
+  return best ? best.dir : null;
+}
+
+function childEnv(env, home, configDir) {
   const clean = { ...env };
   for (const key of APPIMAGE_VARS) delete clean[key];
   const dirs = withoutMounts(env.PATH);
@@ -28,6 +40,7 @@ function childEnv(env, home) {
   if (env.XDG_DATA_DIRS !== undefined) clean.XDG_DATA_DIRS = withoutMounts(env.XDG_DATA_DIRS).join(':');
   clean.ELECTRON_RUN_AS_NODE = '1';
   clean.PORT = String(MAPS_PORT);
+  if (configDir) clean.BALONCHE_FALLBACK_CONFIG_DIR = configDir;
   return clean;
 }
 
@@ -101,4 +114,4 @@ function cleanBounds(bounds) {
 const MAPS_THEMES = { brutal: 'brutal', karchx: 'light', light: 'light', dark: 'dark', nord: 'dark', dracula: 'dark' };
 const mapsThemeFor = (name) => MAPS_THEMES[name] || 'brutal';
 
-module.exports = { MAPS_ORIGIN, MAPS_PORT, childEnv, cleanBounds, cleanMapsReport, cleanOpenRequest, isMapsUrl, mapsThemeFor, serverEntry };
+module.exports = { MAPS_ORIGIN, MAPS_PORT, childEnv, cleanBounds, cleanMapsReport, cleanOpenRequest, isMapsUrl, mapsThemeFor, roomiestDir, serverEntry };

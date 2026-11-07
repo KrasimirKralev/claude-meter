@@ -184,6 +184,13 @@ describe('claudeConfigDir', () => {
     expect(claudeConfigDir(folder(), { BALONCHE_CLAUDE_CONFIG_DIR: explicit })).toBe(explicit);
   });
 
+  it('falls back to the account the desktop app chose, last of all', () => {
+    const fallback = account();
+    expect(claudeConfigDir(folder(), { BALONCHE_FALLBACK_CONFIG_DIR: fallback })).toBe(fallback);
+    const session = account();
+    expect(claudeConfigDir(folder(), { CLAUDE_CONFIG_DIR: session, BALONCHE_FALLBACK_CONFIG_DIR: fallback })).toBe(session);
+  });
+
   it('skips a folder with no login, and leaves the default alone when nothing fits', () => {
     expect(claudeConfigDir(folder(), { CLAUDE_CONFIG_DIR: folder() })).toBeUndefined();
   });

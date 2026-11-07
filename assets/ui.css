@@ -93,7 +93,7 @@ textarea.field { height: auto; padding: 8px 10px; }
   font-size: 11px; font-weight: 700; white-space: nowrap;
 }
 .tag.candy { background: var(--yellow); color: var(--on-candy); }
-.tag.late { background: var(--crit-text); color: #ffffff; }
+.tag.late { background: var(--red); color: var(--on-candy); }
 
 .check {
   display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none;
