@@ -146,10 +146,28 @@ function setRefillText(cell, state) {
   var key = state.alert + '|' + detail;
   if (cell.getAttribute('data-text') === key) return;
   cell.setAttribute('data-text', key);
+  // Past this length it would widen the whole table. The two pieces break between them, not inside.
+  cell.classList.toggle('long', (state.alert + ' ' + detail).length > 26);
   while (cell.firstChild) cell.removeChild(cell.firstChild);
   if (state.alert) cell.appendChild(el('strong', null, state.alert));
   if (state.alert && detail) cell.appendChild(document.createTextNode(' '));
-  if (detail) cell.appendChild(document.createTextNode(detail));
+  if (detail) cell.appendChild(el('span', null, detail));
+}
+
+// Copied rather than run: a login has to land in this account's own folder.
+function buildLoginButton(acc) {
+  var command = (acc.login && acc.login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login';
+  var button = el('button', 'login-btn', 'Copy login command');
+  button.title = command;
+  button.addEventListener('click', function(e) {
+    e.stopPropagation();
+    navigator.clipboard.writeText(command).then(function() {
+      button.textContent = 'Copied, paste it in a terminal';
+    }, function() {
+      button.textContent = command;
+    });
+  });
+  return button;
 }
 
 var boardCells = [];
@@ -159,7 +177,7 @@ function buildBoardRow(acc, index) {
   var chosen = acc.id === activeAccountId && accountsData.length > 1;
   var row = el('tr', (chosen ? 'active' : '')
     + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : '')
-    + (state.status === 'limited' || state.status === 'error' ? ' stale-row' : ''));
+    + (state.status === 'limited' || state.status === 'error' || state.status === 'out' ? ' stale-row' : ''));
   var name = acc.name || acc.id;
   row.title = name + (acc.email ? ' · ' + acc.email : '') + (acc.error ? '\n' + acc.error : '');
   row.setAttribute('tabindex', '0');
@@ -182,15 +200,14 @@ function buildBoardRow(acc, index) {
   }
   label.appendChild(nameEl);
   var login = acc.login;
-  // Once logged out the Refills column says so, and the long command lives in the tooltip.
-  if (login && login.state === 'out') {
-    row.title += '\n' + (login.detail || login.text);
-  } else if (acc.needsLogin) {
-    row.title += '\nRun: ' + ((login && login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login');
-  } else if (login && login.text) {
-    var line = el('div', 'login-line' + (login.state === 'warn' ? ' warn' : ''), login.text);
-    line.title = login.detail;
+  // The short form only: the long one can carry a whole shell command. Skipped when the Refills
+  // column already gives this date.
+  if (state.status !== 'out' && login && login.short && state.alert.indexOf('Login ends') !== 0) {
+    var line = el('div', 'login-line' + (login.state === 'warn' ? ' warn' : ''), 'Login until ' + login.short);
+    line.title = login.detail || login.text || '';
     label.appendChild(line);
+  } else if (login && (login.detail || login.text)) {
+    row.title += '\n' + (login.detail || login.text);
   }
   cell.appendChild(label);
   who.appendChild(cell);
@@ -199,7 +216,13 @@ function buildBoardRow(acc, index) {
   var meterCell = el('td', 'tmeter');
   var pctCell = el('td', 'tpct');
   var fableCell = el('td', 'tfable');
-  if (state.main) {
+  if (state.status === 'out') {
+    meterCell.appendChild(buildLoginButton(acc));
+    if (state.main) {
+      pctCell.appendChild(el('b', null, String(state.main.pct)));
+      pctCell.appendChild(el('small', null, '%'));
+    }
+  } else if (state.main) {
     var heads = WL.boardHeads(accountsData);
     meterCell.appendChild(meterCells(state.main, false));
     if (heads.labelMain) meterCell.appendChild(el('span', 'limit', WL.shortLabel(state.main)));
@@ -227,7 +250,7 @@ function buildBoardRow(acc, index) {
   };
   row.addEventListener('click', choose);
   row.addEventListener('keydown', function(e) {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (e.target !== row || (e.key !== 'Enter' && e.key !== ' ')) return;
     e.preventDefault();
     choose();
   });

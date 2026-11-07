@@ -166,7 +166,8 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
   // The server died under an open window. The page keeps working on the next request once a new one
   // is up. If the port has gone to some other program, the window closes rather than talk to it.
   async function onServerLost() {
-    if (!mapsWin || mapsWin.isDestroyed()) return;
+    const lostFor = mapsWin;
+    if (!lostFor || lostFor.isDestroyed()) return;
     const now = Date.now();
     restarts = restarts.filter((at) => now - at < RESTART_WINDOW_MS);
     restarts.push(now);
@@ -178,7 +179,8 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
     try {
       await startServer();
     } catch (error) {
-      if (mapsWin && !mapsWin.isDestroyed()) closeWithError(error.message);
+      // By now the person may have closed that window and opened another. That one is fine.
+      if (mapsWin === lostFor && !lostFor.isDestroyed()) closeWithError(error.message);
     }
   }
 
@@ -199,9 +201,9 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
           callback({ requestHeaders: { ...details.requestHeaders, 'X-Balonche-Token': serverToken } });
         },
       );
-      // "Copy plan" needs the clipboard. Nothing else on a map needs a browser permission.
+      // "Copy plan" needs the clipboard and Present goes full screen. A map needs nothing else.
       mapsSession.setPermissionRequestHandler((_contents, permission, callback) => {
-        callback(permission === 'clipboard-sanitized-write');
+        callback(permission === 'clipboard-sanitized-write' || permission === 'fullscreen');
       });
     };
   })();
@@ -255,13 +257,17 @@ function createMapsFeature({ BrowserWindow, dialog, ipcMain, session, isLocalSen
     created.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     // The app's default menu would let Ctrl+Q here quit the widget too.
     created.setMenu(null);
+    // Chromium also reports a failed load as finished, right after the failure.
+    let lastLoadFailed = false;
     created.webContents.on('did-finish-load', () => {
-      reloads = 0;
+      if (!lastLoadFailed) reloads = 0;
+      lastLoadFailed = false;
       sendPending();
     });
     // A reload that found no server, which can happen right after it stopped.
     created.webContents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
       if (!isMainFrame || code === ABORTED) return;
+      lastLoadFailed = true;
       reloads += 1;
       if (reloads > MAX_RELOADS) {
         closeWithError('The map page could not load.');

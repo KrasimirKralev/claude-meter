@@ -4239,7 +4239,7 @@ function openDashboard(tab) {
     height: dH,
     x: dX,
     y: dY,
-    minWidth: 860,
+    minWidth: 900,
     minHeight: 560,
     frame: false,
     ...POPUP_GLASS_OPTS_FN(),
@@ -6426,7 +6426,7 @@ app.whenReady().then(() => {
     const b = win.getBounds();
     // Height auto-fits the content exactly: grow when clipped, shrink when
     // there's dead space (the calendar card stretches, so excess = empty white).
-    if (Math.abs(b.height - needed) > 2) {
+    if (b.height !== needed) {
       const y = Math.max(wa.y, Math.min(b.y, wa.y + wa.height - needed));
       win.setBounds({ x: b.x, y, width: b.width, height: needed });
     }

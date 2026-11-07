@@ -1168,7 +1168,7 @@
   .sidebar-nav button.active { background: var(--yellow); color: var(--on-candy); }
   .sidebar-nav button:focus-visible { outline-color: var(--bar-ink); }
   .sidebar-footer { margin-top: auto; padding: 0 10px !important; border-top: 0 !important; -webkit-app-region: no-drag; }
-  .sidebar-version { color: var(--bar-dim) !important; font-size: 12px !important; font-family: inherit !important; }
+  .sidebar-version { color: var(--bar-dim) !important; font-size: 12px !important; font-family: inherit !important; margin: 0 !important; }
   .chart-container { margin-bottom: 16px; }
   #tab-history .planner { margin-top: 16px; }
 
@@ -1231,16 +1231,22 @@
   .login-line { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
   tr.active .login-line, tr.active .tpct small, tr.active .tfable span { color: var(--on-yellow-dim); }
   .login-line.warn, .login-line.out { color: var(--crit-text); font-weight: 700; }
-  .tmeter { width: 262px; }
+  .tmeter { width: 300px; }
   .tpct { width: 64px; text-align: right; white-space: nowrap; }
   .tpct b { font-size: 24px; font-weight: 900; }
   .tpct small { font-size: 12px; font-weight: 600; margin-left: 1px; color: var(--text-dim); }
   tr.crit .tpct b, tr.crit .tpct small { color: var(--crit-text); }
   tr.active.crit .tpct b, tr.active.crit .tpct small { color: #8f1218; }
-  .tfable { width: 164px; }
+  .tfable { width: 188px; }
   .tfable span.limit { display: block; font-size: 12px; color: var(--text-dim); margin-top: 3px; }
-  .trefill { min-width: 110px; white-space: nowrap; }
-  .stale-row .tmeter, .stale-row .tfable, .stale-row .tpct { opacity: 0.6; }
+  .trefill { white-space: nowrap; }
+  /* A long status wraps inside the column's usual width, rather than widening the table. */
+  .trefill.long { white-space: normal; min-width: 176px; max-width: 176px; }
+  .trefill strong, .trefill span { display: inline-block; }
+  .stale-row .cells { opacity: 0.6; }
+  .stale-row .tpct b, .stale-row .tpct small { color: var(--text-dim) !important; }
+  .login-btn { padding: 4px 10px; border: 2px solid var(--ink); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+  .login-btn:hover { background: var(--surface2); }
   .trefill strong { color: var(--crit-text); font-weight: 700; }
   tr.active .trefill strong { color: #8f1218; }
   .cells { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; height: 13px; }
@@ -1257,6 +1263,7 @@
   .foot { font-size: 12.5px; color: var(--text-dim); }
   .lower { display: grid; grid-template-columns: 1fr 280px; gap: 14px; }
   .left, .side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .side { gap: 14px; }
   .panel {
     display: flex; flex-direction: column; gap: 6px; min-width: 0;
     background: var(--surface); color: var(--ink);
@@ -1293,7 +1300,8 @@
 
   /* Weekly chart */
   .keys { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
-  .keys i { width: 14px; height: 3px; border-radius: 2px; margin-left: 8px; }
+  .key { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; }
+  .keys i { width: 14px; height: 3px; border-radius: 2px; }
   .k1 { background: var(--ink); }
   .k2 { background: var(--green); }
   .k3 { background: var(--text-dim); height: 1px !important; }
@@ -1322,10 +1330,11 @@
 
   /* Smaller windows: the bars give way first, so names and refill times stay readable. */
   @media (max-width: 1040px) {
-    .tmeter { width: 130px; }
-    .trefill { white-space: normal; }
+    .tmeter { width: 110px; }
+    .trefill, .trefill.long { white-space: normal; min-width: 0; max-width: 140px; }
+    .name { flex-wrap: wrap; white-space: normal; }
     .phead h2 { white-space: nowrap; }
-    .tfable { width: 96px; }
+    .tfable { width: 84px; }
     .lower { grid-template-columns: 1fr 240px; }
     .board tbody th, .board td { padding-left: 8px; padding-right: 8px; }
   }
@@ -1379,7 +1388,7 @@
         <div class="panel chart" id="weekPanel">
           <div class="phead">
             <h2 id="weekTitle">This week</h2>
-            <span class="keys"><i class="k1"></i>All models<i class="k2"></i><span id="weekScopedKey">Fable</span><i class="k3"></i>Even pace</span>
+            <span class="keys"><span class="key"><i class="k1"></i>All models</span><span class="key"><i class="k2"></i><span id="weekScopedKey">Fable</span></span><span class="key"><i class="k3"></i>Even pace</span></span>
           </div>
           <div id="weekChart"></div>
         </div>

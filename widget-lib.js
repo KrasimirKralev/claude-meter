@@ -90,13 +90,14 @@
     return word.charAt(0).toUpperCase() + word.slice(1) + '.';
   }
 
+  // Short enough to sit on one line beside "Can't read usage."
   function ageText(at, now) {
     var mins = Math.max(0, Math.round((now - at) / 60000));
-    if (mins < 1) return 'just now';
-    if (mins < 60) return mins + 'm ago';
+    if (mins < 1) return 'Under 1m old';
+    if (mins < 60) return mins + 'm old';
     var hours = Math.round(mins / 60);
-    if (hours < 48) return hours + 'h ago';
-    return Math.round(hours / 24) + 'd ago';
+    if (hours < 48) return hours + 'h old';
+    return Math.round(hours / 24) + 'd old';
   }
 
   // Everything a row shows: its meters, plus up to two pieces of text beside them. The alert goes
@@ -126,7 +127,12 @@
     // Old numbers shown as current would mislead, so a failed read says so before anything else.
     if (state.status === 'error') {
       state.alert = "Can't read usage.";
-      state.detail = account.lastSuccessfulSync ? 'Last read ' + ageText(account.lastSuccessfulSync, now) : account.error;
+      state.detail = account.lastSuccessfulSync ? ageText(account.lastSuccessfulSync, now) : account.error;
+      return state;
+    }
+    // Logged out: a refill time means nothing until someone logs back in.
+    if (state.status === 'out') {
+      if (account.lastSuccessfulSync) state.detail = ageText(account.lastSuccessfulSync, now);
       return state;
     }
 
@@ -188,10 +194,10 @@
     var nextMain = next ? rowMeters(next.usage).main : null;
     return {
       most: most,
-      // "The most room" of how many, when some accounts could not be read at all.
-      of: most && live.length < all.length ? live.length : null,
+      // A claim about "most room" or "full" only covers the accounts that could be read.
+      of: (most || full) && live.length < all.length ? live.length : null,
       full: full,
-      nextName: next && live.length > 1 ? next.name : null,
+      nextName: next && all.length > 1 ? next.name : null,
       nextKind: next && nextMain === next.usage.session ? 'session' : '',
       nextText: next ? refillText(nextMain.resetsAt, now) : '',
     };
@@ -217,11 +223,13 @@
     var subs = rows.map(function(account) {
       return rowMeters(account.usage).subs.map(shortLabel).join('+');
     });
+    var firstSub = rowMeters(rows[0].usage).subs[0];
+    var weeklySub = !!firstSub && /^Current week/.test(firstSub.label || '');
     var sameSub = subs.every(function(label) { return label === subs[0]; }) && subs[0].indexOf('+') === -1 && subs[0] !== '';
     var mainName = mains[0] === 'All models' ? 'Weekly, all models' : mains[0];
     return {
       main: sameMain ? mainName : 'Main limit',
-      sub: sameSub ? 'Weekly, ' + subs[0] : 'Other limits',
+      sub: sameSub ? (weeklySub ? 'Weekly, ' + subs[0] : subs[0]) : 'Other limits',
       labelMain: !sameMain,
       labelSub: !sameSub,
     };
@@ -317,7 +325,9 @@
     if (enabled.length === 0) {
       if (known.length === 1 && accounts.length === 1) return 'Extra usage is off.';
       var count = COUNT_WORDS[known.length] || known.length;
-      if (known.length < accounts.length) return 'Extra usage is off on the ' + count + ' accounts with numbers.';
+      if (known.length < accounts.length) {
+        return 'Extra usage is off on the ' + count + (known.length === 1 ? ' account' : ' accounts') + ' with numbers.';
+      }
       return known.length === 2 ? 'Extra usage is off on both accounts.' : 'Extra usage is off on all ' + count + ' accounts.';
     }
     return 'Extra usage this month: ' + enabled.map(function(account) {

@@ -136,7 +136,10 @@
   .acct:focus-visible { outline-offset: -4px; }
   .acct.active, .acct.active:hover { background: var(--yellow); color: var(--on-candy); }
   /* A failed or throttled read: the last numbers stay, faded, and the row says why. */
-  .acct.stale .meters { opacity: 0.6; }
+  .acct.stale .cells { opacity: 0.6; }
+  .acct.stale .pct b, .acct.stale .pct small { color: var(--text-dim); }
+  /* A row with no bars: its status can use their room. */
+  .acct.no-meters { grid-template-columns: 30px 1fr 62px; }
   .bullet {
     width: 26px; height: 26px; display: grid; place-items: center;
     border: 2px solid var(--on-candy); border-radius: 7px;
@@ -158,6 +161,7 @@
   /* Outlined, so "where the CLI runs" can't be read as "active". */
   .name em.cli, .acct.active .name em.cli { background: none; color: inherit; box-shadow: inset 0 0 0 1.5px currentColor; }
   .reset { font-size: 12px; line-height: 1.25; color: var(--text-dim); min-height: 15px; }
+  .reset strong, .reset span { display: inline-block; }
   .acct.active .reset, .acct.active .lab, .acct.active .pct small { color: var(--on-yellow-dim); }
   .reset strong { color: var(--crit-text); font-weight: 700; }
   .acct.active .reset strong { color: #8f1218; }
@@ -165,6 +169,7 @@
   .meters { display: grid; grid-template-columns: minmax(62px, auto) 1fr; row-gap: 6px; align-items: center; min-width: 0; }
   .meters .wide { grid-column: 1 / -1; }
   .lab { font-size: 11px; color: var(--text-dim); white-space: nowrap; padding-right: 4px; }
+  .lab.wide { padding-right: 0; margin-bottom: -3px; }
   .login-btn { grid-column: 1 / -1; justify-self: start; padding: 4px 10px; border: 2px solid var(--ink); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 700; }
   .login-btn:hover { background: var(--surface2); }
   .pct { text-align: right; line-height: 1; white-space: nowrap; }
@@ -172,6 +177,7 @@
   .pct small { font-size: 12px; font-weight: 600; margin-left: 1px; color: var(--text-dim); }
   .crit .pct b, .crit .pct small { color: var(--crit-text); }
   .acct.active.crit .pct b, .acct.active.crit .pct small { color: #8f1218; }
+  .acct.active.stale .pct b, .acct.active.stale .pct small { color: var(--on-yellow-dim); }
 
   /* The 12 cells, the same meter as on the phone and watch. */
   .cells { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; height: 13px; }
@@ -450,7 +456,7 @@
   }
 
   /* Compact mode: double-click the title bar. The meters alone. */
-  body.compact .answer, body.compact .sub, body.compact .today { display: none; }
+  body.compact .answer, body.compact .lab, body.compact .cells.s, body.compact .today { display: none; }
   body.compact .accts { margin-top: 8px; margin-bottom: 8px; }
   body.compact .acct { min-height: 44px; }
 

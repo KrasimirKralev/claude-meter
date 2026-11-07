@@ -23,6 +23,9 @@ function createElement(tag, cls, text) {
 
 // --- Setup overlay (first-launch onboarding) ---
 function showSetupOverlay() {
+  // With several accounts, the logged-out row says so and offers its own login command. This
+  // screen's Sign In doesn't know which account it would log in to.
+  if (accountsData.length > 1) return;
   document.getElementById('setupOverlay').classList.add('visible');
   document.querySelector('.widget').classList.add('setup');
   reportMinHeight();
@@ -158,9 +161,10 @@ function setRowText(el, state) {
   if (el.getAttribute('data-text') === key) return;
   el.setAttribute('data-text', key);
   while (el.firstChild) el.removeChild(el.firstChild);
+  // Two whole pieces: when they don't fit on one line, they break between them, never inside.
   if (state.alert) el.appendChild(createElement('strong', null, state.alert));
   if (state.alert && state.detail) el.appendChild(document.createTextNode(' '));
-  if (state.detail) el.appendChild(document.createTextNode(state.detail));
+  if (state.detail) el.appendChild(createElement('span', null, state.detail));
 }
 
 function buildAccountRow(acc, index) {
@@ -171,7 +175,7 @@ function buildAccountRow(acc, index) {
   var chosen = active && accountsData.length > 1;
   var row = createElement('li', 'acct' + (chosen ? ' active' : '')
     + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : '')
-    + (state.status === 'limited' || state.status === 'error' ? ' stale' : ''));
+    + (state.status === 'limited' || state.status === 'error' || state.status === 'out' ? ' stale' : ''));
   row.setAttribute('role', 'button');
   row.setAttribute('tabindex', '0');
   row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
@@ -198,12 +202,15 @@ function buildAccountRow(acc, index) {
   row.appendChild(who);
 
   var meters = createElement('div', 'meters');
-  if (state.main) {
+  if (state.status === 'out') {
+    // Old bars say nothing once logged out. Getting back in is the only thing left to do.
+    meters.appendChild(buildLoginButton(acc));
+  } else if (state.main) {
     var now = Date.now();
     var mainLabel = WL.labelMeter(state.main, acc.usage);
-    if (mainLabel) meters.appendChild(createElement('span', 'lab', mainLabel));
+    if (mainLabel) meters.appendChild(createElement('span', 'lab wide', mainLabel));
     var mainCells = buildCells(state.main, false);
-    if (!mainLabel) mainCells.classList.add('wide');
+    mainCells.classList.add('wide');
     mainCells.title = meterTooltip(state.main, now);
     meters.appendChild(mainCells);
     state.subs.forEach(function(meter) {
@@ -214,10 +221,10 @@ function buildAccountRow(acc, index) {
       cells.title = lab.title;
       meters.appendChild(cells);
     });
-  } else if (state.status === 'out') {
-    meters.appendChild(buildLoginButton(acc));
+  } else {
+    row.classList.add('no-meters');
   }
-  row.appendChild(meters);
+  if (!row.classList.contains('no-meters')) row.appendChild(meters);
 
   var pct = createElement('div', 'pct');
   if (state.main) {
@@ -228,7 +235,8 @@ function buildAccountRow(acc, index) {
 
   row.addEventListener('click', function() { selectAccount(acc); });
   row.addEventListener('keydown', function(e) {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
+    // Keys pressed on a button inside the row belong to that button.
+    if (e.target !== row || (e.key !== 'Enter' && e.key !== ' ')) return;
     e.preventDefault();
     selectAccount(acc);
   });
@@ -266,7 +274,7 @@ function renderAnswer() {
   el.hidden = !parts || (!parts.most && !parts.full && !parts.nextText);
   if (el.hidden) return;
   if (parts.full) {
-    el.appendChild(createElement('b', null, 'Every account is full.'));
+    el.appendChild(createElement('b', null, parts.of ? 'Every readable account is full.' : 'Every account is full.'));
   } else if (parts.most) {
     el.appendChild(createElement('b', null, parts.most));
     el.appendChild(document.createTextNode(' has the most room'
@@ -292,6 +300,7 @@ function showActiveAccountUsage() {
   if (!data) {
     lastSyncError = active ? (active.name || active.id) + ': ' + (state.alert || state.detail) : 'No account';
     setSyncStatus('stale');
+    if (accountsData.length > 1) hideSetupOverlay();
   } else {
     lastSyncError = state.status === 'limited' ? state.detail : null;
     hideSetupOverlay();
@@ -332,8 +341,9 @@ function setSyncStatus(status) {
   var dot = document.getElementById('statusDot');
   var badge = document.getElementById('syncStatus');
 
+  // Only the first of a run of syncs starts the clock: offline, they keep arriving every few seconds.
+  if (status === 'syncing' && !syncing) syncingSince = Date.now();
   syncing = status === 'syncing';
-  if (syncing) syncingSince = Date.now();
   if (status === 'syncing') {
     dot.className = 'dot syncing';
     badge.className = 'sync-status syncing';

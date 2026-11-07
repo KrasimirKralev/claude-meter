@@ -260,6 +260,7 @@ test('extraSummary says "off" once, not once per account', () => {
   assert.strictEqual(extraSummary([account('A', off)]), 'Extra usage is off.');
   assert.strictEqual(extraSummary([account('A', off), account('B', off)]), 'Extra usage is off on both accounts.');
   assert.strictEqual(extraSummary([account('A', off), account('B', off), account('C', off), account('D', null)]), 'Extra usage is off on the three accounts with numbers.');
+  assert.strictEqual(extraSummary([account('A', off), account('B', null)]), 'Extra usage is off on the one account with numbers.');
   assert.strictEqual(extraSummary([account('A', null)]), '');
 });
 
@@ -282,7 +283,7 @@ test('a failing account keeps its last numbers but says they may be old', () => 
   assert.strictEqual(state.status, 'error');
   assert.strictEqual(state.main.pct, 5);
   assert.strictEqual(state.alert, "Can't read usage.");
-  assert.strictEqual(state.detail, 'Last read 3h ago');
+  assert.strictEqual(state.detail, '3h old');
   const noAge = rowState(account('Personal', weekly(5, 5, 10), { error: 'HTTP 500' }), NOW);
   assert.strictEqual(noAge.detail, 'HTTP 500');
 });
@@ -296,7 +297,23 @@ test('answerParts admits when it could only read some of the accounts', () => {
   const parts = answerParts([account('Out', null, { needsLogin: true }), account('A', weekly(50, 50, 20)), account('B', weekly(60, 60, 30))], NOW);
   assert.strictEqual(parts.most, 'A');
   assert.strictEqual(parts.of, 2);
+  const allFull = answerParts([account('Failing', weekly(5, 5, 10), { error: 'x' }), account('A', weekly(100, 1, 20)), account('B', weekly(100, 1, 30))], NOW);
+  assert.strictEqual(allFull.full, true);
+  assert.strictEqual(allFull.of, 2);
   assert.strictEqual(answerParts(today, NOW).of, null);
+});
+
+test('answerParts still names whose refill is next when only one account can be read', () => {
+  const parts = answerParts([account('Out', null, { needsLogin: true }), today[1]], NOW);
+  assert.strictEqual(parts.most, null);
+  assert.strictEqual(parts.nextName, 'Personal');
+});
+
+test('a logged-out account with old numbers says how old, not when they refill', () => {
+  const state = rowState(account('Side', weekly(10, 10, 20), { needsLogin: true, lastSuccessfulSync: NOW - 2 * HOUR }), NOW);
+  assert.strictEqual(state.status, 'out');
+  assert.strictEqual(state.alert, 'Logged out.');
+  assert.strictEqual(state.detail, '2h old');
 });
 
 test('answerParts says which limit refills on a plan with a session limit', () => {
@@ -342,4 +359,6 @@ test('boardHeads names a column only when it is true for every row', () => {
   const models = [today[1], account('S', { ...weekly(1, 1, 1), weekSonnet: meter(1, 1, { label: 'Current week (Sonnet)', model: 'Sonnet' }) })];
   assert.deepStrictEqual(boardHeads(models), { main: 'Weekly, all models', sub: 'Other limits', labelMain: false, labelSub: true });
   assert.strictEqual(boardHeads([account('A', null)]).main, 'Weekly, all models');
+  const routines = [account('R', { ...weekly(1, 1, 1), weekSonnet: meter(1, 1, { label: 'Daily routines' }) })];
+  assert.strictEqual(boardHeads(routines).sub, 'Daily routines');
 });
