@@ -4,7 +4,7 @@ Sketch on a dotted canvas, press Digitize, and end with a finished bubble map yo
 work in and show to people. "Балонче" means little balloon and speech bubble in Bulgarian.
 
 This folder is the Maps section of Claude Meter. `npm run bundle:maps` in the repo root builds it into
-`maps/build/`, and every desktop build ships that. It also runs by itself in a browser:
+`maps/build/`, and the desktop app shows it inside its dashboard. It also runs by itself in a browser:
 
 ## Quick start
 
