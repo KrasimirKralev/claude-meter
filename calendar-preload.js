@@ -15,8 +15,7 @@ contextBridge.exposeInMainWorld('calendarAPI', {
     ipcRenderer.on('calendar-update', calendarUpdateHandler);
   },
   openExternal: (url) => ipcRenderer.send('open-external-url', url),
-  openDashboard: () => ipcRenderer.send('open-dashboard'),
-  openAddEvent: (date) => ipcRenderer.send('open-add-event', date),
+  close: () => ipcRenderer.send('calendar-window-close'),
   onSnapGlow: (cb) => ipcRenderer.on('snap-glow', () => cb()),
   onThemeUpdate: (cb) => ipcRenderer.on('theme-update', (_e, data) => cb(data)),
 });

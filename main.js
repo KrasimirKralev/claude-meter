@@ -2644,6 +2644,7 @@ function updateCalendarEvent(data) {
   if (data.title !== undefined) evt.title = String(data.title).trim().slice(0, 100);
   if (data.date !== undefined) evt.date = data.date;
   if (data.time !== undefined) evt.time = data.time || null;
+  if (data.duration !== undefined) evt.duration = typeof data.duration === 'number' && data.duration > 0 ? data.duration : null;
   if (data.color !== undefined && ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0) evt.color = data.color;
   if (data.reminder !== undefined) evt.reminder = typeof data.reminder === 'number' ? data.reminder : null;
   firedReminders.delete(evt.id); // allow re-fire if time changed
@@ -5651,6 +5652,14 @@ function openTasksWindow() {
   });
 }
 
+ipcMain.on('calendar-window-close', (event) => {
+  try { if (!event.senderFrame || !event.senderFrame.url.startsWith('file://')) return; } catch { return; }
+  if (calWin && !calWin.isDestroyed()) {
+    calWin.hide();
+    calWasVisible = false;
+  }
+});
+
 ipcMain.on('tasks-window-close', (event) => {
   try { if (!event.senderFrame || !event.senderFrame.url.startsWith('file://')) return; } catch { return; }
   if (tasksMovedTimer) { clearTimeout(tasksMovedTimer); tasksMovedTimer = null; }
@@ -6697,7 +6706,8 @@ app.whenReady().then(() => {
     if (!isLocalSender(event)) return { success: false };
     if (typeof newDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(newDate)) return { success: false };
     const evt = calendarEvents.find((e) => e.id === eventId);
-    if (!evt) return { success: false };
+    // A synced event lives in Google, and the next sync would put it straight back.
+    if (!evt || evt.isGoogleEvent) return { success: false };
     evt.date = newDate;
     saveCalendarEvents();
     broadcastCalendar();

@@ -41,6 +41,11 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   toggleTask: (id) => ipcRenderer.send('tasks-toggle', id),
   deleteTask: (id) => ipcRenderer.send('tasks-delete', id),
   clearCompleted: () => ipcRenderer.send('tasks-clear-completed'),
+  smartAddTask: (text) => ipcRenderer.invoke('smart-add', text),
+  setTaskPriority: (id, priority) => ipcRenderer.send('tasks-set-priority', id, priority),
+  reorderTasks: (orderedIds) => ipcRenderer.send('tasks-reorder', orderedIds),
+  scheduleTask: (id, date, time) => ipcRenderer.invoke('tasks-schedule', id, date, time),
+  openTaskNote: (id, text) => ipcRenderer.send('open-task-note', id, text),
   onTasksUpdate: (cb) => {
     if (tasksUpdateHandler) ipcRenderer.removeListener('tasks-update', tasksUpdateHandler);
     tasksUpdateHandler = (_e, data) => cb(data);
@@ -84,6 +89,7 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   updateCalendarEvent: (data) => ipcRenderer.invoke('calendar-update-event', data),
   toggleCalendarEvent: (id) => ipcRenderer.invoke('calendar-toggle-event', { id }),
   deleteCalendarEvent: (id) => ipcRenderer.invoke('calendar-delete-event', { id }),
+  moveCalendarEvent: (id, newDate) => ipcRenderer.invoke('calendar-move-event', id, newDate),
   onCalendarUpdate: (cb) => {
     if (calendarUpdateHandler) ipcRenderer.removeListener('calendar-update', calendarUpdateHandler);
     calendarUpdateHandler = (_e, data) => cb(data);

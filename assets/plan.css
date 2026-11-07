@@ -1,0 +1,144 @@
+/* The Plan parts: tasks and calendar, used by the panels beside the widget and by the dashboard.
+   Both read their width from their container, so the same markup fits 280 px and 900 px. */
+
+/* ---------- Tasks ---------- */
+.pt { display: flex; flex-direction: column; gap: 8px; min-height: 0; height: 100%; container-type: inline-size; }
+.pt-add { display: flex; gap: 8px; flex: none; }
+.pt-add .field { flex: 1; min-width: 0; }
+.pt-add .btn { height: 34px; }
+.pt-note { margin: 0; min-height: 0; font-size: 12.5px; color: var(--text-dim); flex: none; }
+.pt-note:empty { display: none; }
+.pt-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 0 5px 5px 0; }
+.pt-list { overflow: hidden; flex: none; box-shadow: var(--shadow-sm); }
+.pt-done { box-shadow: none; }
+.pt-row {
+  display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; column-gap: 8px;
+  min-height: 46px; padding: 6px 8px 6px 4px; background: var(--surface);
+}
+.pt-row + .pt-row, .pt-schedule + .pt-row { border-top: 2px solid var(--ink); }
+.pt-row[draggable='true'] { cursor: grab; }
+.pt-row.dragging { opacity: 0.45; }
+.pt-row.is-done { padding-left: 12px; grid-template-columns: auto 1fr auto; }
+.pt-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pt-text { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; line-height: 1.3; }
+.is-done .pt-text { font-weight: 500; color: var(--text-dim); text-decoration: line-through; }
+.pt-due { font-size: 12px; color: var(--text-dim); }
+.pt-due.today { color: var(--text); font-weight: 700; }
+.pt-due.late { color: var(--crit-text); font-weight: 700; }
+.pt-actions { display: flex; align-items: center; gap: 2px; }
+.pt-grip { width: 20px; color: var(--text-dim); cursor: grab; }
+.pt-grip svg { stroke-width: 3; }
+.pt-prio {
+  height: 22px; padding: 0 7px; margin-right: 2px; border-radius: 5px;
+  border: 2px solid var(--ink); font-size: 11px; font-weight: 800; color: var(--on-candy);
+}
+.pt-prio.high { background: var(--crit-text); color: #ffffff; }
+.pt-prio.medium { background: var(--yellow); }
+.pt-prio.low { background: var(--surface); color: var(--text); }
+.pt-schedule {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 110px) auto auto; gap: 6px; align-items: center;
+  padding: 8px 10px; border-top: 2px solid var(--ink); background: var(--surface2);
+}
+.pt-donehead { display: flex; align-items: center; justify-content: space-between; flex: none; }
+.pt-donehead[hidden] { display: none; }
+.pt-donehead svg { width: 14px; height: 14px; }
+
+/* A narrow panel: the actions drop under the text. */
+@container (max-width: 400px) {
+  .pt-row { grid-template-columns: auto auto 1fr; row-gap: 2px; }
+  .pt-row .pt-actions { grid-column: 3; justify-content: flex-start; margin-left: -6px; }
+  .pt-row.is-done { grid-template-columns: auto 1fr; }
+  .pt-row.is-done .pt-actions { grid-column: 2; }
+  .pt-schedule { grid-template-columns: 1fr 1fr; }
+  .pt-add .btn { display: none; }
+}
+
+/* ---------- Calendar ---------- */
+.pc { min-height: 0; height: 100%; container-type: inline-size; }
+.pc-inner { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+.pc-left { display: flex; flex-direction: column; gap: 8px; flex: none; }
+.pc-month { padding: 8px 10px 10px; display: none; }
+.month-open .pc-month { display: block; }
+.pc-monthhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.pc-monthhead h2 { margin: 0; font-size: 14px; font-weight: 800; }
+.pc-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+.pc-letter { text-align: center; font-size: 11px; font-weight: 700; color: var(--text-dim); }
+.pc-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  min-height: 34px; padding: 3px 0; border-radius: 7px; border: 2px solid transparent;
+  background: var(--surface);
+}
+.pc-num { font-size: 13px; font-weight: 700; line-height: 1.2; }
+.pc-cell.other .pc-num { color: var(--text-dim); font-weight: 500; }
+.pc-cell:hover { border-color: var(--ink); }
+.pc-cell.today { background: var(--yellow); color: var(--on-candy); border-color: var(--ink); }
+.pc-cell.on { background: var(--bar); color: var(--bar-ink); border-color: var(--bar); }
+.pc-cell.on .pc-letter { color: var(--bar-dim); }
+.pc-cell.on.today .pc-num { color: var(--yellow); }
+.pc-cell.today:not(.on) .pc-letter { color: var(--on-yellow-dim); }
+.pc-cell.drop { border: 2px dashed var(--ink); background: var(--accent); color: var(--on-accent); }
+.pc-dots { display: flex; gap: 2px; min-height: 5px; }
+.pc-dots i { width: 5px; height: 5px; border-radius: 50%; box-shadow: 0 0 0 1px var(--ink); }
+.pc-weeknav { display: flex; align-items: center; justify-content: space-between; }
+.pc-weeklabel svg { width: 14px; height: 14px; }
+.month-open .pc-weeklabel svg { transform: rotate(180deg); }
+.pc-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+.pc-strip .pc-cell { border-color: var(--ink); min-height: 54px; }
+
+.pc-day { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; min-width: 0; }
+.pc-dayhead { display: flex; align-items: center; gap: 8px; flex: none; min-height: 28px; }
+.pc-dayhead h2 { margin: 0; font-size: 16px; font-weight: 800; }
+.pc-new { margin-left: auto; }
+.pc-new svg { width: 14px; height: 14px; }
+.pc-events { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: 0 5px 5px 0; }
+.pc-ev {
+  display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto; align-items: center; column-gap: 8px;
+  min-height: 48px; padding: 6px 8px 6px 10px; flex: none;
+  background: var(--surface); border: 2px solid var(--ink); border-radius: 10px; box-shadow: var(--shadow-sm);
+}
+.pc-ev[draggable='true'] { cursor: grab; }
+.pc-ev.dragging { opacity: 0.45; }
+.pc-when { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 48px; font-size: 12.5px; font-weight: 700; }
+.pc-swatch { width: 8px; align-self: stretch; min-height: 24px; border-radius: 4px; box-shadow: 0 0 0 1.5px var(--ink); }
+.pc-title { font-size: 14px; font-weight: 700; overflow-wrap: anywhere; line-height: 1.3; }
+.pc-meta { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
+.pc-ev.is-done { box-shadow: none; }
+.pc-ev.is-done .pc-title { font-weight: 500; color: var(--text-dim); text-decoration: line-through; }
+.pc-ev.is-done .pc-when { color: var(--text-dim); font-weight: 500; }
+.pc-actions { display: flex; align-items: center; gap: 2px; }
+.pc-quick { flex: none; }
+
+.pc-formbox:empty { display: none; }
+.pc-formbox { flex: none; padding: 0 5px 5px 0; }
+.pc-form { display: flex; flex-direction: column; gap: 8px; padding: 12px; margin: 0; }
+.pc-form h3 { margin: 0; font-size: 14px; font-weight: 800; }
+.pc-formrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.pc-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; font-weight: 600; color: var(--text-dim); min-width: 0; }
+.pc-field .field { color: var(--text); }
+.pc-colors { display: flex; align-items: center; gap: 8px; margin: 0; padding: 0; border: 0; font-size: 12px; font-weight: 600; color: var(--text-dim); }
+.pc-colors legend { float: left; margin-right: 4px; padding: 0; }
+.pc-color { width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--ink); }
+.pc-color[aria-pressed='true'] { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink); }
+.pc-problem { margin: 0; font-size: 12.5px; font-weight: 700; color: var(--crit-text); }
+.pc-problem:empty { display: none; }
+.pc-formbtns { display: flex; gap: 8px; }
+
+/* Narrow: the event's actions drop under its text. */
+@container (max-width: 400px) {
+  .pc-ev { grid-template-columns: auto auto minmax(0, 1fr); row-gap: 2px; column-gap: 7px; padding-left: 8px; }
+  .pc-swatch { grid-row: 1; grid-column: 2; width: 6px; }
+  .pc-ev .check { grid-row: 1; grid-column: 1; }
+  .pc-when { grid-row: 2; grid-column: 3; flex-direction: row; gap: 5px; font-size: 12px; min-width: 0; color: var(--text-dim); }
+  .pc-body { grid-row: 1; grid-column: 3; }
+  .pc-actions { grid-row: 3; grid-column: 3; margin-left: -6px; }
+}
+
+/* Wide: the month is always there, beside the day. */
+@container (min-width: 620px) {
+  .pc-inner { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 16px; }
+  .pc-week { display: none; }
+  .pc-month { display: block; box-shadow: var(--shadow-sm); }
+  .pc-left { margin-right: 4px; }
+  .pc-cell { min-height: 40px; }
+  .pc-num { font-size: 14px; }
+}

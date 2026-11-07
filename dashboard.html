@@ -7,6 +7,8 @@
   content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self';">
 <title>Claude Meter — Dashboard</title>
 <link rel="stylesheet" href="assets/fonts/inter.css">
+<link rel="stylesheet" href="assets/ui.css">
+<link rel="stylesheet" href="assets/plan.css">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
@@ -1322,6 +1324,26 @@
   .mapitem:hover b { text-decoration: underline; }
   .thumb { width: 92px; height: 55px; flex-shrink: 0; border-radius: 8px; }
   .maplist { display: flex; flex-direction: column; gap: 8px; }
+  /* Plan: the tasks and calendar fill the section and scroll inside themselves. */
+  .plan-tab.active { height: 100%; }
+  .plan-tab > div { height: 100%; }
+  .habits-head { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .habits-head h2 { margin: 0; min-width: 150px; text-align: center; font-size: 15px; font-weight: 800; }
+  .habits-board { overflow: hidden; margin-right: 4px; }
+  .habit-row { display: grid; grid-template-columns: 96px minmax(0, 1fr) 96px; align-items: center; gap: 10px; padding: 12px 12px; }
+  .habit-row + .habit-row { border-top: 2px solid var(--ink); }
+  .habit-name { font-size: 14px; font-weight: 800; }
+  .habit-note { font-size: 12px; color: var(--text-dim); text-align: right; white-space: nowrap; }
+  .habit-note b { color: var(--text); font-weight: 800; font-size: 14px; }
+  .habit-days { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 3px; }
+  .habit-day { height: 34px; padding: 0; border-radius: 5px; border: 1.5px solid var(--ink); background: var(--surface); color: var(--text-dim); font-size: 10.5px; font-weight: 700; }
+  button.habit-day:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+  .habit-day.done { background: var(--green); color: var(--on-candy); }
+  button.habit-day.done:hover:not(:disabled) { background: var(--green); color: var(--on-candy); filter: brightness(0.92); }
+  .habit-day.today { box-shadow: 0 0 0 2px var(--yellow), 0 0 0 3.5px var(--ink); color: var(--text); }
+  .habit-day.future { opacity: 0.35; border-style: dashed; }
+  .habits-head + .habits-board + .foot { margin-top: 12px; }
+
   /* The map page lies over this box, in its own view. What's in here shows only until it's ready. */
   .main.flush { padding: 8px 12px 12px !important; overflow: hidden !important; scrollbar-gutter: auto; }
   #tab-maps.active { height: 100%; animation: none !important; }
@@ -1438,76 +1460,19 @@
     <div class="alert-rows" id="alertRows"></div>
   </div>
 
-  <div class="tab-content" id="tab-calendar">
-    <div class="section-title">Calendar</div>
-    <div id="calendarGrid"></div>
-    <div id="calendarAgenda"></div>
-  </div>
+  <div class="tab-content plan-tab" id="tab-calendar"><div id="calendarRoot"></div></div>
 
-  <div class="tab-content" id="tab-tasks">
-    <div class="tab-header">
-      <h2>Tasks</h2>
-      <p class="tab-desc" id="tasksCounter">0 tasks</p>
-    </div>
-    <div class="tasks-add-row" id="tasksAddRow" style="display:flex;gap:8px;margin-bottom:16px;">
-      <input id="dashTaskInput" type="text" maxlength="200" placeholder="Add a task..."
-        style="flex:1;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--text);font-family:inherit;outline:none;">
-      <button id="dashTaskAddBtn"
-        style="padding:8px 18px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb, var(--accent) 70%, black));border:none;border-radius:6px;font-size:12px;font-weight:600;color:#fff;cursor:pointer;">Add</button>
-    </div>
-    <div id="dashTasksActive"></div>
-    <div id="dashTasksCompleted"></div>
-    <div id="dashTasksClearRow" style="margin-top:12px;text-align:right;display:none;">
-      <button id="dashClearCompleted"
-        style="padding:4px 12px;background:none;border:1px solid var(--border);border-radius:4px;font-size:10px;color:var(--text-dim);cursor:pointer;font-family:inherit;">Clear completed</button>
-    </div>
-  </div>
+  <div class="tab-content plan-tab" id="tab-tasks"><div id="tasksRoot"></div></div>
 
   <div class="tab-content" id="tab-habits">
-    <div class="section-title">Habits</div>
-
-    <div class="habit-cals">
-      <div class="habit-cal" data-kind="training">
-        <div class="habit-cal-header">
-          <div class="habit-cal-title">Training</div>
-          <div class="habit-cal-streak" id="trainingStreak"></div>
-        </div>
-        <div class="habit-cal-nav">
-          <button class="habit-btn habit-nav-btn" data-cal="training" data-dir="-1">◀</button>
-          <div class="habit-cal-month" id="trainingMonth"></div>
-          <button class="habit-btn habit-nav-btn" data-cal="training" data-dir="1">▶</button>
-        </div>
-        <div class="habit-cal-grid" id="trainingGrid"></div>
-      </div>
-
-      <div class="habit-cal" data-kind="reading">
-        <div class="habit-cal-header">
-          <div class="habit-cal-title">Read/Write</div>
-          <div class="habit-cal-streak" id="readingStreak"></div>
-        </div>
-        <div class="habit-cal-nav">
-          <button class="habit-btn habit-nav-btn" data-cal="reading" data-dir="-1">◀</button>
-          <div class="habit-cal-month" id="readingMonth"></div>
-          <button class="habit-btn habit-nav-btn" data-cal="reading" data-dir="1">▶</button>
-        </div>
-        <div class="habit-cal-grid" id="readingGrid"></div>
-      </div>
-
-      <div class="habit-cal" data-kind="relax">
-        <div class="habit-cal-header">
-          <div class="habit-cal-title">Relax</div>
-          <div class="habit-cal-streak" id="relaxStreak"></div>
-        </div>
-        <div class="habit-cal-nav">
-          <button class="habit-btn habit-nav-btn" data-cal="relax" data-dir="-1">◀</button>
-          <div class="habit-cal-month" id="relaxMonth"></div>
-          <button class="habit-btn habit-nav-btn" data-cal="relax" data-dir="1">▶</button>
-        </div>
-        <div class="habit-cal-grid" id="relaxGrid"></div>
-      </div>
+    <div class="habits-head">
+      <button class="icon-btn" id="habitsPrev" aria-label="Previous month" title="Previous month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg></button>
+      <h2 id="habitsMonth"></h2>
+      <button class="icon-btn" id="habitsNext" aria-label="Next month" title="Next month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+      <button class="btn small" id="habitsToday" hidden>This month</button>
     </div>
-
-    <div class="habit-hint">Click a day to toggle ✓ for Training and Read/Write. Relax ticks itself once all <span id="relaxHintTarget">4</span> of the day's breaks are done. Today is highlighted.</div>
+    <div class="habits-board card raised" id="habitsBoard"></div>
+    <p class="foot" id="habitsHint">Click a day to tick it. Relax ticks itself once all of the day's breaks are done.</p>
   </div>
 
   <div class="tab-content" id="tab-status">
@@ -1535,6 +1500,10 @@
 
 </div>
 <script src="widget-lib.js"></script>
+<script src="ui-theme.js"></script>
+<script src="plan-lib.js"></script>
+<script src="plan-tasks.js"></script>
+<script src="plan-calendar.js"></script>
 <script src="chart.min.js"></script>
 <script src="dashboard.js"></script>
 </body>
