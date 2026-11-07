@@ -48,17 +48,17 @@ test('childEnv tells the Electron binary to act as Node on the fixed port', () =
 test('serverEntry looks outside the asar, because ESM cannot load from inside one', () => {
   const seen = [];
   const found = serverEntry('/app/resources/app.asar', (p) => { seen.push(p); return true; });
-  assert.strictEqual(found, path.join('/app/resources/app.asar.unpacked', 'balonche', 'server', 'index.mjs'));
+  assert.strictEqual(found, path.join('/app/resources/app.asar.unpacked', 'maps', 'build', 'server', 'index.mjs'));
   assert.strictEqual(seen.length, 1);
 });
 
 test('serverEntry works from a source checkout, and reports a build without Balonche', () => {
-  assert.strictEqual(serverEntry('/src/meter', () => true), path.join('/src/meter', 'balonche', 'server', 'index.mjs'));
+  assert.strictEqual(serverEntry('/src/meter', () => true), path.join('/src/meter', 'maps', 'build', 'server', 'index.mjs'));
   assert.strictEqual(serverEntry('/src/meter', () => false), null);
 });
 
 test('serverEntry leaves a folder that merely starts with app.asar alone', () => {
-  assert.strictEqual(serverEntry('/x/app.asarfoo', () => true), path.join('/x/app.asarfoo', 'balonche', 'server', 'index.mjs'));
+  assert.strictEqual(serverEntry('/x/app.asarfoo', () => true), path.join('/x/app.asarfoo', 'maps', 'build', 'server', 'index.mjs'));
 });
 
 test('cleanMapsReport keeps a good map', () => {

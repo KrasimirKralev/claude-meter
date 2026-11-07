@@ -12,11 +12,13 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/display-scale.test.js test/usage-limits.test.js test/maps-lib.test.js test/widget-lib.test.js test/maps-window.test.js",
-    "bundle:maps": "node scripts/bundle-balonche.js",
-    "build": "electron-builder",
-    "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac --publish never",
-    "build:linux": "electron-builder --linux"
+    "bundle:maps": "node scripts/bundle-maps.js",
+    "build": "npm run bundle:maps && electron-builder",
+    "build:win": "npm run bundle:maps && electron-builder --win",
+    "build:mac": "npm run bundle:maps && electron-builder --mac --publish never",
+    "build:linux": "npm run bundle:maps && electron-builder --linux",
+    "test:maps": "npm --prefix maps run typecheck && npm --prefix maps test",
+    "test:maps:install": "npm --prefix maps install --no-audit --no-fund"
   },
   "build": {
     "appId": "com.claude-usage-widget",
@@ -30,10 +32,10 @@
       "relax-biomes/**/*",
       "!relax-biomes/samples/build-pack.py",
       "assets/**/*",
-      "balonche/**/*"
+      "maps/build/**/*"
     ],
     "asarUnpack": [
-      "balonche/**/*"
+      "maps/build/**/*"
     ],
     "win": {
       "target": [

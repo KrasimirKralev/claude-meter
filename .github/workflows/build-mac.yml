@@ -8,6 +8,13 @@ on:
       - 'assets/screenshot-*.png'
       - 'LICENSE'
       - '.gitignore'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshot-*.png'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +28,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -29,6 +36,9 @@ jobs:
       - name: Read app version
         id: v
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Run the tests
+        run: npm test && npm run test:maps:install && npm run test:maps
 
       - name: Build unsigned DMG (Apple Silicon + Intel)
         run: npm run build:mac
@@ -44,7 +54,9 @@ jobs:
           name: claude-meter-macos
           path: dist/*.dmg
 
+      # A pull request proves the build. Only main publishes one.
       - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.v.outputs.version }}

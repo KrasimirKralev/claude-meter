@@ -32,10 +32,10 @@ function childEnv(env, home) {
 }
 
 // electron-builder unpacks the server beside the asar, because Node's ES module loader can't read
-// from inside one. Null means this build has no Balonche, so the Maps button stays hidden.
+// from inside one. Null means this build skipped the bundle step, so the Maps button stays hidden.
 function serverEntry(dirname, exists) {
   const base = dirname.replace(/app\.asar(?=$|[/\\])/, 'app.asar.unpacked');
-  const entry = path.join(base, 'balonche', 'server', 'index.mjs');
+  const entry = path.join(base, 'maps', 'build', 'server', 'index.mjs');
   return exists(entry) ? entry : null;
 }
 
