@@ -31,13 +31,7 @@ function hideSetupOverlay() {
 
 
 
-function fmtMoney(minor, decimals, currency) {
-  var d = (typeof decimals === 'number' && decimals >= 0) ? decimals : 2;
-  var v = (Number(minor || 0) / Math.pow(10, d)).toFixed(d);
-  if (currency === 'BGN') return v + ' лв';
-  var sym = { EUR: '€', USD: '$', GBP: '£', JPY: '¥' }[currency] || ((currency || '') + ' ');
-  return sym + v;
-}
+var fmtMoney = WL.money;
 
 // Extra usage inline strip — spend this month toward the monthly limit
 function renderExtraUsage(eu) {
@@ -866,59 +860,23 @@ var todayEvents = [];
 var tasksLeft = null;
 var nextJoinLink = null;
 
-function widgetCalToday() {
-  var d = new Date();
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-}
-
 function eventJoinLink(evt) {
   if (evt.meetLink) return evt.meetLink;
   var match = typeof evt.title === 'string' && evt.title.match(/https:\/\/[^\s<>"']+/);
   return match ? match[0] : null;
 }
 
-// Today's unfinished events still worth showing, then the next future ones.
-function upcomingEvents(events, now) {
-  var today = widgetCalToday();
-  return (events || [])
-    .filter(function(evt) {
-      if (evt.done || evt.date < today) return false;
-      if (evt.date > today || !evt.time) return true;
-      // Something that started in the last half hour is probably still going on.
-      return new Date(evt.date + 'T' + evt.time).getTime() >= now - 30 * 60000;
-    })
-    .sort(function(a, b) {
-      if (a.date !== b.date) return a.date.localeCompare(b.date);
-      if (!a.time && b.time) return -1;
-      if (a.time && !b.time) return 1;
-      return (a.time || '').localeCompare(b.time || '');
-    });
-}
-
-function eventTimeText(evt, now) {
-  if (evt.date !== widgetCalToday()) {
-    var parts = evt.date.split('-');
-    var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    return months[parseInt(parts[1], 10) - 1] + ' ' + parseInt(parts[2], 10);
-  }
-  if (!evt.time) return 'All day';
-  var diff = new Date(evt.date + 'T' + evt.time).getTime() - now;
-  if (diff <= 0) return 'Now';
-  if (diff < 60 * 60000) return 'in ' + Math.round(diff / 60000) + 'm';
-  return evt.time;
-}
-
 function renderToday() {
   var nextEl = document.getElementById('nextEvent');
   var tasksEl = document.getElementById('tasksLeft');
   var now = Date.now();
-  var upcoming = upcomingEvents(todayEvents, now);
-  var today = widgetCalToday();
+  var upcoming = WL.upcomingEvents(todayEvents, now);
+  var today = WL.localDay(now);
   var next = upcoming[0];
   while (nextEl.firstChild) nextEl.removeChild(nextEl.firstChild);
   nextJoinLink = null;
   if (next) {
-    nextEl.appendChild(createElement('b', null, eventTimeText(next, now)));
+    nextEl.appendChild(createElement('b', null, WL.eventTimeText(next, now)));
     nextEl.appendChild(document.createTextNode(' ' + next.title));
     var moreToday = upcoming.filter(function(evt) { return evt.date === today; }).length - 1;
     if (next.date === today && moreToday > 0) nextEl.appendChild(createElement('span', 'more', ' +' + moreToday));

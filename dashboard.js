@@ -1,5 +1,6 @@
 /* Dashboard renderer — safe DOM only (no innerHTML) */
 
+var WL = window.WidgetLib;
 var usageData = null;      // the ACTIVE account's usage — drives planner + chart
 var accountsData = [];     // every enabled account, from the usage-update payload
 var activeAccountId = null;
@@ -32,207 +33,400 @@ function getMeterClass(meter) {
   return getBarClass(meter.pct);
 }
 
-function formatCountdown(ts) {
-  if (!ts) return '';
-  var d = new Date(ts);
-  if (isNaN(d.getTime())) return '';
-  var diff = d.getTime() - Date.now();
-  if (diff <= 0) return 'Resetting...';
-  if (diff > 86400000) {
-    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    var h = d.getHours();
-    var ampm = h >= 12 ? 'pm' : 'am';
-    var h12 = h % 12 || 12;
-    var min = d.getMinutes();
-    var minStr = min > 0 ? ':' + (min < 10 ? '0' : '') + min : '';
-    return 'Resets ' + months[d.getMonth()] + ' ' + d.getDate() + ', ' + h12 + minStr + ampm;
+// --- Navigation: four sections, each with its own tabs ---
+
+var SECTIONS = [
+  { id: 'usage', title: 'Usage', tabs: [['overview', 'Overview'], ['history', 'History'], ['alerts', 'Alerts'], ['status', 'Status']] },
+  { id: 'plan', title: 'Plan', tabs: [['calendar', 'Calendar'], ['tasks', 'Tasks'], ['habits', 'Habits']], notes: true },
+  { id: 'maps', title: 'Maps', tabs: [['maps', 'Maps']] },
+  { id: 'settings', title: 'Settings', tabs: [['settings', 'Settings']] },
+];
+// A name other windows may still ask for.
+var TAB_ALIASES = { analytics: 'history' };
+var currentTab = 'overview';
+var lastTabOf = {};
+
+function sectionOfTab(tab) {
+  for (var i = 0; i < SECTIONS.length; i++) {
+    for (var j = 0; j < SECTIONS[i].tabs.length; j++) {
+      if (SECTIONS[i].tabs[j][0] === tab) return SECTIONS[i];
+    }
   }
-  var hours = Math.floor(diff / 3600000);
-  var mins = Math.floor((diff % 3600000) / 60000);
-  if (hours > 0) return 'Resets in ' + hours + 'h ' + mins + 'm';
-  if (mins > 0) return 'Resets in ' + mins + 'm';
-  return 'Resets in ' + Math.max(1, Math.floor(diff / 1000)) + 's';
+  return null;
 }
 
-// --- Tab navigation ---
-
-var navItems = document.querySelectorAll('.sidebar-nav li');
-var tabPanels = document.querySelectorAll('.tab-content');
-
-for (var i = 0; i < navItems.length; i++) {
-  (function(item) {
-    item.addEventListener('click', function() {
-      for (var j = 0; j < navItems.length; j++) {
-        navItems[j].classList.remove('active');
-      }
-      for (var k = 0; k < tabPanels.length; k++) {
-        tabPanels[k].classList.remove('active');
-      }
-      item.classList.add('active');
-      var tabId = 'tab-' + item.getAttribute('data-tab');
-      var panel = document.getElementById(tabId);
-      if (panel) panel.classList.add('active');
-
-      // Redraw chart and fix pill slider when history tab becomes visible
-      if (item.getAttribute('data-tab') === 'history') {
-        requestAnimationFrame(function() { updateSlider(); });
-        drawChart();
-      }
-      // Render analytics tab on click
-      if (item.getAttribute('data-tab') === 'analytics') {
-        renderAnalytics();
-      }
-      // Render calendar tab on click
-      if (item.getAttribute('data-tab') === 'calendar') {
-        renderCalendar();
-      }
-      // Render habits tab on click
-      if (item.getAttribute('data-tab') === 'habits') {
-        renderHabits();
-      }
-      // Render status tab on click
-      if (item.getAttribute('data-tab') === 'status') {
-        if (!claudeStatusData) {
-          window.dashboardAPI.getClaudeStatus().then(function(data) {
-            if (data) { claudeStatusData = data; renderStatusTab(); }
-          });
-        }
-        renderStatusTab();
-      }
-    });
-  })(navItems[i]);
+function renderSectionTabs(section, tab) {
+  var holder = document.getElementById('sectionTabs');
+  while (holder.firstChild) holder.removeChild(holder.firstChild);
+  document.getElementById('sectionTitle').textContent = section.title;
+  if (section.tabs.length < 2) return;
+  section.tabs.forEach(function(entry) {
+    var button = el('button', entry[0] === tab ? 'active' : '', entry[1]);
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', entry[0] === tab ? 'true' : 'false');
+    button.addEventListener('click', function() { showTab(entry[0]); });
+    holder.appendChild(button);
+  });
+  if (section.notes) {
+    // Notes still has its own window. It joins this section's tabs in the next round.
+    var notes = el('button', '', 'Notes');
+    notes.addEventListener('click', function() { window.dashboardAPI.openNotes(); });
+    holder.appendChild(notes);
+  }
 }
+
+function afterTabShown(tab) {
+  if (tab === 'overview') renderOverview();
+  // Redraw chart and fix pill slider when history tab becomes visible
+  if (tab === 'history') {
+    requestAnimationFrame(function() { updateSlider(); });
+    drawChart();
+    renderAnalytics();
+  }
+  if (tab === 'calendar') renderCalendar();
+  if (tab === 'habits') renderHabits();
+  if (tab === 'maps') renderMaps();
+  if (tab === 'status') {
+    if (!claudeStatusData) {
+      window.dashboardAPI.getClaudeStatus().then(function(data) {
+        if (data) { claudeStatusData = data; renderStatusTab(); }
+      });
+    }
+    renderStatusTab();
+  }
+}
+
+function showTab(requested) {
+  var tab = TAB_ALIASES[requested] || requested;
+  var section = sectionOfTab(tab);
+  if (!section) return;
+  currentTab = tab;
+  lastTabOf[section.id] = tab;
+  var panels = document.querySelectorAll('.tab-content');
+  for (var i = 0; i < panels.length; i++) {
+    panels[i].classList.toggle('active', panels[i].id === 'tab-' + tab);
+  }
+  var rail = document.querySelectorAll('.sidebar-nav button');
+  for (var j = 0; j < rail.length; j++) {
+    rail[j].classList.toggle('active', rail[j].getAttribute('data-section') === section.id);
+  }
+  renderSectionTabs(section, tab);
+  afterTabShown(tab);
+}
+
+(function() {
+  var rail = document.querySelectorAll('.sidebar-nav button');
+  for (var i = 0; i < rail.length; i++) {
+    (function(button) {
+      button.addEventListener('click', function() {
+        var id = button.getAttribute('data-section');
+        var section = SECTIONS.filter(function(s) { return s.id === id; })[0];
+        showTab(lastTabOf[id] || section.tabs[0][0]);
+      });
+    })(rail[i]);
+  }
+  renderSectionTabs(SECTIONS[0], 'overview');
+})();
 
 // --- Overview ---
 
-function buildUsageCard(label, data) {
-  var card = el('div', 'usage-card');
-  card.appendChild(el('div', 'card-label', label));
-
-  var track = el('div', 'bar-track');
-  var fill = el('div', 'bar-fill ' + getMeterClass(data));
-  fill.style.width = Math.max(1, data.pct) + '%';
-  track.appendChild(fill);
-  card.appendChild(track);
-
-  var meta = el('div', 'card-meta');
-  meta.appendChild(el('span', null, data.pct + '% used'));
-  meta.appendChild(el('span', null, formatCountdown(data.resetsAt)));
-  card.appendChild(meta);
-
-  return card;
+function meterCells(meter, small) {
+  var grade = WL.meterClass(meter);
+  var cells = el('span', 'cells' + (small ? ' s' : '') + (grade === 'danger' ? ' hot' : (grade === 'warning' ? ' warm' : '')));
+  cells.setAttribute('role', 'img');
+  cells.setAttribute('aria-label', WL.shortLabel(meter) + ', ' + meter.pct + '% used');
+  var filled = WL.filledCells(meter.pct);
+  for (var i = 0; i < WL.CELLS; i++) cells.appendChild(el('u', i < filled ? 'on' : null));
+  return cells;
 }
 
-// The four usage cards for one account's usage object, appended to `target`.
-function appendUsageCards(target, usage) {
-  // Only the limits this plan has: Ultra has no 5-hour session, and a 0 %
-  // card would claim one.
-  if (usage.session) target.appendChild(buildUsageCard('Session (5h window)', usage.session));
-  if (usage.weekAll) target.appendChild(buildUsageCard('Weekly — All Models', usage.weekAll));
-  // The scoped weekly bucket is named after whatever model the API reports (Fable, Sonnet…)
-  if (usage.weekSonnet) {
-    target.appendChild(buildUsageCard('Weekly — ' + (usage.weekSonnet.model || 'Model'), usage.weekSonnet));
-  }
-  // Any further server limit (another scoped model, a surface cap), as sent.
-  var others = usage.otherLimits || [];
-  for (var o = 0; o < others.length; o++) {
-    target.appendChild(buildUsageCard(others[o].label, others[o]));
-  }
-
-  // Extra usage card — same bar style as other metrics
-  if (usage.extraUsage) {
-    if (usage.extraUsage.enabled) {
-      var util = Number(usage.extraUsage.utilization);
-      var extraPct = Number.isFinite(util) ? Math.min(100, Math.max(0, Math.round(util))) : 0;
-      target.appendChild(buildUsageCard('Extra Usage', { pct: extraPct, resetsAt: null }));
-    } else {
-      var extraCard = el('div', 'usage-card');
-      extraCard.appendChild(el('div', 'card-label', 'Extra Usage'));
-      extraCard.appendChild(el('div', 'card-meta', 'Not enabled'));
-      target.appendChild(extraCard);
-    }
-  }
+function setRefillText(cell, state) {
+  // The column is headed "Refills", so the word isn't repeated in each row.
+  var detail = state.detail.replace(/^Refills /, '');
+  var key = state.alert + '|' + detail;
+  if (cell.getAttribute('data-text') === key) return;
+  cell.setAttribute('data-text', key);
+  while (cell.firstChild) cell.removeChild(cell.firstChild);
+  if (state.alert) cell.appendChild(el('strong', null, state.alert));
+  if (state.alert && detail) cell.appendChild(document.createTextNode(' '));
+  if (detail) cell.appendChild(document.createTextNode(detail));
 }
 
-function buildAccountGroup(acc) {
-  var group = el('div', 'account-group' + (acc.id === activeAccountId ? ' active' : ''));
+var boardCells = [];
 
-  var head = el('div', 'account-group-head');
-  var nameRow = el('div', 'account-group-name', acc.name || acc.id);
+function buildBoardRow(acc, index) {
+  var state = WL.rowState(acc, Date.now());
+  var chosen = acc.id === activeAccountId && accountsData.length > 1;
+  var row = el('tr', (chosen ? 'active' : '') + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : ''));
+  var name = acc.name || acc.id;
+  row.title = name + (acc.email ? ' · ' + acc.email : '');
+
+  var who = el('th');
+  who.setAttribute('scope', 'row');
+  var cell = el('div', 'account-cell');
+  var bullet = el('span', 'bullet b-' + (index % 4), name.charAt(0).toUpperCase());
+  bullet.setAttribute('aria-hidden', 'true');
+  cell.appendChild(bullet);
+  var label = el('div', 'who');
+  var nameEl = el('div', 'name', name);
+  if (chosen) nameEl.appendChild(el('em', null, 'Active'));
   if (acc.cliActive) {
-    var cliTag = el('span', 'account-group-cli', 'CLI');
-    cliTag.title = cliLauncherName + ' is running on this account';
-    nameRow.appendChild(document.createTextNode(' '));
-    nameRow.appendChild(cliTag);
+    var cli = el('em', null, 'CLI');
+    cli.title = cliLauncherName + ' is running on this account';
+    nameEl.appendChild(cli);
   }
-  head.appendChild(nameRow);
-  if (acc.email) head.appendChild(el('div', 'account-group-email', acc.email));
-  // When this login runs out (ready-made strings from main, login-expiry.js).
+  label.appendChild(nameEl);
   var login = acc.login;
-  var loginOut = !!(login && login.state === 'out');
   if (login && login.text) {
-    var loginCls = 'account-group-login' + (login.state === 'warn' || loginOut ? ' ' + login.state : '');
-    var loginLine = el('div', loginCls);
-    loginLine.appendChild(el('span', 'account-group-login-dot'));
-    loginLine.appendChild(el('span', null, login.text));
-    loginLine.title = login.detail;
-    head.appendChild(loginLine);
+    var line = el('div', 'login-line' + (login.state === 'warn' || login.state === 'out' ? ' ' + login.state : ''), login.text);
+    line.title = login.detail;
+    label.appendChild(line);
   }
-  group.appendChild(head);
+  cell.appendChild(label);
+  who.appendChild(cell);
+  row.appendChild(who);
 
-  var limitedMs = acc.rateLimitedUntil ? acc.rateLimitedUntil - Date.now() : 0;
-  var limitedMins = limitedMs > 0 ? Math.max(1, Math.round(limitedMs / 60000)) : 0;
-
-  if (acc.needsLogin) {
-    // A red login line above already says it, with the command.
-    if (!loginOut) {
-      group.appendChild(el('div', 'account-group-warn', 'Sign-in needed — run: '
-        + ((login && login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login')));
-    }
-  } else if (acc.error) {
-    group.appendChild(el('div', 'account-group-warn', acc.error));
-  } else if (limitedMins) {
-    // Throttled, not broken — the cards below still show the last good numbers.
-    group.appendChild(el('div', 'account-group-note',
-      'Rate limited · retrying in ' + limitedMins + 'm'));
+  var meterCell = el('td', 'tmeter');
+  var pctCell = el('td', 'tpct');
+  var fableCell = el('td', 'tfable');
+  if (state.main) {
+    meterCell.appendChild(meterCells(state.main, false));
+    pctCell.appendChild(el('b', null, String(state.main.pct)));
+    pctCell.appendChild(el('small', null, '%'));
+    state.subs.forEach(function(meter) {
+      fableCell.appendChild(meterCells(meter, true));
+      fableCell.appendChild(el('span', 'limit', (state.subs.length > 1 ? WL.shortLabel(meter) + ' ' : '') + meter.pct + '%'));
+    });
   }
+  row.appendChild(meterCell);
+  row.appendChild(pctCell);
+  row.appendChild(fableCell);
 
-  var cards = el('div', 'account-group-cards');
-  if (acc.usage) {
-    appendUsageCards(cards, acc.usage);
+  var refill = el('td', 'trefill');
+  setRefillText(refill, state);
+  row.appendChild(refill);
+  boardCells.push({ acc: acc, cell: refill });
+
+  row.addEventListener('click', function() {
+    if (acc.id === activeAccountId || !window.dashboardAPI.setActiveAccount) return;
+    window.dashboardAPI.setActiveAccount(acc.id);
+  });
+  return row;
+}
+
+function boardHeads() {
+  var hasSession = accountsData.some(function(acc) { return acc.usage && acc.usage.session; });
+  var model = null;
+  accountsData.forEach(function(acc) {
+    if (!model && acc.usage && acc.usage.weekSonnet) model = acc.usage.weekSonnet.model;
+  });
+  document.getElementById('boardMainHead').textContent = hasSession ? 'Session' : 'Weekly, all models';
+  document.getElementById('boardSubHead').textContent = hasSession ? 'Other limits' : (model ? 'Weekly, ' + model : 'Other limits');
+}
+
+function renderTimeline() {
+  var holder = document.getElementById('refillTimeline');
+  while (holder.firstChild) holder.removeChild(holder.firstChild);
+  var now = Date.now();
+  var marks = WL.timelineMarks(accountsData, now);
+  if (marks.length === 0) {
+    holder.style.height = 'auto';
+    holder.appendChild(el('div', 'tl-empty', 'No refills in the coming week.'));
+    return;
+  }
+  holder.style.height = '';
+  holder.appendChild(el('div', 'tl-line'));
+  var DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var today = new Date(now).getDay();
+  for (var d = 0; d <= 7; d++) {
+    var tick = document.createElement('i');
+    tick.style.left = (d / 7 * 100).toFixed(2) + '%';
+    tick.appendChild(el('span', null, DAY_NAMES[(today + d) % 7]));
+    holder.appendChild(tick);
+  }
+  marks.forEach(function(mark) {
+    var item = el('div', 'tl-m ' + mark.lane + (mark.flip ? ' flip' : ''));
+    item.style.left = mark.x.toFixed(1) + '%';
+    var bullet = el('span', 'bullet b-' + (mark.index % 4), mark.name.charAt(0).toUpperCase());
+    bullet.setAttribute('aria-hidden', 'true');
+    item.appendChild(bullet);
+    var text = el('span');
+    text.appendChild(el('b', null, mark.name));
+    text.appendChild(document.createTextNode(mark.text));
+    item.appendChild(text);
+    holder.appendChild(item);
+  });
+}
+
+function svgNode(tag, attrs, text) {
+  var node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  Object.keys(attrs).forEach(function(key) { node.setAttribute(key, attrs[key]); });
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function renderWeekChart() {
+  var holder = document.getElementById('weekChart');
+  var active = accountsData.filter(function(acc) { return acc.id === activeAccountId; })[0] || accountsData[0];
+  var week = active && active.usage && active.usage.weekAll;
+  while (holder.firstChild) holder.removeChild(holder.firstChild);
+  document.getElementById('weekPanel').hidden = !week;
+  if (!week) return;
+  document.getElementById('weekTitle').textContent = (active.name || 'This account') + ' this week';
+  var scoped = active.usage.weekSonnet;
+  document.getElementById('weekScopedKey').textContent = (scoped && scoped.model) || 'Scoped';
+  var series = WL.weekSeries(historyData, week.resetsAt);
+  if (series.length < 2) {
+    holder.appendChild(el('div', 'chart-empty', 'The chart fills in as this week goes on.'));
+    return;
+  }
+  var W = 520;
+  var H = 96;
+  var line = function(key) {
+    var d = '';
+    series.forEach(function(point) {
+      if (point[key] === null) return;
+      d += (d ? 'L' : 'M') + (point.x / 100 * W).toFixed(1) + ' ' + (H - point[key] / 100 * H).toFixed(1);
+    });
+    return d;
+  };
+  var svg = svgNode('svg', { viewBox: '-2 -2 ' + (W + 34) + ' ' + (H + 20), role: 'img',
+    'aria-label': (active.name || 'This account') + ' used ' + week.pct + ' percent of the week so far' });
+  svg.appendChild(svgNode('path', { 'class': 'grid', d: 'M0 0H' + W + 'M0 ' + (H / 2) + 'H' + W + 'M0 ' + H + 'H' + W }));
+  svg.appendChild(svgNode('path', { 'class': 'pace', d: 'M0 ' + H + 'L' + W + ' 0' }));
+  svg.appendChild(svgNode('path', { 'class': 's2', d: line('scoped') }));
+  svg.appendChild(svgNode('path', { 'class': 's1', d: line('all') }));
+  var DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var startDay = new Date(new Date(week.resetsAt).getTime() - 7 * 24 * 3600000).getDay();
+  for (var d = 0; d < 7; d++) {
+    svg.appendChild(svgNode('text', { x: (d / 7 * W).toFixed(1), y: H + 15 }, DAY_NAMES[(startDay + d) % 7]));
+  }
+  svg.appendChild(svgNode('text', { x: W + 4, y: 4 }, '100%'));
+  svg.appendChild(svgNode('text', { x: W + 4, y: H / 2 + 4 }, '50%'));
+  holder.appendChild(svg);
+}
+
+function renderOverviewToday() {
+  var list = document.getElementById('overviewToday');
+  if (!list) return;
+  while (list.firstChild) list.removeChild(list.firstChild);
+  var now = Date.now();
+  var next = WL.upcomingEvents(typeof calEvents === 'undefined' ? [] : calEvents, now)[0];
+  var addRow = function(strong, rest, action) {
+    var li = el('li');
+    var button = el('button');
+    button.appendChild(el('b', null, strong));
+    button.appendChild(document.createTextNode(' ' + rest));
+    button.addEventListener('click', action);
+    li.appendChild(button);
+    list.appendChild(li);
+  };
+  if (next) {
+    addRow(WL.eventTimeText(next, now), next.title, function() { showTab('calendar'); });
   } else {
-    var empty = el('div', 'usage-card');
-    empty.appendChild(el('div', 'card-label', 'Usage'));
-    empty.appendChild(el('div', 'card-meta', limitedMins ? 'Rate limited — no data yet' : 'No data yet'));
-    cards.appendChild(empty);
+    addRow('Nothing', 'coming up', function() { showTab('calendar'); });
   }
-  group.appendChild(cards);
-  return group;
+  var tasks = typeof dashTasks === 'undefined' || !dashTasks ? [] : dashTasks;
+  var left = tasks.filter(function(task) { return !task.done; }).length;
+  addRow(String(left), left === 1 ? 'task left' : 'tasks left', function() { showTab('tasks'); });
+  if (typeof habitsData !== 'undefined' && habitsData) {
+    var day = WL.localDay(now);
+    var kinds = ['training', 'reading', 'relax'];
+    var done = kinds.filter(function(kind) { return (habitsData[kind] || []).indexOf(day) !== -1; }).length;
+    addRow(done + ' of ' + kinds.length, 'habits done', function() { showTab('habits'); });
+  }
+}
+
+// --- Maps ---
+var mapsState = { available: false, maps: [] };
+
+// Drawn from the map's own bubbles and colours.
+function mapThumb(map) {
+  var svg = svgNode('svg', { 'class': 'thumb', viewBox: '0 0 120 72', 'aria-hidden': 'true' });
+  svg.appendChild(svgNode('rect', { width: 120, height: 72, rx: 8, fill: '#111318' }));
+  var bubbles = map.preview || [];
+  if (bubbles.length === 0) {
+    // Still a sketch, with no bubbles yet.
+    svg.appendChild(svgNode('path', { d: 'M24 44c10-16 18-16 26-6s16 10 24-2 14-10 22-4', fill: 'none', stroke: '#a8aebb', 'stroke-width': 2, 'stroke-linecap': 'round' }));
+    return svg;
+  }
+  var height = Math.max.apply(null, bubbles.map(function(b) { return b.y + b.h; }));
+  var scale = Math.min(104 / 100, 56 / Math.max(height, 1));
+  var left = (120 - 100 * scale) / 2;
+  var top = (72 - height * scale) / 2;
+  bubbles.forEach(function(b) {
+    svg.appendChild(svgNode('rect', {
+      x: (left + b.x * scale).toFixed(1), y: (top + b.y * scale).toFixed(1),
+      width: Math.max(4, b.w * scale).toFixed(1), height: Math.max(3, b.h * scale).toFixed(1),
+      rx: Math.max(2, b.h * scale / 2).toFixed(1), fill: b.color,
+    }));
+  });
+  return svg;
+}
+
+function mapButton(map, extraClass) {
+  var button = el('button', 'mapitem' + (extraClass ? ' ' + extraClass : ''));
+  button.title = 'Open ' + map.title;
+  button.appendChild(mapThumb(map));
+  var text = el('span');
+  text.appendChild(el('b', null, map.title));
+  text.appendChild(document.createTextNode(WL.editedText(map.updatedAt, Date.now())));
+  button.appendChild(text);
+  button.addEventListener('click', function() { window.dashboardAPI.openMaps({ id: map.id }); });
+  return button;
+}
+
+function renderMaps() {
+  document.getElementById('railMaps').hidden = !mapsState.available;
+  document.getElementById('overviewMapsPanel').hidden = !mapsState.available;
+  var overview = document.getElementById('overviewMaps');
+  var grid = document.getElementById('mapsGrid');
+  while (overview.firstChild) overview.removeChild(overview.firstChild);
+  while (grid.firstChild) grid.removeChild(grid.firstChild);
+  if (mapsState.maps.length === 0) {
+    overview.appendChild(el('div', 'maps-empty', 'No maps yet.'));
+    grid.appendChild(el('div', 'maps-empty', 'No maps yet. Press New map to start one.'));
+    return;
+  }
+  mapsState.maps.slice(0, 2).forEach(function(map) { overview.appendChild(mapButton(map)); });
+  mapsState.maps.forEach(function(map) { grid.appendChild(mapButton(map, 'mapcard')); });
+}
+
+function takeMapsState(state) {
+  if (!state) return;
+  mapsState = state;
+  renderMaps();
+}
+window.dashboardAPI.getMapsState().then(takeMapsState);
+window.dashboardAPI.onMapsUpdate(takeMapsState);
+document.getElementById('overviewNewMap').addEventListener('click', function() { window.dashboardAPI.openMaps({ new: true }); });
+document.getElementById('mapsTabNew').addEventListener('click', function() { window.dashboardAPI.openMaps({ new: true }); });
+
+function renderSyncText() {
+  var sync = document.getElementById('dashSync');
+  if (!usageData || !usageData.syncTime) { sync.textContent = ''; return; }
+  var ago = Math.round((Date.now() - usageData.syncTime) / 60000);
+  sync.textContent = ago < 1 ? 'Synced just now' : 'Synced ' + ago + 'm ago';
 }
 
 function renderOverview() {
-  var container = document.getElementById('overviewCards');
-  while (container.firstChild) container.removeChild(container.firstChild);
-
-  // Two or more accounts: one titled card group each, laid out in a grid.
-  if (accountsData.length > 1) {
-    container.classList.add('multi');
-    for (var i = 0; i < accountsData.length; i++) {
-      container.appendChild(buildAccountGroup(accountsData[i]));
-    }
-    renderPlanner();
-    return;
+  var body = document.getElementById('overviewRows');
+  while (body.firstChild) body.removeChild(body.firstChild);
+  boardCells = [];
+  accountsData.forEach(function(acc, index) { body.appendChild(buildBoardRow(acc, index)); });
+  if (accountsData.length === 0) {
+    var waiting = el('tr');
+    var cell = el('td', null, 'Waiting for data...');
+    cell.setAttribute('colspan', '5');
+    waiting.appendChild(cell);
+    body.appendChild(waiting);
   }
-
-  // Single account: exactly the layout it has always had.
-  container.classList.remove('multi');
-  if (!usageData) {
-    container.appendChild(el('div', 'usage-card', 'Waiting for data...'));
-    return;
-  }
-  appendUsageCards(container, usageData);
-
-  // Session planner
+  boardHeads();
+  document.getElementById('overviewFoot').textContent = WL.extraSummary(accountsData);
+  renderTimeline();
+  renderWeekChart();
+  renderOverviewToday();
+  renderSyncText();
   renderPlanner();
 }
 
@@ -1528,11 +1722,13 @@ function renderCalendarAgenda() {
 window.dashboardAPI.onCalendarUpdate(function(events) {
   calEvents = events || [];
   renderCalendar();
+  renderOverviewToday();
 });
 
 // Load events on init
 window.dashboardAPI.getCalendarEvents().then(function(events) {
   calEvents = events || [];
+  renderOverviewToday();
 });
 
 // --- Analytics tab ---
@@ -1701,6 +1897,8 @@ function renderSettings() {
     root.style.setProperty('--border', theme.border);
     root.style.setProperty('--text', theme.text);
     root.style.setProperty('--text-dim', theme.textDim);
+    root.style.setProperty('--ink', theme.text);
+    root.style.setProperty('--crit-text', theme.name === 'brutal' ? '#c8232b' : (theme.red || '#e5484d'));
     root.style.setProperty('--accent', theme.accent);
     if (theme.green) root.style.setProperty('--green', theme.green);
     if (theme.red) root.style.setProperty('--red', theme.red);
@@ -2342,6 +2540,7 @@ window.dashboardAPI.onUsageUpdate(function(payload) {
 
 window.dashboardAPI.onHistoryUpdate(function(data) {
   historyData = data;
+  renderWeekChart();
   // Redraw chart if history tab is visible
   var historyTab = document.getElementById('tab-history');
   if (historyTab && historyTab.classList.contains('active')) {
@@ -2497,40 +2696,14 @@ setInterval(function() {
   updateDashboardTimers();
 }, 10000);
 
-// The meters in the order appendUsageCards draws their cards (absent ones
-// have no card), so countdown i always belongs to card i.
-function cardSources(usage) {
-  return [usage.session, usage.weekAll, usage.weekSonnet]
-    .filter(Boolean)
-    .concat(usage.otherLimits || []);
-}
-
-function patchCardCountdowns(metaSpans, sources) {
-  for (var i = 0; i < metaSpans.length && i < sources.length; i++) {
-    var spans = metaSpans[i].querySelectorAll('span');
-    if (spans.length >= 2 && sources[i]) {
-      spans[1].textContent = formatCountdown(sources[i].resetsAt);
-    }
-  }
-}
-
 function updateDashboardTimers() {
-  // Patch countdown text in overview cards — per account group when there is
-  // more than one, so a group never shows another account's reset time.
-  var groups = document.querySelectorAll('#overviewCards .account-group');
-  if (groups.length > 0) {
-    for (var g = 0; g < groups.length && g < accountsData.length; g++) {
-      var u = accountsData[g].usage;
-      if (!u) continue;
-      patchCardCountdowns(groups[g].querySelectorAll('.card-meta'), cardSources(u));
-    }
-    return;
+  var now = Date.now();
+  boardCells.forEach(function(entry) { setRefillText(entry.cell, WL.rowState(entry.acc, now)); });
+  renderSyncText();
+  if (currentTab === 'overview') {
+    renderTimeline();
+    renderOverviewToday();
   }
-  if (!usageData) return;
-  patchCardCountdowns(
-    document.querySelectorAll('#overviewCards .card-meta'),
-    cardSources(usageData)
-  );
 }
 
 // Redraw chart on window resize (debounced to avoid flicker)
@@ -2643,11 +2816,13 @@ document.getElementById('dashClearCompleted').addEventListener('click', function
 window.dashboardAPI.onTasksUpdate(function(data) {
   dashTasks = data;
   renderDashTasks();
+  renderOverviewToday();
 });
 
 window.dashboardAPI.getTasks().then(function(data) {
   dashTasks = data;
   renderDashTasks();
+  renderOverviewToday();
 });
 
 // --- Habits tab ---
@@ -2832,6 +3007,7 @@ function initHabitsHandlers() {
 if (window.dashboardAPI && window.dashboardAPI.onHabitsUpdate) {
   window.dashboardAPI.onHabitsUpdate(function(data) {
     habitsData = data || habitsData;
+    renderOverviewToday();
     var habitsTab = document.getElementById('tab-habits');
     if (habitsTab && habitsTab.classList.contains('active')) {
       HABIT_CALS.forEach(renderHabitCal);
@@ -2854,7 +3030,7 @@ if (window.dashboardAPI && window.dashboardAPI.getRelax) window.dashboardAPI.get
 // Prime the data so the habit calendars are ready when the tab opens
 if (window.dashboardAPI && window.dashboardAPI.getHabits) {
   window.dashboardAPI.getHabits().then(function(data) {
-    if (data) habitsData = data;
+    if (data) { habitsData = data; renderOverviewToday(); }
   });
 }
 
@@ -2862,7 +3038,6 @@ if (window.dashboardAPI && window.dashboardAPI.getHabits) {
 if (window.dashboardAPI && window.dashboardAPI.onNavigateTab) {
   window.dashboardAPI.onNavigateTab(function(tab) {
     if (!tab) return;
-    var target = document.querySelector('.sidebar-nav li[data-tab="' + tab + '"]');
-    if (target) target.click();
+    showTab(tab);
   });
 }

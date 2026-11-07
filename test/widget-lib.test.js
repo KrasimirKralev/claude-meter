@@ -3,6 +3,12 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {
   answerParts,
+  editedText,
+  eventTimeText,
+  extraSummary,
+  localDay,
+  money,
+  upcomingEvents,
   filledCells,
   meterClass,
   refillText,
@@ -212,4 +218,55 @@ test('weekSeries scales the current week to 0-100 and ignores older points', () 
 test('weekSeries gives nothing without a reset time or points', () => {
   assert.deepStrictEqual(weekSeries([{ ts: NOW, weekAll: 1 }], null), []);
   assert.deepStrictEqual(weekSeries(null, new Date(NOW).toISOString()), []);
+});
+
+test('upcomingEvents skips what is done or over, and keeps what just started', () => {
+  const day = localDay(NOW);
+  const events = [
+    { id: 'done', date: day, time: '23:00', done: true },
+    { id: 'long-gone', date: day, time: '08:00' },
+    { id: 'just-started', date: day, time: '11:30' },
+    { id: 'later', date: day, time: '14:00' },
+    { id: 'all-day', date: day },
+    { id: 'tomorrow', date: '2026-11-08', time: '09:00' },
+    { id: 'yesterday', date: '2026-11-06', time: '09:00' },
+  ];
+  assert.deepStrictEqual(upcomingEvents(events, NOW).map((e) => e.id), ['all-day', 'just-started', 'later', 'tomorrow']);
+  assert.deepStrictEqual(upcomingEvents(null, NOW), []);
+});
+
+test('eventTimeText counts down the last hour', () => {
+  const day = localDay(NOW);
+  assert.strictEqual(eventTimeText({ date: day, time: '14:00' }, NOW), '14:00');
+  assert.strictEqual(eventTimeText({ date: day, time: '12:17' }, NOW), 'in 30m');
+  assert.strictEqual(eventTimeText({ date: day, time: '11:30' }, NOW), 'Now');
+  assert.strictEqual(eventTimeText({ date: day }, NOW), 'All day');
+  assert.strictEqual(eventTimeText({ date: '2026-11-09', time: '09:00' }, NOW), 'Nov 9');
+});
+
+test('money formats the currencies accounts use', () => {
+  assert.strictEqual(money(1230, 2, 'EUR'), '€12.30');
+  assert.strictEqual(money(1230, 2, 'BGN'), '12.30 лв');
+  assert.strictEqual(money(1230, 2, 'CHF'), 'CHF 12.30');
+});
+
+test('extraSummary says "off" once, not once per account', () => {
+  const off = { ...weekly(1, 1, 1), extraUsage: { enabled: false } };
+  assert.strictEqual(extraSummary([account('A', off), account('B', off), account('C', off), account('D', off)]), 'Extra usage is off on all four accounts.');
+  assert.strictEqual(extraSummary([account('A', off)]), 'Extra usage is off.');
+  assert.strictEqual(extraSummary([account('A', null)]), '');
+});
+
+test('extraSummary names who is spending', () => {
+  const off = { ...weekly(1, 1, 1), extraUsage: { enabled: false } };
+  const on = { ...weekly(1, 1, 1), extraUsage: { enabled: true, usedMinor: 1230, limitMinor: 5000, decimals: 2, currency: 'EUR' } };
+  assert.strictEqual(extraSummary([account('A', off), account('B', on)]), 'Extra usage this month: B €12.30 of €50.00.');
+  assert.strictEqual(extraSummary([account('B', on)]), 'Extra usage this month: €12.30 of €50.00.');
+});
+
+test('editedText uses plain days', () => {
+  assert.strictEqual(editedText(NOW - HOUR, NOW), 'Edited today');
+  assert.strictEqual(editedText(NOW - 20 * HOUR, NOW), 'Edited yesterday');
+  assert.strictEqual(editedText(new Date(2026, 10, 3, 9).getTime(), NOW), 'Edited Nov 3');
+  assert.strictEqual(editedText(0, NOW), '');
 });

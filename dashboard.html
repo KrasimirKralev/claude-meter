@@ -6,6 +6,7 @@
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self';">
 <title>Claude Meter — Dashboard</title>
+<link rel="stylesheet" href="assets/fonts/inter.css">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
@@ -59,24 +60,6 @@
   .sidebar-nav {
     list-style: none;
     flex: 1;
-  }
-  .sidebar-nav li {
-    padding: 10px 20px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-dim);
-    cursor: pointer;
-    border-left: 3px solid transparent;
-    transition: all 0.15s ease;
-  }
-  .sidebar-nav li:hover {
-    color: var(--text);
-    background: var(--surface2);
-  }
-  .sidebar-nav li.active {
-    color: var(--text);
-    background: var(--surface2);
-    border-left-color: var(--accent);
   }
   .sidebar-footer {
     padding: 16px 20px;
@@ -1091,7 +1074,7 @@
   :root {
     --bg: #f0ede4; --surface: #ffffff; --surface2: #f7f3ea;
     --border: #111111; --ink: #111111;
-    --text: #111111; --text-dim: #6f6a5e;
+    --text: #111111; --text-dim: #5f5a4f;
     --accent: #ff90e8; --green: #23a094; --red: #e5484d; --yellow: #ffc900;
     --bar-bg: #f7f3ea; --bar-fill: #23a094;
     --pop: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -1099,21 +1082,8 @@
   body { background: var(--bg) !important; color: var(--ink) !important; }
 
   /* Sidebar: ink panel */
-  .sidebar { background: var(--ink) !important; border-right: none !important; }
+  .sidebar { background: var(--bar) !important; border-right: none !important; }
   .sidebar-title { color: #fff !important; font-weight: 900 !important; text-transform: uppercase; letter-spacing: 1px; }
-  .sidebar-nav li {
-    color: rgba(255,255,255,0.55) !important;
-    font-weight: 800 !important;
-    border-left: none !important;
-    margin: 2px 10px;
-    border-radius: 8px;
-    transition: all 0.13s var(--pop) !important;
-  }
-  .sidebar-nav li:hover { color: #fff !important; background: rgba(255,255,255,0.1) !important; }
-  .sidebar-nav li.active {
-    color: var(--ink) !important;
-    background: var(--yellow) !important;
-  }
   .sidebar-footer { border-top: 1px solid rgba(255,255,255,0.15) !important; }
   .sidebar-version { color: rgba(255,255,255,0.4) !important; }
 
@@ -1173,33 +1143,189 @@
   .tab-content.active { animation: tabIn 0.25s var(--pop) !important; }
 
   ::-webkit-scrollbar-thumb { background: var(--ink) !important; }
+
+  /* ===== REBUILT SHELL: four sections, one board ===== */
+  :root {
+    --bar: #111111; --bar-ink: #ffffff; --bar-dim: #b9b5a8; --bar-hover: #2c2c2c;
+    --on-candy: #111111; --on-yellow-dim: #3a3205; --crit-text: #c8232b;
+  }
+  body { font-variant-numeric: tabular-nums lining-nums; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  ::selection { background: var(--accent); color: #111; }
+
+  .body-content { border: 2.5px solid var(--ink); border-radius: 14px; overflow: hidden; height: 100vh; }
+  .sidebar { width: 188px !important; min-width: 188px; padding: 16px 10px !important; display: flex; flex-direction: column; gap: 18px; -webkit-app-region: drag; }
+  .sidebar-title { padding: 2px 8px !important; font-size: 15px !important; letter-spacing: 0.04em !important; margin: 0 !important; }
+  .sidebar-nav { display: flex; flex-direction: column; gap: 2px; -webkit-app-region: no-drag; padding: 0 !important; }
+  .sidebar-nav button {
+    display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 10px;
+    border: 0; border-radius: 10px; background: none; cursor: pointer; text-align: left;
+    font-size: 14px; font-weight: 600; color: var(--bar-dim);
+  }
+  .sidebar-nav button:hover { background: var(--bar-hover); }
+  .sidebar-nav button.active { background: var(--yellow); color: var(--on-candy); }
+  .sidebar-nav button:focus-visible { outline-color: var(--bar-ink); }
+  .sidebar-footer { margin-top: auto; padding: 0 10px !important; border-top: 0 !important; -webkit-app-region: no-drag; }
+  .sidebar-version { color: var(--bar-dim) !important; font-size: 12px !important; }
+
+  .main-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .mhead { display: flex; align-items: center; gap: 20px; padding: 20px 28px 0; flex-shrink: 0; -webkit-app-region: drag; }
+  h1 { font-size: 24px; font-weight: 900; color: var(--ink); }
+  .tabs { display: flex; gap: 2px; -webkit-app-region: no-drag; }
+  .tabs button {
+    height: 32px; padding: 0 12px; border: 0; border-radius: 10px; background: none; cursor: pointer;
+    font-size: 13.5px; font-weight: 600; color: var(--text-dim);
+  }
+  .tabs button:hover { background: var(--surface2); color: var(--ink); }
+  .tabs button.active { background: var(--ink); color: var(--bg); }
+  .tabs:empty { display: none; }
+  .mhead .sync { margin-left: auto; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+  .titlebar-controls { display: flex; gap: 2px; margin-left: -8px; -webkit-app-region: no-drag; }
+  .titlebar-btn {
+    width: 28px; height: 28px; display: grid; place-items: center; padding: 0;
+    border: 0; border-radius: 6px; background: none !important; opacity: 1; cursor: pointer; color: var(--text-dim);
+  }
+  .titlebar-btn:hover { background: var(--surface2) !important; color: var(--ink); }
+  .titlebar-btn svg { width: 16px; height: 16px; }
+
+  /* The scrollbar's lane is always reserved, so pages don't shift when one appears. */
+  .main { padding: 12px 22px 22px 28px !important; scrollbar-gutter: stable; }
+  /* The header above now names the page. */
+  .tab-content > .section-title, .tab-content > .tab-header h2, .chart-header > .section-title { display: none; }
+
+  /* Overview */
+  #tab-overview.active { display: flex; flex-direction: column; gap: 12px; }
+  .board {
+    width: 100%; background: var(--surface); color: var(--ink);
+    border: 2.5px solid var(--ink); border-radius: 12px;
+    border-collapse: separate; border-spacing: 0; overflow: hidden;
+    box-shadow: 4px 4px 0 var(--ink);
+  }
+  .board thead th { text-align: left; padding: 9px 12px; border-bottom: 2.5px solid var(--ink); font-size: 12px; font-weight: 800; white-space: nowrap; }
+  .board tbody th, .board td { height: 54px; padding: 0 12px; vertical-align: middle; font-size: 13.5px; }
+  .board tbody th { text-align: left; font-weight: 600; }
+  .board tbody tr + tr th, .board tbody tr + tr td { border-top: 2px solid var(--ink); }
+  .board tbody tr { cursor: pointer; }
+  .board tbody tr:hover th, .board tbody tr:hover td { background: var(--surface2); }
+  .board tbody tr.active th, .board tbody tr.active td { background: var(--yellow); color: var(--on-candy); }
+  .account-cell { display: flex; align-items: center; gap: 10px; }
+  .bullet {
+    width: 26px; height: 26px; display: grid; place-items: center; flex-shrink: 0;
+    border: 2px solid var(--on-candy); border-radius: 7px;
+    font-weight: 900; font-size: 13px; color: var(--on-candy);
+  }
+  .b-0 { background: var(--green); }
+  .b-1 { background: #ffc900; }
+  .b-2 { background: #ff90e8; }
+  .b-3 { background: #ffffff; }
+  .who { min-width: 0; }
+  .name { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 800; white-space: nowrap; }
+  .name em { font-style: normal; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 5px; background: var(--ink); color: var(--surface); }
+  tr.active .name em { background: var(--on-candy); color: #fff; }
+  .login-line { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+  tr.active .login-line, tr.active .tpct small, tr.active .tfable span { color: var(--on-yellow-dim); }
+  .login-line.warn, .login-line.out { color: var(--crit-text); font-weight: 700; }
+  .tmeter { width: 262px; }
+  .tpct { width: 64px; text-align: right; white-space: nowrap; }
+  .tpct b { font-size: 24px; font-weight: 900; }
+  .tpct small { font-size: 12px; font-weight: 600; margin-left: 1px; color: var(--text-dim); }
+  tr.crit .tpct b, tr.crit .tpct small { color: var(--crit-text); }
+  tr.active.crit .tpct b, tr.active.crit .tpct small { color: #8f1218; }
+  .tfable { width: 164px; }
+  .tfable span.limit { display: block; font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+  .trefill { white-space: nowrap; }
+  .trefill strong { color: var(--crit-text); font-weight: 700; }
+  tr.active .trefill strong { color: #8f1218; }
+  .cells { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; height: 13px; }
+  .cells.s { height: 7px; gap: 2px; }
+  .cells u { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 4px; text-decoration: none; }
+  .cells.s u { border-width: 1px; border-radius: 2px; }
+  .cells u.on { background: var(--green); }
+  .cells.warm u.on { background: var(--yellow); }
+  .cells.hot u.on { background: var(--red); }
+  tr.active .cells u { background: #fff; border-color: var(--on-candy); }
+  tr.active .cells u.on { background: var(--on-candy); }
+  tr.active .cells.hot u.on { background: #c8232b; }
+
+  .foot { font-size: 12.5px; color: var(--text-dim); }
+  .lower { display: grid; grid-template-columns: 1fr 280px; gap: 14px; }
+  .left, .side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .panel {
+    display: flex; flex-direction: column; gap: 6px; min-width: 0;
+    background: var(--surface); color: var(--ink);
+    border: 2.5px solid var(--ink); border-radius: 12px; padding: 12px 14px;
+  }
+  .panel h2 { font-size: 15px; font-weight: 900; }
+  .phead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .list { list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
+  .list b { font-weight: 700; }
+  .list button { all: unset; cursor: pointer; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .list button:hover { text-decoration: underline; }
+  .new {
+    height: 30px; padding: 0 12px; flex-shrink: 0; cursor: pointer;
+    border: 2px solid var(--ink); border-radius: 10px;
+    background: var(--accent); color: var(--on-candy);
+    font-weight: 700; font-size: 13px;
+  }
+  .new:hover { filter: brightness(1.05); }
+
+  /* Refill timeline */
+  .tl { position: relative; height: 112px; margin: 0 16px 0 10px; flex-shrink: 0; }
+  .tl-line { position: absolute; left: 0; right: 0; top: 42px; height: 3px; background: var(--ink); border-radius: 2px; }
+  .tl > i { position: absolute; top: 38px; width: 2px; height: 12px; background: var(--ink); }
+  .tl > i span { position: absolute; top: 17px; left: 50%; transform: translateX(-50%); font-style: normal; font-size: 11px; color: var(--ink); }
+  .tl-m { position: absolute; display: flex; align-items: center; gap: 6px; transform: translateX(-13px); white-space: nowrap; }
+  .tl-m.up { top: 2px; }
+  .tl-m.down { top: 78px; }
+  .tl-m.flip { flex-direction: row-reverse; transform: translateX(calc(-100% + 13px)); text-align: right; }
+  .tl-m > span:last-child { font-size: 12px; color: var(--text-dim); display: flex; flex-direction: column; line-height: 1.25; }
+  .tl-m.flip > span:last-child { align-items: flex-end; }
+  .tl-m > span:last-child b { color: var(--ink); font-weight: 600; font-size: 12.5px; }
+  .tl-empty { font-size: 13px; color: var(--text-dim); padding: 6px 0; }
+
+  /* Weekly chart */
+  .keys { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+  .keys i { width: 14px; height: 3px; border-radius: 2px; margin-left: 8px; }
+  .k1 { background: var(--ink); }
+  .k2 { background: var(--green); }
+  .k3 { background: var(--text-dim); height: 1px !important; }
+  #weekChart svg { width: 100%; display: block; overflow: visible; }
+  #weekChart path { fill: none; }
+  #weekChart .grid { stroke: var(--ink); stroke-width: 1; opacity: 0.5; }
+  #weekChart .pace { stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 4; }
+  #weekChart .s1 { stroke: var(--ink); stroke-width: 2.5; stroke-linejoin: round; }
+  #weekChart .s2 { stroke: var(--green); stroke-width: 1.5; stroke-linejoin: round; }
+  #weekChart text { fill: var(--text-dim); font-size: 11px; }
+  .chart-empty { font-size: 13px; color: var(--text-dim); padding: 18px 0; }
+
+  /* Maps */
+  .mapitem { all: unset; display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 12.5px; color: var(--text-dim); min-width: 0; }
+  .mapitem:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 8px; }
+  .mapitem > span { min-width: 0; }
+  .mapitem b { display: block; color: var(--ink); font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mapitem:hover b { text-decoration: underline; }
+  .thumb { width: 92px; height: 55px; flex-shrink: 0; border-radius: 8px; }
+  .maplist { display: flex; flex-direction: column; gap: 8px; }
+  .maps-head { margin-bottom: 14px; }
+  .mapgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  .mapcard { background: var(--surface); border: 2.5px solid var(--ink); border-radius: 12px; padding: 10px; }
+  .mapcard .thumb { width: 120px; height: 72px; }
+  .maps-empty { font-size: 13.5px; color: var(--text-dim); padding: 4px 0; }
 </style>
 </head>
 <body>
 
-<div class="titlebar">
-  <span class="titlebar-title">Claude Meter — Dashboard</span>
-  <div class="titlebar-controls">
-    <button class="titlebar-btn tb-minimize" id="tbMinimize" title="Minimize"></button>
-    <button class="titlebar-btn tb-maximize" id="tbMaximize" title="Maximize"></button>
-    <button class="titlebar-btn tb-close" id="tbClose" title="Close"></button>
-  </div>
-</div>
-
 <div class="body-content">
 <div class="sidebar">
   <div class="sidebar-title">Claude Meter</div>
-  <ul class="sidebar-nav">
-    <li class="active" data-tab="overview">Overview</li>
-    <li data-tab="history">History</li>
-    <li data-tab="alerts">Alerts</li>
-    <li data-tab="calendar">Calendar</li>
-    <li data-tab="tasks">Tasks</li>
-    <li data-tab="habits">Habits</li>
-    <li data-tab="status">Status</li>
-    <li data-tab="analytics">Analytics</li>
-    <li data-tab="settings">Settings</li>
-  </ul>
+  <nav class="sidebar-nav" aria-label="Sections">
+    <button data-section="usage" class="active"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18h16M7 15v-3M12 15V7M17 15v-5"/></svg>Usage</button>
+    <button data-section="plan"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 7h12M6 12h12M6 17h7"/></svg>Plan</button>
+    <button data-section="maps" id="railMaps" hidden><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4c4.4 0 8 2.9 8 6.5S16.4 17 12 17c-.9 0-1.7-.1-2.5-.3L5 19.5l1.2-4C4.8 14.3 4 12.5 4 10.5 4 6.9 7.6 4 12 4Z"/></svg>Maps</button>
+    <button data-section="settings"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3.5v3M12 17.5v3M3.5 12h3M17.5 12h3M6 6l2.1 2.1M15.9 15.9 18 18M6 18l2.1-2.1M15.9 8.1 18 6"/></svg>Settings</button>
+  </nav>
   <div class="sidebar-footer">
     <div class="sidebar-version" id="sidebarVersion">v2.0.0</div>
     <button class="update-now-btn" id="updateNowBtn">Update Now</button>
@@ -1209,11 +1335,50 @@
   </div>
 </div>
 
+<div class="main-wrap">
+  <header class="mhead">
+    <h1 id="sectionTitle">Usage</h1>
+    <div class="tabs" id="sectionTabs" role="tablist"></div>
+    <span class="sync" id="dashSync" role="status"></span>
+    <div class="titlebar-controls">
+      <button class="titlebar-btn tb-minimize" id="tbMinimize" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 12h12"/></svg></button>
+      <button class="titlebar-btn tb-maximize" id="tbMaximize" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>
+      <button class="titlebar-btn tb-close" id="tbClose" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+    </div>
+  </header>
 <div class="main">
   <div class="tab-content active" id="tab-overview">
     <div class="update-banner" id="updateBanner"></div>
-    <div class="section-title">Usage Overview</div>
-    <div class="overview-cards" id="overviewCards"></div>
+    <table class="board">
+      <thead><tr><th>Account</th><th id="boardMainHead">Weekly, all models</th><th></th><th id="boardSubHead">Weekly, Fable</th><th>Refills</th></tr></thead>
+      <tbody id="overviewRows"></tbody>
+    </table>
+    <p class="foot" id="overviewFoot"></p>
+    <div class="lower">
+      <div class="left">
+        <div class="panel refills" id="refillsPanel">
+          <h2>When room comes back</h2>
+          <div class="tl" id="refillTimeline"></div>
+        </div>
+        <div class="panel chart" id="weekPanel">
+          <div class="phead">
+            <h2 id="weekTitle">This week</h2>
+            <span class="keys"><i class="k1"></i>All models<i class="k2"></i><span id="weekScopedKey">Fable</span><i class="k3"></i>Even pace</span>
+          </div>
+          <div id="weekChart"></div>
+        </div>
+      </div>
+      <div class="side">
+        <div class="panel">
+          <h2>Today</h2>
+          <ul class="list" id="overviewToday"></ul>
+        </div>
+        <div class="panel maps" id="overviewMapsPanel" hidden>
+          <div class="phead"><h2>Maps</h2><button class="new" id="overviewNewMap">New map</button></div>
+          <div class="maplist" id="overviewMaps"></div>
+        </div>
+      </div>
+    </div>
     <div class="planner">
       <div class="planner-title">Session Planner</div>
       <div class="planner-text" id="plannerText">Waiting for data...</div>
@@ -1237,6 +1402,7 @@
         <canvas id="historyCanvas"></canvas>
       </div>
     </div>
+    <div id="analyticsContent"></div>
   </div>
 
   <div class="tab-content" id="tab-alerts">
@@ -1322,9 +1488,9 @@
     <div id="statusIncidentGroups"></div>
   </div>
 
-  <div class="tab-content" id="tab-analytics">
-    <div class="section-title">Usage Analytics</div>
-    <div id="analyticsContent"></div>
+  <div class="tab-content" id="tab-maps">
+    <div class="phead maps-head"><p class="foot">Sketch freely, then turn it into a finished map.</p><button class="new" id="mapsTabNew">New map</button></div>
+    <div class="mapgrid" id="mapsGrid"></div>
   </div>
 
   <div class="tab-content" id="tab-settings">
@@ -1333,8 +1499,10 @@
     <div class="version-info" id="versionInfo"></div>
   </div>
 </div>
+</div>
 
 </div>
+<script src="widget-lib.js"></script>
 <script src="chart.min.js"></script>
 <script src="dashboard.js"></script>
 </body>

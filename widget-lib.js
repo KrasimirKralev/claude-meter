@@ -211,8 +211,86 @@
       });
   }
 
+  function localDay(now) {
+    var d = new Date(now);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  // Today's unfinished events still worth showing, then the next future ones, soonest first.
+  function upcomingEvents(events, now) {
+    var today = localDay(now);
+    return (events || [])
+      .filter(function(evt) {
+        if (evt.done || evt.date < today) return false;
+        if (evt.date > today || !evt.time) return true;
+        // Something that started in the last half hour is probably still going on.
+        return new Date(evt.date + 'T' + evt.time).getTime() >= now - 30 * 60000;
+      })
+      .sort(function(a, b) {
+        if (a.date !== b.date) return a.date.localeCompare(b.date);
+        if (!a.time && b.time) return -1;
+        if (a.time && !b.time) return 1;
+        return (a.time || '').localeCompare(b.time || '');
+      });
+  }
+
+  function eventTimeText(evt, now) {
+    if (evt.date !== localDay(now)) {
+      var parts = evt.date.split('-');
+      return MONTHS[parseInt(parts[1], 10) - 1] + ' ' + parseInt(parts[2], 10);
+    }
+    if (!evt.time) return 'All day';
+    var diff = new Date(evt.date + 'T' + evt.time).getTime() - now;
+    if (diff <= 0) return 'Now';
+    if (diff < 60 * 60000) return 'in ' + Math.round(diff / 60000) + 'm';
+    return evt.time;
+  }
+
+  function money(minor, decimals, currency) {
+    var d = (typeof decimals === 'number' && decimals >= 0) ? decimals : 2;
+    var v = (Number(minor || 0) / Math.pow(10, d)).toFixed(d);
+    if (currency === 'BGN') return v + ' лв';
+    var sym = { EUR: '€', USD: '$', GBP: '£', JPY: '¥' }[currency] || ((currency || '') + ' ');
+    return sym + v;
+  }
+
+  var COUNT_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+
+  // One line for all accounts, so "not enabled" isn't repeated once per account.
+  function extraSummary(accounts) {
+    var known = (accounts || []).filter(function(account) { return !!account.usage; });
+    if (known.length === 0) return '';
+    var enabled = known.filter(function(account) { return account.usage.extraUsage && account.usage.extraUsage.enabled; });
+    if (enabled.length === 0) {
+      if (known.length === 1) return 'Extra usage is off.';
+      return 'Extra usage is off on all ' + (COUNT_WORDS[known.length] || known.length) + ' accounts.';
+    }
+    return 'Extra usage this month: ' + enabled.map(function(account) {
+      var extra = account.usage.extraUsage;
+      var spent = extra.usedMinor != null ? money(extra.usedMinor, extra.decimals, extra.currency) : '—';
+      var limit = extra.limitMinor != null ? ' of ' + money(extra.limitMinor, extra.decimals, extra.currency) : '';
+      return (known.length > 1 ? account.name + ' ' : '') + spent + limit;
+    }).join(', ') + '.';
+  }
+
+  function editedText(updatedAt, now) {
+    if (!updatedAt) return '';
+    var today = new Date(now);
+    today.setHours(0, 0, 0, 0);
+    var at = new Date(updatedAt);
+    if (at >= today) return 'Edited today';
+    if (at.getTime() >= today.getTime() - 24 * HOUR) return 'Edited yesterday';
+    return 'Edited ' + MONTHS[at.getMonth()] + ' ' + at.getDate();
+  }
+
   return {
     CELLS: CELLS,
+    editedText: editedText,
+    eventTimeText: eventTimeText,
+    extraSummary: extraSummary,
+    localDay: localDay,
+    money: money,
+    upcomingEvents: upcomingEvents,
     answerParts: answerParts,
     filledCells: filledCells,
     meterClass: meterClass,
