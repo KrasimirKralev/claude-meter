@@ -59,7 +59,7 @@ const TitleEditor = () => {
     return (
       <input
         ref={inputRef}
-        className="w-[calc(50vw-286px)] max-w-[420px] rounded-md bg-hover px-2.5 py-0.5 text-[20px] font-semibold tracking-[-0.01em] outline-none"
+        className="map-title w-[calc(50vw-286px)] max-w-[420px] rounded-md bg-hover px-2.5 py-0.5 text-[20px] font-semibold tracking-[-0.01em] outline-none"
         aria-label="Map name"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -75,7 +75,7 @@ const TitleEditor = () => {
   return (
     <button
       type="button"
-      className="max-w-[calc(50vw-286px)] truncate rounded-md px-2.5 py-0.5 text-[20px] font-semibold tracking-[-0.01em] hover:bg-hover"
+      className="map-title max-w-[calc(50vw-286px)] truncate rounded-md px-2.5 py-0.5 text-[20px] font-semibold tracking-[-0.01em] hover:bg-hover"
       title="Rename this map"
       onClick={() => setDraft(title)}
     >
@@ -204,7 +204,7 @@ export const Chrome = () => {
           />
         </Pill>
 
-        <Pill className="top-4 left-1/2 -translate-x-1/2" role="group" aria-label="View">
+        <Pill className="view-switch top-4 left-1/2 -translate-x-1/2" role="group" aria-label="View">
           {VIEWS.map(({ id, label }) => (
             <button
               key={id}
@@ -251,7 +251,7 @@ export const Chrome = () => {
       </header>
 
       <nav aria-label="Tools">
-        <Pill className="top-1/2 left-4 -translate-y-1/2 flex-col">
+        <Pill className="tool-rail top-1/2 left-4 -translate-y-1/2 flex-col">
           {TOOLS.filter((t) => view !== 'map' || t.inMap).map(({ id, label, icon, key }) => (
             <IconButton
               key={id}
@@ -264,7 +264,7 @@ export const Chrome = () => {
           ))}
           {view !== 'map' && (tool === 'pen' || tool === 'arrow') && (
             <div
-              className="mt-1 grid gap-1.5 border-t border-line pt-2 pb-1"
+              className="pen-colors mt-1 grid gap-1.5 border-t border-line pt-2 pb-1"
               role="group"
               aria-label="Pen colour"
             >

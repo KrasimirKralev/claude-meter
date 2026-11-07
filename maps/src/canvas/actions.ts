@@ -152,9 +152,12 @@ export const toggleTheme = (): void => {
 };
 
 /** Inside the desktop app, the look follows the app. The brutal theme draws on the light palette. */
-export const applyAppTheme = (theme: AppTheme): void => {
-  document.documentElement.dataset.theme = theme;
-  store.setUi({ theme: theme === 'dark' ? 'dark' : 'light' });
+export const applyAppTheme = ({ base, tokens }: AppTheme): void => {
+  const root = document.documentElement;
+  root.dataset.theme = base;
+  root.dataset.skin = 'app';
+  for (const [name, value] of Object.entries(tokens)) root.style.setProperty(`--${name}`, value);
+  store.setUi({ theme: base === 'dark' ? 'dark' : 'light' });
 };
 
 export const deleteSelected = (): void => {

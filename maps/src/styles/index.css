@@ -109,17 +109,34 @@
   --note-edge: #111111;
 }
 
-:root[data-theme='brutal'] .bg-blue {
-  border: 2px solid #111111;
-  color: #111111;
+:root[data-theme='brutal'] {
+  --on-accent: #111111;
+  --active-bg: #111111;
+  --active-ink: #f0ede4;
 }
 
-:root[data-theme='brutal'] .rounded-xl.border {
+/* Inside the desktop app: its ink borders, its button size and its way of showing what's chosen. */
+:root[data-skin='app'] .bg-blue {
+  border: 2px solid var(--line);
+  color: var(--on-accent);
+}
+
+:root[data-skin='app'] .rounded-xl.border {
   border-width: 2.5px;
 }
 
-:root[data-theme='brutal'] .rounded-lg.border {
+:root[data-skin='app'] .rounded-lg.border {
   border-width: 2px;
+}
+
+:root[data-skin='app'] .size-9 {
+  width: 32px;
+  height: 32px;
+}
+
+:root[data-skin='app'] .bg-soft.text-accent-ink {
+  background: var(--active-bg);
+  color: var(--active-ink);
 }
 
 * {
@@ -846,6 +863,36 @@ button:disabled {
 
 .too-narrow {
   display: none;
+}
+
+/* A narrow window: the view switch moves down beside the tools, and the title takes its room. */
+@media (max-width: 999px) {
+  .view-switch {
+    top: 68px;
+    left: 68px;
+    translate: none;
+  }
+
+  .map-title {
+    width: auto;
+    max-width: calc(100vw - 400px);
+  }
+
+  input.map-title {
+    width: calc(100vw - 400px);
+  }
+}
+
+/* A short window: the tools start below the top row, and the pen colours take two columns. */
+@media (max-height: 640px) {
+  .tool-rail {
+    top: 68px;
+    translate: none;
+  }
+
+  .pen-colors {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 /* The toolbars start to collide below this. The desktop app never gets this narrow. */

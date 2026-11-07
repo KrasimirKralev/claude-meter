@@ -51,9 +51,7 @@
   }
 
   function clockText(date) {
-    var hours = date.getHours();
-    var mins = date.getMinutes();
-    return (hours % 12 || 12) + (mins ? ':' + (mins < 10 ? '0' : '') + mins : '') + (hours >= 12 ? 'pm' : 'am');
+    return date.getHours() + ':' + String(date.getMinutes()).padStart(2, '0');
   }
 
   function refillText(resetsAt, now) {

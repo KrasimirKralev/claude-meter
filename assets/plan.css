@@ -3,7 +3,7 @@
 
 /* ---------- Tasks ---------- */
 .pt { display: flex; flex-direction: column; gap: 8px; min-height: 0; height: 100%; container-type: inline-size; }
-.pt-add { display: flex; gap: 8px; flex: none; }
+.pt-add { display: flex; gap: 8px; flex: none; padding-right: 5px; }
 .pt-add .field { flex: 1; min-width: 0; }
 .pt-add .btn { height: 34px; }
 .pt-note { margin: 0; min-height: 0; font-size: 12.5px; color: var(--text-dim); flex: none; }
@@ -25,7 +25,7 @@
 .pt-due { font-size: 12px; color: var(--text-dim); }
 .pt-due.today { color: var(--text); font-weight: 700; }
 .pt-due.late { color: var(--crit-text); font-weight: 700; }
-.pt-actions { display: flex; align-items: center; gap: 2px; }
+.pt-actions, .pt-tools { display: flex; align-items: center; gap: 2px; }
 .pt-grip { width: 20px; color: var(--text-dim); cursor: grab; }
 .pt-grip svg { stroke-width: 3; }
 .pt-prio {
@@ -43,15 +43,16 @@
 .pt-donehead[hidden] { display: none; }
 .pt-donehead svg { width: 14px; height: 14px; }
 
-/* A narrow panel: the actions drop under the text. */
+/* A narrow panel: the text keeps the room, priority shrinks to a mark, and the tools come out on hover
+   or keyboard focus, on top of the row. */
 @container (max-width: 400px) {
-  .pt-row { grid-template-columns: auto auto 1fr; row-gap: 2px; }
-  .pt-row .pt-actions { grid-column: 3; justify-content: flex-start; margin-left: -6px; }
-  .pt-row.is-done { grid-template-columns: auto 1fr; }
-  .pt-row.is-done .pt-actions { grid-column: 2; }
+  .pt-row { position: relative; min-height: 42px; }
+  .pt-prio { width: 14px; height: 14px; padding: 0; margin: 0 2px; font-size: 0; border-width: 1.5px; border-radius: 4px; }
+  .pt-prio.low { background: var(--surface); }
+  .pt-tools { position: absolute; right: 4px; bottom: 2px; background: var(--surface); border-radius: 6px; opacity: 0; }
+  .pt-row:hover .pt-tools, .pt-row:focus-within .pt-tools { opacity: 1; }
   .pt-schedule { grid-template-columns: minmax(0, 1fr) auto; }
   .pt-schedule .field { grid-column: 1 / -1; }
-  .pt-add .btn { display: none; }
 }
 
 /* ---------- Calendar ---------- */
@@ -64,7 +65,7 @@
 .month-open .pc-inner { overflow-y: auto; padding-right: 4px; }
 .month-open .pc-day, .month-open .pc-events { flex: none; overflow: visible; }
 .pc-monthhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.pc-monthhead h2 { margin: 0; font-size: 14px; font-weight: 800; }
+.pc-monthhead h2 { margin: 0; font-size: 15px; font-weight: 900; }
 .pc-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
 .pc-letter { text-align: center; font-size: 11px; font-weight: 700; color: var(--text-dim); }
 .pc-cell {
@@ -74,11 +75,10 @@
 }
 .pc-num { font-size: 13px; font-weight: 700; line-height: 1.2; }
 .pc-cell.other .pc-num { color: var(--text-dim); font-weight: 500; }
-.pc-cell:hover { border-color: var(--ink); }
-.pc-cell.today { background: var(--yellow); color: var(--on-candy); border-color: var(--ink); }
-.pc-cell.on { background: var(--bar); color: var(--bar-ink); border-color: var(--bar); }
-.pc-cell.on .pc-letter { color: var(--bar-dim); }
-.pc-cell.on.today .pc-num { color: var(--yellow); }
+.pc-cell:hover { border-color: var(--text); }
+.pc-cell.today { background: var(--yellow); color: var(--on-candy); border-color: var(--text); }
+.pc-cell.on, .pc-cell.on.today { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.pc-cell.on .pc-letter { color: inherit; }
 .pc-cell.today:not(.on) .pc-letter { color: var(--on-yellow-dim); }
 .pc-cell.drop { border: 2px dashed var(--ink); background: var(--accent); color: var(--on-accent); }
 .pc-dots { display: flex; gap: 2px; min-height: 5px; }
@@ -87,18 +87,22 @@
 .pc-weeklabel svg { width: 14px; height: 14px; }
 .month-open .pc-weeklabel svg { transform: rotate(180deg); }
 .pc-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
-.pc-strip .pc-cell { border-color: var(--ink); min-height: 54px; }
+.pc-strip .pc-cell { border-color: var(--text); min-height: 54px; }
 
-.pc-day { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; min-width: 0; }
-.pc-dayhead { display: flex; align-items: center; gap: 8px; flex: none; min-height: 28px; }
-.pc-dayhead h2 { margin: 0; font-size: 16px; font-weight: 800; }
+/* The day column measures itself, so its rows fit however wide the column really is. */
+.pc-day { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; min-width: 0; container-type: inline-size; }
+/* With the form open there's rarely room for both, so the column scrolls as one. */
+.pc-day.has-form { overflow-y: auto; }
+.pc-day.has-form .pc-events { flex: none; overflow: visible; }
+.pc-dayhead { display: flex; align-items: center; gap: 8px; flex: none; min-height: 28px; padding-right: 5px; }
+.pc-dayhead h2 { margin: 0; font-size: 15px; font-weight: 900; }
 .pc-new { margin-left: auto; }
 .pc-new svg { width: 14px; height: 14px; }
 .pc-events { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: 0 5px 5px 0; }
 .pc-ev {
   display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto; align-items: center; column-gap: 8px;
   min-height: 48px; padding: 6px 8px 6px 10px; flex: none;
-  background: var(--surface); border: 2px solid var(--ink); border-radius: 10px; box-shadow: var(--shadow-sm);
+  background: var(--surface); border: 2px solid var(--ink); border-radius: 10px;
 }
 .pc-ev[draggable='true'] { cursor: grab; }
 .pc-ev.dragging { opacity: 0.45; }
@@ -106,16 +110,15 @@
 .pc-swatch { width: 8px; align-self: stretch; min-height: 24px; border-radius: 4px; box-shadow: 0 0 0 1.5px var(--ink); }
 .pc-title { font-size: 14px; font-weight: 700; overflow-wrap: anywhere; line-height: 1.3; }
 .pc-meta { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
-.pc-ev.is-done { box-shadow: none; }
 .pc-ev.is-done .pc-title { font-weight: 500; color: var(--text-dim); text-decoration: line-through; }
 .pc-ev.is-done .pc-when { color: var(--text-dim); font-weight: 500; }
 .pc-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
-.pc-quick { flex: none; }
+.pc-quick { flex: none; padding-right: 5px; }
 
 .pc-formbox:empty { display: none; }
 .pc-formbox { flex: none; padding: 0 5px 5px 0; }
 .pc-form { display: flex; flex-direction: column; gap: 8px; padding: 12px; margin: 0; }
-.pc-form h3 { margin: 0; font-size: 14px; font-weight: 800; }
+.pc-form h3 { margin: 0; font-size: 15px; font-weight: 900; }
 .pc-formrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
 .pc-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; font-weight: 600; color: var(--text-dim); min-width: 0; }
 .pc-field .field { color: var(--text); }
@@ -124,19 +127,22 @@
 .pc-color { width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--ink); }
 .pc-color[aria-pressed='true'] { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink); }
 .pc-series { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
-.pc-series input { width: 16px; height: 16px; margin: 0; accent-color: var(--ink); }
+.pc-series input { width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
 .pc-problem { margin: 0; font-size: 12.5px; font-weight: 700; color: var(--crit-text); }
 .pc-problem:empty { display: none; }
 .pc-formbtns { display: flex; gap: 8px; }
 
-/* Narrow: the event's actions drop under its text. */
+/* Narrow: the time first, then the title. The tools come out on hover or keyboard focus, on top of the
+   row, except Join, which is the point of a meeting's row. */
 @container (max-width: 400px) {
-  .pc-ev { grid-template-columns: auto auto minmax(0, 1fr); row-gap: 2px; column-gap: 7px; padding-left: 8px; }
-  .pc-swatch { grid-row: 1; grid-column: 2; width: 6px; }
-  .pc-ev .check { grid-row: 1; grid-column: 1; }
-  .pc-when { grid-row: 2; grid-column: 3; flex-direction: row; gap: 5px; font-size: 12px; min-width: 0; color: var(--text-dim); }
-  .pc-body { grid-row: 1; grid-column: 3; }
-  .pc-actions { grid-row: 3; grid-column: 3; margin-left: -6px; }
+  .pc-ev { position: relative; grid-template-columns: auto auto minmax(0, 1fr); row-gap: 1px; column-gap: 7px; padding-left: 8px; }
+  .pc-ev .check { grid-row: 1 / span 2; grid-column: 1; }
+  .pc-swatch { grid-row: 1 / span 2; grid-column: 2; width: 6px; }
+  .pc-when { grid-row: 1; grid-column: 3; flex-direction: row; align-items: center; gap: 5px; font-size: 12px; min-width: 0; color: var(--text-dim); }
+  .pc-body { grid-row: 2; grid-column: 3; }
+  .pc-actions { position: absolute; top: 3px; right: 4px; background: var(--surface); border-radius: 6px; opacity: 0; }
+  .pc-ev:hover .pc-actions, .pc-ev:focus-within .pc-actions, .pc-ev.has-link .pc-actions { opacity: 1; }
+  .pc-formrow { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Wide: the month is always there, beside the day. */

@@ -86,7 +86,7 @@ function pad2(n) {
 // "01 Nov"
 function formatDate(ts) {
   const d = new Date(ts);
-  return pad2(d.getDate()) + ' ' + MONTHS[d.getMonth()];
+  return MONTHS[d.getMonth()] + ' ' + d.getDate();
 }
 
 // "03:44"
@@ -184,11 +184,11 @@ function describeLogin(read, now, opts) {
   if (verdict.state === 'unknown') return info;
   if (verdict.state === 'out') {
     info.short = 'Logged out';
-    info.text = 'Logged out — run: ' + command;
+    info.text = 'Logged out. Run: ' + command;
     const why = (verdict.reason === 'login expired' && until)
       ? 'Login expired ' + formatDateTime(until)
       : capitalize(verdict.reason || 'logged out');
-    info.detail = why + ' — run: ' + command;
+    info.detail = why + '. Run: ' + command;
     return info;
   }
   if (!until) {
@@ -203,8 +203,8 @@ function describeLogin(read, now, opts) {
   info.detail = 'Login until ' + formatDateTime(until) + ' (' + left + ' left)';
   if (verdict.state === 'warn') {
     info.text = 'Login until ' + formatDate(until) + ' ' + formatTime(until) + ' · ' + left
-      + ' — renew: ' + command;
-    info.detail += ' — renew: ' + command;
+      + '. Renew: ' + command;
+    info.detail += '. Renew: ' + command;
   } else {
     info.text = 'Login until ' + info.short;
   }

@@ -59,7 +59,8 @@
     var quick = el('form', 'pc-quick');
     var quickInput = el('input', 'field');
     quickInput.maxLength = 100;
-    quickInput.placeholder = 'Quick add, like "Design review 3pm 1h"';
+    quickInput.placeholder = 'Quick add, like "Lunch 1pm"';
+    quickInput.title = 'Add to this day. It can say when and how long: "Design review 3pm 1h".';
     quickInput.setAttribute('aria-label', 'Quick add an event to this day');
     quick.appendChild(quickInput);
     dayBox.appendChild(dayHead);
@@ -240,7 +241,7 @@
 
     function buildEvent(evt, now) {
       var late = L.isLate(evt, now);
-      var row = el('article', 'pc-ev' + (evt.done ? ' is-done' : '') + (late ? ' late' : ''));
+      var row = el('article', 'pc-ev' + (evt.done ? ' is-done' : '') + (late ? ' late' : '') + (L.meetingLink(evt) ? ' has-link' : ''));
       row.setAttribute('data-id', evt.id);
 
       var check = el('button', 'check' + (evt.done ? ' on' : ''));
@@ -358,10 +359,12 @@
 
     function renderForm() {
       UI.clear(formBox);
+      dayBox.classList.toggle('has-form', editing !== null);
       if (editing === null) return;
       var evt = editing === 'new' ? null : events.filter(function(e) { return e.id === editing; })[0];
       if (editing !== 'new' && !evt) {
         editing = null;
+        dayBox.classList.remove('has-form');
         return;
       }
       var form = el('form', 'pc-form card raised');
@@ -383,7 +386,7 @@
       time.type = 'time';
       time.value = evt && evt.time ? evt.time : '';
       whenRow.appendChild(labelled('Date', date));
-      whenRow.appendChild(labelled('Time, blank for all day', time));
+      whenRow.appendChild(labelled('Time, if any', time));
       form.appendChild(whenRow);
 
       var moreRow = el('div', 'pc-formrow');

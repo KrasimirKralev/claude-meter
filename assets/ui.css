@@ -7,6 +7,7 @@
   --surface2: #f7f3ea;
   --border: #111111;
   --ink: #111111;
+  --shadow-color: #111111;
   --text: #111111;
   --text-dim: #5f5a4f;
   --accent: #ff90e8;
@@ -27,8 +28,8 @@
   --on-yellow-dim: #3a3205;
 
   --bw: 2.5px;
-  --shadow: 4px 4px 0 var(--ink);
-  --shadow-sm: 2.5px 2.5px 0 var(--ink);
+  --shadow: 4px 4px 0 var(--shadow-color);
+  --shadow-sm: 2.5px 2.5px 0 var(--shadow-color);
   --r: 12px;
   --r-sm: 8px;
   --pop: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -54,7 +55,7 @@ button:disabled { cursor: default; opacity: 0.45; }
   font-size: 13px; font-weight: 700; white-space: nowrap;
   transition: transform 0.12s var(--pop), box-shadow 0.12s var(--pop);
 }
-.btn:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 2px 2px 0 var(--ink); }
+.btn:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 2px 2px 0 var(--shadow-color); }
 .btn:active:not(:disabled) { transform: none; box-shadow: none; }
 .btn.primary { background: var(--accent); color: var(--on-accent); }
 .btn.danger { color: var(--crit-text); }
@@ -96,7 +97,7 @@ textarea.field { height: auto; padding: 8px 10px; }
 .tag.late { background: var(--red); color: var(--on-candy); }
 
 .check {
-  display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none;
+  display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none; padding: 0;
   background: var(--surface); border: 2px solid var(--ink); border-radius: 5px;
   color: transparent;
 }
@@ -110,13 +111,14 @@ textarea.field { height: auto; padding: 8px 10px; }
 /* The black title bar of a panel window, the same as the widget's. */
 .winbar {
   display: flex; align-items: center; gap: 8px; height: 40px; flex: none; padding: 0 6px 0 14px;
-  background: var(--bar); color: var(--bar-ink);
+  background: var(--bar); color: var(--bar-ink); border-bottom: 2px solid var(--ink);
   -webkit-app-region: drag; user-select: none;
 }
 .winbar h1 { margin: 0; font-size: 12.5px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; }
 .winbar .count { font-size: 12px; color: var(--bar-dim); }
 .winbar .icon-btn { margin-left: auto; color: var(--bar-dim); -webkit-app-region: no-drag; }
 .winbar .icon-btn:hover { background: var(--bar-hover); color: var(--bar-ink); }
+.winbar :focus-visible { outline-color: var(--bar-ink); }
 
 /* A window that is only a panel of the app. */
 body.panel-window {

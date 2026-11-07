@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const path = require('node:path');
 const {
   MAPS_ORIGIN,
-  childEnv, cleanBounds, mapsThemeFor, roomiestDir,
+  childEnv, cleanBounds, mapsThemeFor, mapsTokens, roomiestDir,
   cleanMapsReport,
   cleanOpenRequest,
   isMapsUrl,
@@ -148,4 +148,13 @@ test('the account with the most room lends its login, never one that is logged o
   assert.strictEqual(roomiestDir([{ needsLogin: true, dir: '/a' }]), null);
   assert.strictEqual(roomiestDir([]), null);
   assert.strictEqual(roomiestDir(null), null);
+});
+
+test('the page gets the app theme\'s real colours', () => {
+  const tokens = mapsTokens({ name: 'nord', winBg: '#2e3440', surface: '#3b4252', surface2: '#434c5e', line: '#a3adc2', shadow: '#20252f', text: '#eceff4', textDim: '#c0c8d6', accent: '#88c0d0', onAccent: '#111111', yellow: '#ebcb8b', green: '#a3be8c', critText: '#f2a7ae' });
+  assert.strictEqual(tokens.bg, '#2e3440');
+  assert.strictEqual(tokens.blue, '#88c0d0');
+  assert.strictEqual(tokens['on-accent'], '#111111');
+  assert.strictEqual(tokens['elev-float'], '3px 3px 0 #20252f');
+  assert.match(tokens.hover, /255/);
 });

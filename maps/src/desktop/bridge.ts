@@ -26,8 +26,11 @@ export interface OpenRequest {
   new?: boolean;
 }
 
-/** The app's look. The page's own dark and light, plus the app's main theme. */
-export type AppTheme = 'brutal' | 'dark' | 'light';
+/** The app's look: which of the page's bases it draws on, and the app's colours for that theme. */
+export interface AppTheme {
+  base: 'brutal' | 'dark' | 'light';
+  tokens: Record<string, string>;
+}
 
 interface MeterBridge {
   reportMaps(maps: ReportedMap[]): void;

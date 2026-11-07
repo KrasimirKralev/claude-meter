@@ -463,7 +463,7 @@ document.getElementById('updateBtn').addEventListener('click', function() {
       btn.style.backgroundSize = '';
       btn.style.background = 'linear-gradient(90deg, #6366f1, #a855f7, #ec4899)';
     } else {
-      btn.textContent = 'Failed — retry';
+      btn.textContent = 'Failed. Try again';
       btn.classList.remove('downloading');
       btn.style.backgroundSize = '';
       btn.style.background = '';
@@ -473,7 +473,7 @@ document.getElementById('updateBtn').addEventListener('click', function() {
       }, 3000);
     }
   }).catch(function() {
-    btn.textContent = 'Failed — retry';
+    btn.textContent = 'Failed. Try again';
     btn.classList.remove('downloading');
     btn.style.backgroundSize = '';
     btn.style.background = '';
@@ -519,7 +519,7 @@ document.getElementById('calendarBtn').addEventListener('dblclick', function(e) 
   var streak = document.getElementById('streakBadge');
   if (!streak) return;
   streak.style.cursor = 'pointer';
-  streak.title = 'Task completion streak — open Tasks';
+  streak.title = 'Days in a row with a task finished. Opens Tasks.';
   streak.addEventListener('click', function(e) {
     e.stopPropagation();
     window.electronAPI.openTasks();
@@ -564,7 +564,7 @@ document.getElementById('setupSignInBtn').addEventListener('click', function() {
       btn.style.display = 'none';
       waiting.style.display = '';
     } else {
-      btn.textContent = 'Sign In';
+      btn.textContent = 'Sign in';
       btn.disabled = false;
       document.getElementById('setupDesc').textContent =
         'Could not launch login. Run "claude auth login" in a terminal.';

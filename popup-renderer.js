@@ -138,7 +138,7 @@ function showUsageAlert(p) {
   labelEl.textContent = danger ? 'Critical usage' : 'Usage warning';
   titleEl.textContent = named ? p.accountLabel : p.label;
   titleEl.title = titleEl.textContent;
-  subtitleEl.textContent = (named ? p.label + ' · ' : '') + (p.resetText || 'Threshold exceeded');
+  subtitleEl.textContent = (named ? p.label + ' · ' : '') + (p.resetText || 'Past your alert level');
   document.getElementById('popupPctValue').textContent = p.pct;
   pctEl.hidden = false;
   setCells(p.pct, danger ? 'hot' : 'warm');

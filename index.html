@@ -20,6 +20,7 @@
     --surface2: #f7f3ea;
     --border: #111111;
     --ink: #111111;
+    --shadow-color: #111111;
     --text: #111111;
     --text-dim: #5f5a4f;
     --accent: #ff90e8;   /* candy pink */
@@ -40,8 +41,8 @@
     --on-yellow-dim: #3a3205;
 
     --bw: 2.5px;                    /* border weight */
-    --shadow: 4px 4px 0 var(--ink);
-    --shadow-sm: 2.5px 2.5px 0 var(--ink);
+    --shadow: 4px 4px 0 var(--shadow-color);
+    --shadow-sm: 2.5px 2.5px 0 var(--shadow-color);
     --r: 12px;
     --r-sm: 8px;
     --mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
@@ -83,6 +84,7 @@
     padding: 0 8px 0 14px;
     background: var(--bar);
     color: var(--bar-ink);
+    border-bottom: 2px solid var(--ink);
   }
   .title { font-size: 12.5px; font-weight: 900; letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap; }
   .dot, .sync-status { display: none; }
@@ -110,7 +112,7 @@
 
   /* ---------- The answer ---------- */
   .answer { padding: 8px 14px; font-size: 14px; color: var(--text-dim); flex-shrink: 0; }
-  .answer b { color: var(--ink); font-weight: 600; white-space: nowrap; }
+  .answer b { color: var(--text); font-weight: 600; white-space: nowrap; }
 
   /* ---------- Account board ---------- */
   .accts {
@@ -129,7 +131,7 @@
     align-items: center;
     min-height: 60px;
     padding: 6px 8px;
-    color: var(--ink);
+    color: var(--text);
     cursor: pointer;
   }
   .acct + .acct { border-top: 2px solid var(--ink); }
@@ -171,7 +173,7 @@
   .meters .wide { grid-column: 1 / -1; }
   .lab { font-size: 11px; color: var(--text-dim); white-space: nowrap; padding-right: 4px; }
   .lab.wide { padding-right: 0; margin-bottom: -3px; }
-  .login-btn { grid-column: 1 / -1; justify-self: start; padding: 4px 10px; border: 2px solid var(--ink); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 700; }
+  .login-btn { grid-column: 1 / -1; justify-self: start; padding: 4px 10px; border: 2px solid var(--ink); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; font-weight: 700; }
   .login-btn:hover { background: var(--surface2); }
   .pct { text-align: right; line-height: 1; white-space: nowrap; }
   .pct b { font-size: 24px; font-weight: 900; }
@@ -203,16 +205,16 @@
     border-radius: 9px; padding: 6px 11px; cursor: pointer;
   }
   .extra-strip:hover { background: var(--surface2); }
-  .extra-strip .es-ic { width: 15px; height: 15px; flex-shrink: 0; color: var(--ink); }
+  .extra-strip .es-ic { width: 15px; height: 15px; flex-shrink: 0; color: var(--text); }
   .extra-strip .es-lbl { font-size: 12px; font-weight: 700; color: var(--text-dim); flex-shrink: 0; }
-  .extra-strip .es-amt { font-weight: 800; font-size: 13px; color: var(--ink); flex-shrink: 0; }
+  .extra-strip .es-amt { font-weight: 800; font-size: 13px; color: var(--text); flex-shrink: 0; }
   .extra-strip .es-cells { flex: 1; min-width: 26px; }
-  .extra-strip .es-pct { font-weight: 800; font-size: 12px; color: var(--ink); flex-shrink: 0; min-width: 30px; text-align: right; }
+  .extra-strip .es-pct { font-weight: 800; font-size: 12px; color: var(--text); flex-shrink: 0; min-width: 30px; text-align: right; }
   .usage-rows:not(:has(.extra-section:not([style*="none"]))) { display: none; }
 
   /* ---------- Today ---------- */
   .today { padding: 8px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
-  .next-line { display: flex; gap: 4px; font-size: 13px; min-width: 0; color: var(--ink); }
+  .next-line { display: flex; gap: 4px; font-size: 13px; min-width: 0; color: var(--text); }
   .next-event { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
   .next-event:hover, .tasks-left:hover { text-decoration: underline; }
   .next-event b { font-weight: 700; }
@@ -224,7 +226,7 @@
     display: inline-flex; align-items: center; gap: 5px;
     height: 26px; padding: 0 10px;
     border: 2px solid var(--ink); border-radius: 99px;
-    background: var(--surface); color: var(--ink);
+    background: var(--surface); color: var(--text);
     font-size: 12px; font-weight: 600; white-space: nowrap;
   }
   button.widget-habits-badge:hover { background: var(--surface2); }
@@ -236,10 +238,10 @@
     background: conic-gradient(currentColor var(--p, 0%), transparent 0);
   }
   .habits-right { margin-left: auto; display: flex; align-items: center; gap: 0; }
-  .relax-meta { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+  .relax-meta { font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; }
   .relax-meta:empty { display: none; }
   .relax-now-btn { height: 26px; padding: 0 8px; font-size: 12px; font-weight: 600; color: var(--text-dim); border-radius: 99px; white-space: nowrap; }
-  .relax-now-btn:hover { color: var(--ink); background: var(--hover); }
+  .relax-now-btn:hover { color: var(--text); background: var(--hover); }
 
   /* ---------- Focus timer ---------- */
   .pomo-ring-wrap {
@@ -251,7 +253,7 @@
     color: var(--text-dim);
     font-size: 12px; font-weight: 600; white-space: nowrap;
   }
-  .pomo-ring-wrap:hover { color: var(--ink); background: var(--hover); }
+  .pomo-ring-wrap:hover { color: var(--text); background: var(--hover); }
   .pomo-ring-svg { width: 14px; height: 14px; transform: rotate(-90deg); pointer-events: none; }
   .pomo-idle-icon { display: none; width: 14px; height: 14px; pointer-events: none; }
   .pomo-ring-wrap.idle .pomo-idle-icon { display: block; }
@@ -263,8 +265,8 @@
   .pomo-ring-fill.idle { stroke: currentColor; stroke-width: 3; }
   .pomo-ring-fill.running { stroke: var(--green); }
   .pomo-ring-text { pointer-events: none; }
-  .pomo-ring-text.active { color: var(--ink); }
-  .pomo-ring-text.break { color: var(--ink); }
+  .pomo-ring-text.active { color: var(--text); }
+  .pomo-ring-text.break { color: var(--text); }
   .pomo-tooltip {
     display: none;
     position: absolute;
@@ -277,7 +279,7 @@
     white-space: nowrap;
     z-index: 100;
     min-width: 134px;
-    color: var(--ink);
+    color: var(--text);
     cursor: default;
   }
   .pomo-tooltip.open { display: block; animation: tooltipIn 0.18s var(--pop); }
@@ -285,7 +287,7 @@
     0% { opacity: 0; transform: translateY(6px) scale(0.9); }
     100% { opacity: 1; transform: translateY(0) scale(1); }
   }
-  .pomo-tooltip-time { font-size: 22px; font-weight: 900; text-align: center; color: var(--ink); }
+  .pomo-tooltip-time { font-size: 22px; font-weight: 900; text-align: center; color: var(--text); }
   .pomo-tooltip-time.active { color: var(--green); }
   .pomo-tooltip-time.break { color: #c78d00; }
   .pomo-tooltip-label { font-size: 11px; font-weight: 700; text-align: center; color: var(--text-dim); margin-top: 2px; margin-bottom: 8px; }
@@ -293,7 +295,7 @@
   .pomo-tooltip-btn {
     flex: 1; padding: 6px 0; font-size: 12px; font-weight: 800;
     border: 2px solid var(--ink); border-radius: 6px;
-    background: var(--surface); color: var(--ink);
+    background: var(--surface); color: var(--text);
     text-align: center;
   }
   .pomo-tooltip-btn.primary { background: var(--green); color: var(--on-candy); }
@@ -340,7 +342,7 @@
   .dock button {
     min-width: 0;
     display: flex; align-items: center; justify-content: center; gap: 6px;
-    font-size: 12.5px; font-weight: 800; color: var(--ink);
+    font-size: 12.5px; font-weight: 800; color: var(--text);
   }
   .dock button + button { border-left: 2px solid var(--ink); }
   .dock button:hover { background: var(--surface2); }
@@ -403,7 +405,7 @@
   /* The other accounts and every tool stay reachable: only this account's numbers need a login. */
   .widget.setup .answer, .widget.setup .usage-rows { display: none; }
   .setup-overlay .setup-icon { font-size: 34px; margin-bottom: 12px; }
-  .setup-overlay .setup-title { font-size: 16px; font-weight: 900; margin-bottom: 6px; color: var(--ink); }
+  .setup-overlay .setup-title { font-size: 16px; font-weight: 900; margin-bottom: 6px; color: var(--text); }
   .setup-overlay .setup-desc { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 16px; font-weight: 600; }
   .setup-overlay .setup-btn {
     padding: 10px 28px; font-size: 13px; font-weight: 900; border-radius: var(--r-sm);
@@ -414,7 +416,7 @@
   }
   .setup-overlay .setup-btn:hover { filter: brightness(1.08); }
   .setup-overlay .setup-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .setup-overlay .setup-install-link { font-size: 12px; color: var(--ink); text-decoration: underline; font-weight: 700; }
+  .setup-overlay .setup-install-link { font-size: 12px; color: var(--text); text-decoration: underline; font-weight: 700; }
   .setup-overlay .setup-waiting { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; font-weight: 700; }
   .setup-overlay .setup-waiting .dot { display: block; width: 7px; height: 7px; border-radius: 2px; border: 1.5px solid var(--ink); background: var(--yellow); }
 
@@ -476,6 +478,8 @@
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--ink); border-radius: 3px; }
+  .header :focus-visible { outline-color: var(--bar-ink); }
+
   /* A narrow widget: five labels still have to fit along the bottom. */
   @media (max-width: 520px) {
     .dock button { gap: 4px; font-size: 12px; }
@@ -511,7 +515,7 @@
     <div class="setup-icon"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 0 1-10 0V8ZM12 16v5"/></svg></div>
     <div class="setup-title" id="setupTitle">Connect to Claude</div>
     <div class="setup-desc" id="setupDesc">Sign in with your Anthropic account to start tracking usage.</div>
-    <button class="setup-btn" id="setupSignInBtn">Sign In</button>
+    <button class="setup-btn" id="setupSignInBtn">Sign in</button>
     <div class="setup-waiting" id="setupWaiting" style="display:none">
       <span class="dot"></span>
       <span>Waiting for browser login...</span>

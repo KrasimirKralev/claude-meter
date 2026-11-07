@@ -84,9 +84,9 @@ test('formatLeft: calendar days, then hours and minutes on the last day', () => 
 
 test('dates and times are fixed-format, not locale-dependent', () => {
   const t = at(2026, 11, 1, 3, 44);
-  assert.strictEqual(login.formatDate(t), '01 Nov');
+  assert.strictEqual(login.formatDate(t), 'Nov 1');
   assert.strictEqual(login.formatTime(t), '03:44');
-  assert.strictEqual(login.formatDateTime(t), 'Sun 01 Nov 03:44');
+  assert.strictEqual(login.formatDateTime(t), 'Sun Nov 1 03:44');
 });
 
 test('loginCommand: cm-login by dir name when available, else plain claude auth login', () => {
@@ -134,32 +134,32 @@ test('clxVerdict: only "token rejected", only for the same dir and the same file
 test('describeLogin: the strings each state renders', () => {
   const ok = login.describeLogin(read(), NOW, { command: CMD });
   assert.strictEqual(ok.state, 'ok');
-  assert.strictEqual(ok.short, '01 Nov · 30 d');
-  assert.strictEqual(ok.text, 'Login until 01 Nov · 30 d');
-  assert.strictEqual(ok.detail, 'Login until Sun 01 Nov 03:44 (30 d left)');
+  assert.strictEqual(ok.short, 'Nov 1 · 30 d');
+  assert.strictEqual(ok.text, 'Login until Nov 1 · 30 d');
+  assert.strictEqual(ok.detail, 'Login until Sun Nov 1 03:44 (30 d left)');
   assert.strictEqual(ok.until, at(2026, 11, 1, 3, 44));
 
   const warn = login.describeLogin(read({ refreshExpiresAt: at(2026, 10, 4, 9, 5) }), NOW, { command: CMD });
   assert.strictEqual(warn.state, 'warn');
-  assert.strictEqual(warn.short, '04 Oct · 2 d');
-  assert.strictEqual(warn.text, 'Login until 04 Oct 09:05 · 2 d — renew: ' + CMD);
+  assert.strictEqual(warn.short, 'Oct 4 · 2 d');
+  assert.strictEqual(warn.text, 'Login until Oct 4 09:05 · 2 d. Renew: ' + CMD);
 
   const lastDay = login.describeLogin(read({ refreshExpiresAt: NOW + 5 * HOUR + 10 * 60000 }), NOW, { command: CMD });
-  assert.strictEqual(lastDay.short, '03 Oct · 5 h');
+  assert.strictEqual(lastDay.short, 'Oct 3 · 5 h');
 
   const expired = login.describeLogin(read({ refreshExpiresAt: at(2026, 10, 2, 3, 44) }), NOW, { command: CMD });
   assert.strictEqual(expired.state, 'out');
   assert.strictEqual(expired.short, 'Logged out');
-  assert.strictEqual(expired.text, 'Logged out — run: ' + CMD);
-  assert.strictEqual(expired.detail, 'Login expired Fri 02 Oct 03:44 — run: ' + CMD);
+  assert.strictEqual(expired.text, 'Logged out. Run: ' + CMD);
+  assert.strictEqual(expired.detail, 'Login expired Fri Oct 2 03:44. Run: ' + CMD);
 
   const blank = login.describeLogin(read({ access: false, refresh: false }), NOW, { command: CMD });
-  assert.strictEqual(blank.text, 'Logged out — run: ' + CMD);
-  assert.strictEqual(blank.detail, 'Logged out — run: ' + CMD);
+  assert.strictEqual(blank.text, 'Logged out. Run: ' + CMD);
+  assert.strictEqual(blank.detail, 'Logged out. Run: ' + CMD);
 
   const rejected = login.describeLogin(read(), NOW, { command: CMD, rejected: 'token rejected (http-401)' });
   assert.strictEqual(rejected.state, 'out');
-  assert.strictEqual(rejected.detail, 'Token rejected (http-401) — run: ' + CMD);
+  assert.strictEqual(rejected.detail, 'Token rejected (http-401). Run: ' + CMD);
 
   const old = login.describeLogin(read({ refreshExpiresAt: null }), NOW, { command: CMD });
   assert.strictEqual(old.state, 'ok');

@@ -17,6 +17,7 @@ const {
   cleanOpenRequest,
   isMapsUrl,
   mapsThemeFor,
+  mapsTokens,
   roomiestDir,
   serverEntry,
 } = require('./maps-lib');
@@ -273,7 +274,7 @@ function createMapsFeature({ WebContentsView, ipcMain, session, isLocalSender, d
     if (!view) return;
     const theme = getTheme();
     view.setBackgroundColor(theme.winBg);
-    view.webContents.send('maps-theme', mapsThemeFor(theme.name));
+    view.webContents.send('maps-theme', { base: mapsThemeFor(theme.name), tokens: mapsTokens(theme) });
   };
 
   const createView = (dashboard) => {

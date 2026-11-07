@@ -98,7 +98,7 @@ window.meetingPopupAPI.onData(function(data) {
   var title = document.getElementById('title');
   var eventName = document.getElementById('eventName');
   var subtitle = document.getElementById('subtitle');
-  var okBtn = document.getElementById('okBtn');
+  var okBtn = document.getElementById('dismissBtn');
   var progressBar = document.getElementById('progressBar');
   var countdown = document.getElementById('countdown');
 
@@ -194,12 +194,6 @@ function updateCountdownText() {
 
 // Buttons
 document.getElementById('joinBtn').insertBefore(UI.icon('video'), document.getElementById('joinBtn').firstChild);
-
-document.getElementById('okBtn').addEventListener('click', function() {
-  clearInterval(countdownInterval);
-  clearInterval(liveInterval);
-  window.meetingPopupAPI.dismiss();
-});
 
 document.getElementById('dismissBtn').addEventListener('click', function() {
   clearInterval(countdownInterval);

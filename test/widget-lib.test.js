@@ -94,12 +94,12 @@ test('refillText counts down inside a day, then names the weekday', () => {
   assert.strictEqual(refillText(new Date(NOW + 19.2 * HOUR).toISOString(), NOW), 'in 19h 12m');
   assert.strictEqual(refillText(new Date(NOW + 0.5 * HOUR).toISOString(), NOW), 'in 30m');
   assert.strictEqual(refillText(new Date(NOW + 30000).toISOString(), NOW), 'in 30s');
-  assert.strictEqual(refillText(new Date(2026, 10, 13, 17, 59).toISOString(), NOW), 'Fri, 5:59pm');
-  assert.strictEqual(refillText(new Date(2026, 10, 11, 9, 0).toISOString(), NOW), 'Wed, 9am');
+  assert.strictEqual(refillText(new Date(2026, 10, 13, 17, 59).toISOString(), NOW), 'Fri, 17:59');
+  assert.strictEqual(refillText(new Date(2026, 10, 11, 9, 0).toISOString(), NOW), 'Wed, 9:00');
 });
 
 test('refillText gives a date when a weekday would be ambiguous', () => {
-  assert.strictEqual(refillText(new Date(2026, 10, 20, 9, 0).toISOString(), NOW), 'Nov 20, 9am');
+  assert.strictEqual(refillText(new Date(2026, 10, 20, 9, 0).toISOString(), NOW), 'Nov 20, 9:00');
 });
 
 test('refillText says so when the moment has passed, and is empty with no time', () => {
@@ -328,7 +328,7 @@ test('a full limit gets its own refill time, not the main meter\'s', () => {
   usage.weekSonnet = meter(100, 100, { label: 'Current week (Fable)', model: 'Fable', severity: 'critical' });
   const state = rowState(account('Side', usage), NOW);
   assert.strictEqual(state.alert, 'Fable full.');
-  assert.strictEqual(state.detail, 'Refills Wed, 3:47pm');
+  assert.strictEqual(state.detail, 'Refills Wed, 15:47');
 });
 
 test('a full main meter still outranks a login that ends soon', () => {

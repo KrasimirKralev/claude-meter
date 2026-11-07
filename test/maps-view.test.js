@@ -415,11 +415,12 @@ test('the page draws its first frame in the app theme and follows later changes'
   const world = makeWorld(t);
   const view = await opened(world);
   assert.match(view.loads[0], /\?theme=brutal$/);
-  assert.deepStrictEqual(view.themes, ['brutal']);
+  assert.deepStrictEqual(view.themes.map((t) => t.base), ['brutal']);
+  assert.strictEqual(view.themes[0].tokens.bg, '#f0ede4');
   assert.strictEqual(view.background, '#f0ede4');
   world.theme = { name: 'nord', winBg: '#2e3440' };
   world.feature.themeChanged();
-  assert.deepStrictEqual(view.themes, ['brutal', 'dark']);
+  assert.deepStrictEqual(view.themes.map((t) => t.base), ['brutal', 'dark']);
   assert.strictEqual(view.background, '#2e3440');
 });
 

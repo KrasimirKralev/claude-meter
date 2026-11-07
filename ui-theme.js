@@ -3,11 +3,6 @@
   'use strict';
 
   var DARK_THEMES = { dark: true, nord: true, dracula: true };
-  // Colour on the accent, for themes whose accent is too dark for ink.
-  var ON_ACCENT = { karchx: '#ffffff', light: '#ffffff' };
-
-  // Red that is readable as small text. Some themes' own red is only strong enough for a filled shape.
-  var CRIT_TEXT = { brutal: '#c8232b', nord: '#f2a7ae', dracula: '#ff9e9e' };
 
   function applyTheme(theme) {
     if (!theme) return;
@@ -19,14 +14,15 @@
     set('--border', theme.border);
     set('--text', theme.text);
     set('--text-dim', theme.textDim);
-    set('--ink', theme.text);
+    set('--ink', theme.line || theme.text);
+    set('--shadow-color', theme.shadow || theme.line || theme.text);
     set('--accent', theme.accent);
-    set('--on-accent', ON_ACCENT[theme.name] || '#111111');
+    set('--on-accent', theme.onAccent || '#111111');
     set('--green', theme.green);
     set('--red', theme.red);
     set('--yellow', theme.yellow);
     set('--bar-bg', theme.barBg);
-    set('--crit-text', CRIT_TEXT[theme.name] || theme.red || '#e5484d');
+    set('--crit-text', theme.critText || theme.red || '#e5484d');
     set('--hover', DARK_THEMES[theme.name] ? 'rgba(255, 255, 255, 0.08)' : 'rgba(17, 17, 17, 0.06)');
     root.dataset.theme = theme.name || 'brutal';
     root.style.colorScheme = DARK_THEMES[theme.name] ? 'dark' : 'light';

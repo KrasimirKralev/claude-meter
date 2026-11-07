@@ -21,7 +21,8 @@
     var form = el('form', 'pt-add');
     var input = el('input', 'field');
     input.maxLength = 200;
-    input.placeholder = 'Add a task, like "Call Sam tomorrow 3pm"';
+    input.placeholder = opts.placeholder || 'Add a task';
+    input.title = 'It can say when: "Call Sam tomorrow 3pm" also puts it on the calendar.';
     input.setAttribute('aria-label', 'New task');
     var addBtn = el('button', 'btn primary', 'Add');
     addBtn.type = 'submit';
@@ -155,6 +156,7 @@
       if (due) body.appendChild(el('span', 'pt-due' + (due.tone ? ' ' + due.tone : ''), due.text));
 
       var actions = el('div', 'pt-actions');
+      var tools = el('div', 'pt-tools');
       if (!isDone) {
         var priority = L.priorityOf(task);
         var chip = el('button', 'pt-prio ' + priority, PRIORITY_WORDS[priority]);
@@ -170,14 +172,15 @@
           schedulingId = schedulingId === task.id ? null : task.id;
           render();
         });
-        actions.appendChild(schedule);
+        tools.appendChild(schedule);
       }
       var noteBtn = UI.iconButton('note', 'Open this task\'s note');
       noteBtn.addEventListener('click', function() { api.openTaskNote(task.id, task.text); });
-      actions.appendChild(noteBtn);
+      tools.appendChild(noteBtn);
       var del = UI.iconButton('trash', 'Delete this task', 'danger');
       del.addEventListener('click', function() { api.deleteTask(task.id); });
-      actions.appendChild(del);
+      tools.appendChild(del);
+      actions.appendChild(tools);
 
       if (!isDone) {
         var grip = UI.iconButton('grip', 'Move. Drag it, or press the up and down arrows.', 'pt-grip');

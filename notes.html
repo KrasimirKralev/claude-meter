@@ -113,7 +113,7 @@
     max-width: 100%; overflow: hidden; text-overflow: ellipsis;
     background: var(--ink); color: var(--paper);
   }
-  .sc-tag:hover { background: var(--paper); color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--ink); }
+  .sc-tag:hover { background: var(--paper); color: var(--text); box-shadow: inset 0 0 0 1.5px var(--ink); }
   .sc-body {
     display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
     font-size: 13px; font-weight: 500; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere;
@@ -166,7 +166,7 @@
     font-family: var(--code-font); font-size: 13px; line-height: 1.65;
   }
   .raw textarea::placeholder { color: var(--text-dim); }
-  .raw textarea:focus { box-shadow: inset 0 2px 0 var(--ink); }
+  .raw textarea:focus { box-shadow: inset 0 2px 0 var(--shadow-color); }
 
   /* Position: the outline and the scroll sync measure blocks from this box. */
   .rendered { position: relative; flex: 1 1 50%; min-width: 0; overflow-y: auto; padding: 14px 18px; background: var(--surface); }
@@ -218,7 +218,7 @@
   .md-table { width: 100%; max-width: 640px; margin: 10px 0; overflow: hidden; border-collapse: separate; border-spacing: 0; border: var(--bw) solid var(--ink); border-radius: var(--r-sm); font-size: 13px; }
   .md-table th, .md-table td { overflow-wrap: anywhere; }
   .md-table th { padding: 6px 9px; background: var(--ink); color: var(--surface); font-size: 12px; font-weight: 800; text-align: left; }
-  .md-table th code { background: var(--surface); color: var(--ink); }
+  .md-table th code { background: var(--surface); color: var(--text); }
   .md-table td { padding: 0; border-top: 2px solid var(--ink); vertical-align: middle; }
   .md-table td:not(:last-child) { border-right: 2px solid var(--ink); }
   .md-table td.mdt-lbl { padding: 6px 9px; font-weight: 600; line-height: 1.4; }

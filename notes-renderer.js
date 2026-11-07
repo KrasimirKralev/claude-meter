@@ -176,7 +176,7 @@ function buildCard(note) {
   card.appendChild(UI.el('div', 'sc-body' + (preview ? '' : ' is-empty'), preview || 'Empty note'));
 
   var meta = UI.el('div', 'sc-meta');
-  meta.appendChild(UI.el('span', '', note.createdAt ? new Date(note.createdAt).toLocaleDateString() : ''));
+  meta.appendChild(UI.el('span', '', note.createdAt ? shortDate(note.createdAt) : ''));
   var del = UI.iconButton('trash', 'Delete note', 'danger sc-del');
   del.setAttribute('aria-label', 'Delete note: ' + title);
   del.addEventListener('click', function() {
@@ -675,7 +675,7 @@ function openArchive() {
       item.appendChild(UI.el('span', 'archive-stripe c-' + colorKeyOf(note)));
       var txt = UI.el('div');
       txt.appendChild(UI.el('div', 'archive-title', noteName));
-      if (note.archivedAt) txt.appendChild(UI.el('div', 'archive-date', new Date(note.archivedAt).toLocaleDateString()));
+      if (note.archivedAt) txt.appendChild(UI.el('div', 'archive-date', shortDate(note.archivedAt)));
       item.appendChild(txt);
       var btn = UI.el('button', 'btn small', 'Restore');
       btn.type = 'button';
@@ -702,6 +702,13 @@ function openArchive() {
 }
 
 /* ============ CRUD ============ */
+// "Nov 7", with the year when it isn't this one: the way dates read across the app.
+function shortDate(ms) {
+  var d = new Date(ms);
+  var text = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return d.getFullYear() === new Date().getFullYear() ? text : text + ', ' + d.getFullYear();
+}
+
 // The same limits main.js and the phone's sync keep to. Saying so beats dropping words later.
 var NOTES_MAX = 50;
 var NOTE_TEXT_MAX = 100000;

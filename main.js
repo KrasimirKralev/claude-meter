@@ -295,6 +295,7 @@ const { createNotesView } = require('./notes-view');
 const { readJsonOr, writeJsonAtomic } = require('./safe-file');
 const { parseSmartText } = require('./smart-text');
 const calendarLib = require('./calendar-lib');
+const widgetLib = require('./widget-lib');
 const RELAX_MUSIC_DIR = path.join(os.homedir(), 'Music', 'relax');
 const RELAX_MUSIC_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-music.json');
 const RELAX_TICK_MS = 5000;
@@ -2045,13 +2046,13 @@ function openDailyDigest() {
 let currentTheme = 'brutal'; // 'brutal', 'karchx', 'dark', 'light', 'nord', 'dracula'
 const THEMES = {
   // brutal — pop brutalism: bone paper, ink borders, candy pink/teal/yellow
-  brutal: { bg: '#f0ede4', winBg: '#f0ede4', surface: '#ffffff', surface2: '#f7f3ea', border: '#111111', text: '#111111', textDim: '#5f5a4f', accent: '#ff90e8', green: '#23a094', red: '#e5484d', yellow: '#ffc900', barBg: '#ffffff' },
+  brutal: { bg: '#f0ede4', winBg: '#f0ede4', surface: '#ffffff', surface2: '#f7f3ea', border: '#111111', text: '#111111', textDim: '#5f5a4f', accent: '#ff90e8', green: '#23a094', red: '#e5484d', yellow: '#ffc900', barBg: '#ffffff', line: '#111111', shadow: '#111111', onAccent: '#111111', critText: '#c8232b' },
   // karchx — warm cream paper, deep aubergine accent (based on karchx.com)
-  karchx: { bg: '#ece4d6', winBg: '#ece4d6', surface: '#f3ecde', surface2: '#ebe2cf', border: '#d4c8b3', text: '#1f1c18', textDim: '#6b5f54', accent: '#3b2a3a', green: '#4a7a4a', red: '#a83b3b', yellow: '#b88a2e', barBg: '#d9ccb3' },
-  dark: { bg: 'rgba(12,12,18,0.85)', winBg: '#0c0c12', surface: '#13131d', surface2: '#1b1b28', border: '#2a2a3d', text: '#e2e2f0', textDim: '#7e7e98', accent: '#d4845a', green: '#4ade80', red: '#f87171', yellow: '#facc15', barBg: '#252538' },
-  light: { bg: 'rgba(250,250,252,0.94)', winBg: '#fafafc', surface: '#ffffff', surface2: '#f3f4f6', border: '#d1d5db', text: '#111827', textDim: '#6b7280', accent: '#b45e35', green: '#16a34a', red: '#dc2626', yellow: '#ca8a04', barBg: '#e5e7eb' },
-  nord: { bg: 'rgba(46,52,64,0.88)', winBg: '#2e3440', surface: '#3b4252', surface2: '#434c5e', border: '#4c566a', text: '#eceff4', textDim: '#c0c8d6', accent: '#88c0d0', green: '#a3be8c', red: '#bf616a', yellow: '#ebcb8b', barBg: '#2e3440' },
-  dracula: { bg: 'rgba(40,42,54,0.88)', winBg: '#282a36', surface: '#44475a', surface2: '#50526a', border: '#6272a4', text: '#f8f8f2', textDim: '#d0d0e0', accent: '#bd93f9', green: '#50fa7b', red: '#ff5555', yellow: '#f1fa8c', barBg: '#282a36' },
+  karchx: { bg: '#ece4d6', winBg: '#ece4d6', surface: '#f3ecde', surface2: '#ebe2cf', border: '#d4c8b3', text: '#1f1c18', textDim: '#6b5f54', accent: '#3b2a3a', green: '#4a7a4a', red: '#a83b3b', yellow: '#b88a2e', barBg: '#d9ccb3', line: '#1f1c18', shadow: '#1f1c18', onAccent: '#ffffff', critText: '#a83b3b' },
+  dark: { bg: 'rgba(12,12,18,0.85)', winBg: '#0c0c12', surface: '#13131d', surface2: '#1b1b28', border: '#2a2a3d', text: '#e2e2f0', textDim: '#8f8fa8', accent: '#d4845a', green: '#4ade80', red: '#f87171', yellow: '#facc15', barBg: '#252538', line: '#8c8ca3', shadow: '#34344a', onAccent: '#111111', critText: '#f87171' },
+  light: { bg: 'rgba(250,250,252,0.94)', winBg: '#fafafc', surface: '#ffffff', surface2: '#f3f4f6', border: '#d1d5db', text: '#111827', textDim: '#6b7280', accent: '#b45e35', green: '#16a34a', red: '#dc2626', yellow: '#ca8a04', barBg: '#e5e7eb', line: '#111827', shadow: '#111827', onAccent: '#ffffff', critText: '#dc2626' },
+  nord: { bg: 'rgba(46,52,64,0.88)', winBg: '#2e3440', surface: '#3b4252', surface2: '#434c5e', border: '#4c566a', text: '#eceff4', textDim: '#c0c8d6', accent: '#88c0d0', green: '#a3be8c', red: '#bf616a', yellow: '#ebcb8b', barBg: '#2e3440', line: '#a3adc2', shadow: '#20252f', onAccent: '#111111', critText: '#f2a7ae' },
+  dracula: { bg: 'rgba(40,42,54,0.88)', winBg: '#282a36', surface: '#44475a', surface2: '#50526a', border: '#6272a4', text: '#f8f8f2', textDim: '#d0d0e0', accent: '#bd93f9', green: '#50fa7b', red: '#ff5555', yellow: '#f1fa8c', barBg: '#282a36', line: '#9aa5d1', shadow: '#1c1d26', onAccent: '#111111', critText: '#ff9e9e' },
 };
 
 // Send the currently-selected theme to a single window. Use on did-finish-load
@@ -2686,11 +2687,7 @@ function openAlertPopup(label, pct, resetsAt, accountLabel) {
     let resetText = '';
     if (resetsAt) {
       const diff = new Date(resetsAt).getTime() - Date.now();
-      if (diff > 0) {
-        const hours = Math.floor(diff / 3600000);
-        const mins = Math.floor((diff % 3600000) / 60000);
-        resetText = hours > 0 ? `Resets in ${hours}h ${mins}m` : `Resets in ${mins}m`;
-      }
+      if (diff > 0) resetText = 'Refills ' + widgetLib.refillText(resetsAt, Date.now());
     }
 
     alertPopup.webContents.send('popup-data', { severity, label, pct, resetText, accountLabel: accountLabel || 'Me' });

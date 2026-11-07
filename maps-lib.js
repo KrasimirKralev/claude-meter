@@ -114,4 +114,38 @@ function cleanBounds(bounds) {
 const MAPS_THEMES = { brutal: 'brutal', karchx: 'light', light: 'light', dark: 'dark', nord: 'dark', dracula: 'dark' };
 const mapsThemeFor = (name) => MAPS_THEMES[name] || 'brutal';
 
-module.exports = { MAPS_ORIGIN, MAPS_PORT, childEnv, cleanBounds, cleanMapsReport, cleanOpenRequest, isMapsUrl, mapsThemeFor, roomiestDir, serverEntry };
+// The page's colours, from the app's theme, so it looks like the rest of the app in every theme.
+function mapsTokens(theme) {
+  const dark = mapsThemeFor(theme.name) === 'dark';
+  const float = `3px 3px 0 ${theme.shadow}`;
+  return {
+    bg: theme.winBg,
+    surface: theme.surface,
+    raised: theme.surface2,
+    hover: dark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(17, 17, 17, 0.06)',
+    line: theme.line,
+    ink: theme.text,
+    mute: theme.textDim,
+    arrow: theme.line,
+    blue: theme.accent,
+    'blue-hover': theme.accent,
+    accent: theme.text,
+    'accent-ink': theme.text,
+    'on-accent': theme.onAccent,
+    soft: theme.yellow,
+    chip: theme.yellow,
+    'chip-ink': '#111111',
+    ok: theme.green,
+    danger: theme.critText,
+    selection: theme.accent,
+    'active-bg': theme.line,
+    'active-ink': theme.winBg,
+    'elev-float': float,
+    'elev-card': float,
+    'map-line': theme.text,
+    'bubble-shadow': `4px 4px 0 ${theme.shadow}`,
+    'ripple-dot': theme.accent,
+  };
+}
+
+module.exports = { MAPS_ORIGIN, MAPS_PORT, childEnv, cleanBounds, cleanMapsReport, cleanOpenRequest, isMapsUrl, mapsThemeFor, mapsTokens, roomiestDir, serverEntry };

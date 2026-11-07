@@ -149,17 +149,23 @@ function meterCells(meter, small) {
   return cells;
 }
 
+function loginEnding(state) {
+  return state.alert.indexOf('Login ends') === 0;
+}
+
 function setRefillText(cell, state) {
   // The column is headed "Refills", so the word isn't repeated in each row.
   var detail = state.detail.replace(/^Refills /, '');
-  var key = state.alert + '|' + detail;
+  // A login about to end is about the account, so it goes under the name instead.
+  var alert = loginEnding(state) ? '' : state.alert;
+  var key = alert + '|' + detail;
   if (cell.getAttribute('data-text') === key) return;
   cell.setAttribute('data-text', key);
   // Past this length it would widen the whole table. The two pieces break between them, not inside.
-  cell.classList.toggle('long', (state.alert + ' ' + detail).length > 26);
+  cell.classList.toggle('long', (alert + ' ' + detail).length > 26);
   while (cell.firstChild) cell.removeChild(cell.firstChild);
-  if (state.alert) cell.appendChild(el('strong', null, state.alert));
-  if (state.alert && detail) cell.appendChild(document.createTextNode(' '));
+  if (alert) cell.appendChild(el('strong', null, alert));
+  if (alert && detail) cell.appendChild(document.createTextNode(' '));
   if (detail) cell.appendChild(el('span', null, detail));
 }
 
@@ -209,10 +215,10 @@ function buildBoardRow(acc, index) {
   }
   label.appendChild(nameEl);
   var login = acc.login;
-  // The short form only: the long one can carry a whole shell command. Skipped when the Refills
-  // column already gives this date.
-  if (state.status !== 'out' && login && login.short && state.alert.indexOf('Login ends') !== 0) {
-    var line = el('div', 'login-line' + (login.state === 'warn' ? ' warn' : ''), 'Login until ' + login.short);
+  // Only when it needs doing something about. A healthy login is in the row's tooltip. The short form,
+  // because the long one can carry a whole shell command.
+  if (state.status !== 'out' && login && login.state === 'warn' && login.short) {
+    var line = el('div', 'login-line warn', 'Login ends ' + login.short);
     line.title = login.detail || login.text || '';
     label.appendChild(line);
   } else if (login && (login.detail || login.text)) {
@@ -663,8 +669,8 @@ function cssVar(name, fallback) {
 
 var chartSeriesDefs = [
   { key: 'session', color: '#d4845a', label: 'Session' },
-  { key: 'weekAll', color: '#111111', label: 'Weekly (all)' },
-  { key: 'weekSonnet', color: '#23a094', label: 'Weekly (Fable)' },
+  { key: 'weekAll', color: '#111111', label: 'All models' },
+  { key: 'weekSonnet', color: '#23a094', label: 'One model' },
 ];
 
 
@@ -673,10 +679,7 @@ function formatChartDate(ts) {
   var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   if (chartDays <= 7) {
-    var h = d.getHours();
-    var ampm = h >= 12 ? 'pm' : 'am';
-    var h12 = h % 12 || 12;
-    return dayNames[d.getDay()] + ' ' + h12 + ampm;
+    return dayNames[d.getDay()] + ' ' + d.getHours() + ':00';
   }
   return monthNames[d.getMonth()] + ' ' + d.getDate();
 }
@@ -684,15 +687,14 @@ function formatChartDate(ts) {
 function formatTooltipTitle(ts) {
   var d = new Date(ts);
   var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  var h = d.getHours();
-  var ampm = h >= 12 ? 'pm' : 'am';
-  var h12 = h % 12 || 12;
-  var min = d.getMinutes();
-  return monthNames[d.getMonth()] + ' ' + d.getDate() + ', ' + h12 + ':' + (min < 10 ? '0' : '') + min + ampm;
+  return monthNames[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
 
+var CHART_FONT = "Inter, system-ui, sans-serif";
+
 function drawChart() {
+  chartSeriesDefs[2].label = (usageData && usageData.weekSonnet && usageData.weekSonnet.model) || 'One model';
   chartSeriesDefs[1].color = cssVar('--text', '#111111');
   chartSeriesDefs[2].color = cssVar('--green', '#23a094');
   var canvas = document.getElementById('historyCanvas');
@@ -789,10 +791,10 @@ function drawChart() {
           position: 'bottom',
           labels: {
             color: cssVar('--text', '#111111'),
-            font: { size: 12, weight: '500' },
-            usePointStyle: true,
-            pointStyle: 'circle',
-            padding: 20,
+            font: { size: 12, family: CHART_FONT },
+            boxWidth: 14,
+            boxHeight: 3,
+            padding: 16,
           },
         },
         tooltip: {
@@ -801,7 +803,7 @@ function drawChart() {
           borderWidth: 1,
           titleColor: '#7e7e98',
           bodyColor: '#e2e2f0',
-          titleFont: { size: 11, family: 'monospace' },
+          titleFont: { size: 11, family: CHART_FONT },
           bodyFont: { size: 12 },
           padding: 12,
           cornerRadius: 8,
@@ -824,7 +826,7 @@ function drawChart() {
         x: {
           ticks: {
             color: cssVar('--text-dim', '#5f5a4f'),
-            font: { size: 10, family: 'monospace' },
+            font: { size: 11, family: CHART_FONT },
             maxTicksLimit: chartDays <= 7 ? 8 : (chartDays <= 14 ? 8 : 6),
             callback: function(val, idx) {
               return formatChartDate(this.getLabelForValue(val));
@@ -844,7 +846,7 @@ function drawChart() {
           max: 100,
           ticks: {
             color: cssVar('--text-dim', '#5f5a4f'),
-            font: { size: 11, family: 'monospace' },
+            font: { size: 11, family: CHART_FONT },
             stepSize: 25,
             callback: function(val) {
               return val + '%';
@@ -880,7 +882,7 @@ function drawChart() {
 // --- Alerts ---
 
 var ALERT_PRESETS = [
-  { label: 'Relaxed', session: 60, weekAll: 60, weekSonnet: 60 },
+  { label: 'Early', session: 60, weekAll: 60, weekSonnet: 60 },
   { label: 'Standard', session: 80, weekAll: 90, weekSonnet: 90 },
   { label: 'Late', session: 95, weekAll: 95, weekSonnet: 95 },
 ];
@@ -1159,7 +1161,7 @@ function setRow(title, description, control) {
 function setGroup(title, rows) {
   var group = el('section', 'set-group');
   group.appendChild(el('h2', null, title));
-  var card = el('div', 'set-card card raised');
+  var card = el('div', 'set-card card');
   rows.forEach(function(row) { card.appendChild(row); });
   group.appendChild(card);
   return group;
@@ -1773,7 +1775,7 @@ var planTasks = PlanTasks.mount(document.getElementById('tasksRoot'), {
   scheduleTask: window.dashboardAPI.scheduleTask,
   openTaskNote: window.dashboardAPI.openTaskNote,
   clearCompleted: window.dashboardAPI.clearCompleted,
-}, { doneOpen: true });
+}, { doneOpen: true, placeholder: 'Add a task, like "Call Sam tomorrow 3pm"' });
 
 function takeTasks(data) {
   dashTasks = data || [];
