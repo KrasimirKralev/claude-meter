@@ -9,6 +9,8 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:3418',
     channel: 'chrome',
+    // The recorded AI answers go with the Bulgarian example.
+    locale: 'bg-BG',
     viewport: { width: 1440, height: 900 },
   },
   webServer: {

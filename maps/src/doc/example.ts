@@ -35,6 +35,27 @@ export const flattenPath = (d: string): Float32Array => {
   return Float32Array.from(numbers);
 };
 
+const WORDS = {
+  bg: {
+    title: 'Бяла дъска — план',
+    capture: 'Улавяне\nРисувам свободно с мишката\nПиша директно върху платното\nПървата черта без никакво забавяне',
+    group: 'Групиране\nЛасо около няколко неща прави една група\nМестя блокове с влачене\nСкицата остава под всичко',
+    digitize: 'AI дигитализация\nЧертите стават блокове и стрелки\nРъкописът става текст на български и английски\nAI предлага, аз приемам',
+    finished: 'Готова карта\nПлан, по който Claude Code да строи\nМоя работна карта на проекта\nПрезентация за екип, клиенти и инвеститори',
+    later: 'По-късно\nДигитална дъска с пръст и писалка\nСъщият код в браузъра на дъската',
+    quote: '„Първо изваждам структурата от главата си възможно най-бързо. Подреждането идва чак после.“',
+  },
+  en: {
+    title: 'Whiteboard: the plan',
+    capture: "Capture\nDraw freely with the mouse\nType straight onto the canvas\nThe first stroke with no delay",
+    group: "Group\nA lasso around a few things makes a group\nDrag blocks to move them\nThe sketch stays under everything",
+    digitize: "AI digitizing\nStrokes become blocks and arrows\nHandwriting becomes text\nAI proposes, I accept",
+    finished: "Finished map\nA plan Claude Code can build from\nMy working map of the project\nA presentation for team and clients",
+    later: "Later\nA digital board with finger and pen\nThe same code in the board's browser",
+    quote: "\"First get the structure out of my head as fast as possible. Tidying up comes later.\"",
+  },
+};
+
 const note = (x: number, y: number, wrap: number, text: string): TextNote => {
   const lines = text.split('\n');
   const width = Math.max(...lines.map((line) => line.length)) * 7.4;
@@ -42,13 +63,18 @@ const note = (x: number, y: number, wrap: number, text: string): TextNote => {
   return { id: newId(), x, y, text, w: Math.min(wrap, width), h: wrapped * 21, wrap };
 };
 
-export const createExampleDoc = (): MapDoc => {
+/** The example speaks the computer's language: Bulgarian there, English everywhere else. */
+const exampleLanguage = (): keyof typeof WORDS =>
+  typeof navigator !== 'undefined' && navigator.language.startsWith('bg') ? 'bg' : 'en';
+
+export const createExampleDoc = (language = exampleLanguage()): MapDoc => {
+  const words = WORDS[language];
   const strokes: Stroke[] = EXAMPLE_SKETCH.map((d) => {
     const points = flattenPath(d);
     return { id: newId(), points, color: 'ink', width: 2.4, box: boxOfPoints(points) };
   });
   return {
-    ...createDoc('Бяла дъска — план'),
+    ...createDoc(words.title),
     isExample: true,
     strokes,
     texts: [
@@ -56,32 +82,32 @@ export const createExampleDoc = (): MapDoc => {
         86,
         84,
         245,
-        'Улавяне\nРисувам свободно с мишката\nПиша директно върху платното\nПървата черта без никакво забавяне',
+        words.capture,
       ),
       note(
         414,
         66,
         230,
-        'Групиране\nЛасо около няколко неща прави една група\nМестя блокове с влачене\nСкицата остава под всичко',
+        words.group,
       ),
       note(
         716,
         108,
         262,
-        'AI дигитализация\nЧертите стават блокове и стрелки\nРъкописът става текст на български и английски\nAI предлага, аз приемам',
+        words.digitize,
       ),
       note(
         614,
         462,
         340,
-        'Готова карта\nПлан, по който Claude Code да строи\nМоя работна карта на проекта\nПрезентация за екип, клиенти и инвеститори',
+        words.finished,
       ),
-      note(112, 484, 255, 'По-късно\nДигитална дъска с пръст и писалка\nСъщият код в браузъра на дъската'),
+      note(112, 484, 255, words.later),
       note(
         240,
         334,
         330,
-        '„Първо изваждам структурата от главата си възможно най-бързо. Подреждането идва чак после.“',
+        words.quote,
       ),
     ],
   };

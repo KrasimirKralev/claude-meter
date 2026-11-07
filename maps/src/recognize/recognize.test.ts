@@ -21,8 +21,18 @@ const text = (id: string, x: number, y: number, value: string): InText => ({
   text: value,
 });
 
+describe('the example in English', () => {
+  it('fits the same drawn boxes, so it reads as the same five groups and a note', () => {
+    const doc = createExampleDoc('en');
+    const result = recognize(doc.strokes, doc.texts);
+    expect(doc.title).toBe('Whiteboard: the plan');
+    expect(result.groups.map((g) => g.title)).toEqual(['Capture', 'Group', 'AI digitizing', 'Later', 'Finished map']);
+    expect(result.notes).toHaveLength(1);
+  });
+});
+
 describe('recognize on the example sketch', () => {
-  const doc = createExampleDoc();
+  const doc = createExampleDoc('bg');
   const result = recognize(doc.strokes, doc.texts);
 
   it('finds the five groups and ignores the circle around one of them', () => {
