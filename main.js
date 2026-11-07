@@ -253,6 +253,7 @@ function showPomoPopup(type) {
     alwaysOnTop: true,
     show: false,
     ...POPUP_GLASS_OPTS_FN(),
+    ...QUIET_POPUP_OPTS,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -465,6 +466,7 @@ function relaxShowHeadsUp(slot) {
     alwaysOnTop: true,
     show: false,
     ...POPUP_GLASS_OPTS_FN(),
+    ...QUIET_POPUP_OPTS,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -2020,7 +2022,7 @@ function openDailyDigest() {
   alertPopup = new BrowserWindow({
     width: 340, height: popH, x: sw - 360, y: sh - popH - 20,
     frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true, show: false,
-    ...POPUP_GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(), ...QUIET_POPUP_OPTS,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
       preload: path.join(__dirname, 'popup-preload.js') },
   });
@@ -2277,6 +2279,7 @@ function openReminderPopup(evt, stage) {
     alwaysOnTop: true,
     show: false,
     ...POPUP_GLASS_OPTS_FN(),
+    ...QUIET_POPUP_OPTS,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -2657,6 +2660,7 @@ function openAlertPopup(label, pct, resetsAt, accountLabel) {
     alwaysOnTop: true,
     show: false,
     ...POPUP_GLASS_OPTS_FN(),
+    ...QUIET_POPUP_OPTS,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -4313,6 +4317,10 @@ function applyLinuxPopupTransparency(win) {
     } catch (e) { console.log('[linux-shape] threw ' + e); }
   });
 }
+
+// A plain window that opens without focus makes GNOME announce it with a "… is ready" banner, which is
+// noise on top of the popup itself. This kind of window opens quietly and still takes clicks.
+const QUIET_POPUP_OPTS = process.platform === 'linux' ? { type: 'toolbar' } : {};
 
 function POPUP_GLASS_OPTS_FN() {
   if (process.platform !== 'linux') return GLASS_OPTS_FN();
