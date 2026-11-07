@@ -933,6 +933,8 @@ function renderToday() {
     var moreToday = upcoming.filter(function(evt) { return evt.date === today; }).length - 1;
     if (next.date === today && moreToday > 0) nextEl.appendChild(createElement('span', 'more', ' +' + moreToday));
     nextJoinLink = eventJoinLink(next);
+    // A click here opens the link, and the title leaves the address out, so the place shows.
+    if (nextJoinLink) nextEl.appendChild(createElement('span', 'more', ' · ' + PlanLib.linkHost(nextJoinLink)));
     nextEl.title = nextJoinLink ? 'Join meeting: ' + nextJoinLink : PlanLib.eventTitle(next);
   } else {
     nextEl.textContent = 'Nothing coming up';

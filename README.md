@@ -88,6 +88,7 @@ If you're not logged into Claude Code, the usage bars will be empty.
 - **Habits.** Training, reading and relax on one board, a month at a time, with streaks.
 - **Relax breaks.** Short full-screen scenes with music, a few times a day, with a heads-up you can put off or skip.
 - **Quick task.** `Ctrl+]` from anywhere opens a box that adds a task.
+- **Always at hand.** `Ctrl+\` shows and hides the widget, which stays on top and snaps to screen edges, with Tasks, Calendar and Notes panels that snap beside it.
 - **Themes.** Brutal, Karchx, Light, Dark, Nord and Dracula, across every window.
 
 ---
