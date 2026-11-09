@@ -11,6 +11,8 @@ import { startPresenting, stepPresenting, stopPresenting } from './present.ts';
 
 const LIST: [string, string][] = [
   ['V  P  E  T  A  L', 'Select, pen, eraser, text, arrow, lasso'],
+  ['H', 'Hand: drag to move around, and the wheel scrolls'],
+  ['Arrow keys', 'Move around, a screenful with Shift'],
   ['Enter', 'Type where the pointer is'],
   ['D', 'Digitize'],
   ['1  2  3', 'Sketch, Both, Map'],
@@ -19,7 +21,7 @@ const LIST: [string, string][] = [
   ['G', 'Group what is selected'],
   ['F', 'Present. Arrow keys walk the map, Esc leaves'],
   ['Ctrl + Z', 'Undo, with Shift to redo'],
-  ['Wheel', 'Zoom. Space or the right button drags the canvas'],
+  ['Wheel', 'Zoom. Space, the middle or right button drags the canvas'],
   ['Ctrl + 1', 'Fit to screen'],
 ];
 
@@ -82,6 +84,21 @@ const handleKey = (e: KeyboardEvent): void => {
     case 'KeyV':
       setTool('select');
       break;
+    case 'KeyH':
+      setTool('hand');
+      break;
+    case 'ArrowLeft':
+    case 'ArrowRight':
+    case 'ArrowUp':
+    case 'ArrowDown': {
+      // Arrow keys move the view, a screenful at a time with Shift.
+      e.preventDefault();
+      const step = e.shiftKey ? Math.min(innerWidth, innerHeight) * 0.8 : 120;
+      const dx = e.code === 'ArrowLeft' ? step : e.code === 'ArrowRight' ? -step : 0;
+      const dy = e.code === 'ArrowUp' ? step : e.code === 'ArrowDown' ? -step : 0;
+      camera.panBy(dx, dy);
+      break;
+    }
     case 'KeyP':
       setTool('pen');
       break;

@@ -172,6 +172,15 @@ describe('a nested sketch: lines in a box, two of them circled, arrows from the 
       'big:member registration > Better signs',
     ]);
   });
+
+  it('keeps the colour each arrow was drawn in', () => {
+    const colors = result.links.map((l) => `${result.groups[l.to].items[0].text}:${l.color}`);
+    expect(colors.sort()).toEqual([
+      'Better signs:yellow',
+      'Build more pride:ink',
+      'Will raise visitor count:ink',
+    ]);
+  });
 });
 
 describe('nesting', () => {

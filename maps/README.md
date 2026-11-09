@@ -40,7 +40,7 @@ The server picks the first of these it finds:
 
 1. An API key in `~/.config/balonche/anthropic-key` (mode 0600), or in `ANTHROPIC_API_KEY`. It uses
    Claude Opus 5.5.
-2. The `claude` command from Claude Code. It uses your Claude Code plan and Claude Sonnet 5.5.
+2. The `claude` command from Claude Code. It uses your Claude Code plan and Claude Opus 5.5.
 3. Nothing. Digitize still runs the local pass and says how to connect an AI.
 
 Set `BALONCHE_PROVIDER` or `BALONCHE_MODEL` to override this. See `.env.example`.

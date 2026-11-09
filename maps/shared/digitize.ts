@@ -22,6 +22,8 @@ export interface DigitizeLink {
   fromItem?: string;
   toItem?: string;
   label?: string;
+  /** Pen colour of the drawn arrow, when it had one. People colour-code related things. */
+  color?: string;
 }
 
 export interface DigitizeRequest {

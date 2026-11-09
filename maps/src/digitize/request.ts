@@ -67,6 +67,7 @@ export const buildRequest = (
         if (l.fromItem) out.fromItem = l.fromItem;
         if (l.toItem) out.toItem = l.toItem;
         if (l.label) out.label = l.label;
+        if (l.color) out.color = l.color;
         return out;
       }),
     looseText: doc.texts

@@ -1,8 +1,11 @@
 import { isShownIn, shownRoot } from '../doc/ops.ts';
-import type { Box, Bubble } from '../doc/types.ts';
+import type { Box, Bubble, InkColor } from '../doc/types.ts';
 import { useStore } from '../state/store.ts';
 import { bubbleBox, lineBox } from './boxes.ts';
 import { routeAnchored } from './links.ts';
+
+/** Arrows drawn in a pen colour keep it, heads included. Each colour gets its own heads. */
+const COLORED: InkColor[] = ['yellow', 'pink', 'aqua', 'peach', 'periwinkle'];
 
 export const LinkLayer = () => {
   const links = useStore((s) => s.doc.links);
@@ -62,14 +65,51 @@ export const LinkLayer = () => {
             <path d="M1 1L9 5L1 9z" />
           </marker>
         </defs>
+        {COLORED.map((color) => (
+          <g key={color}>
+            <marker
+              id={`arrow-head-${color}`}
+              className={`c-${color}`}
+              viewBox="0 0 10 10"
+              refX="8"
+              refY="5"
+              markerWidth="6"
+              markerHeight="6"
+              orient="auto"
+            >
+              <path d="M1 1L9 5L1 9z" />
+            </marker>
+            <marker
+              id={`arrow-head-thin-${color}`}
+              className={`c-${color}`}
+              viewBox="0 0 10 10"
+              refX="8"
+              refY="5"
+              markerWidth="8"
+              markerHeight="8"
+              orient="auto"
+            >
+              <path d="M1 1L9 5L1 9z" />
+            </marker>
+          </g>
+        ))}
         {shownLinks.map(({ link, route }) => (
-          <g key={link.id} className={`link-group ${selected === link.id ? 'selected' : ''}`}>
+          <g
+            key={link.id}
+            className={[
+              'link-group',
+              selected === link.id ? 'selected' : '',
+              link.color ? `c-${link.color}` : '',
+            ].join(' ')}
+          >
             <path className="link-hit" data-link={link.id} d={route.d} />
             <path
               className={`link-line ${link.status === 'pending' ? 'pending' : ''}`}
               d={route.d}
               pathLength={view === 'map' ? 1 : undefined}
-              markerEnd={view === 'map' ? 'url(#arrow-head)' : 'url(#arrow-head-thin)'}
+              markerEnd={`url(#arrow-head${view === 'map' ? '' : '-thin'}${
+                link.color && selected !== link.id ? `-${link.color}` : ''
+              })`}
             />
           </g>
         ))}

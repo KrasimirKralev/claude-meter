@@ -373,7 +373,8 @@ export const attachInteraction = (root: HTMLElement, deps: InteractionDeps): (()
     const hadEditor = commitOpenEditor();
     const { tool, view } = store.ui;
 
-    if (e.button === 1 || e.button === 2 || spaceHeld) {
+    // The hand only ever moves the view, so a drag that starts on a bubble moves the view too.
+    if (e.button === 1 || e.button === 2 || spaceHeld || (tool === 'hand' && e.button === 0)) {
       capture(e);
       gesture = { type: 'pan', lastX: e.clientX, lastY: e.clientY };
       setPanning(true);
@@ -689,11 +690,17 @@ export const attachInteraction = (root: HTMLElement, deps: InteractionDeps): (()
     e.preventDefault();
     // A mouse wheel moves in whole notches, a trackpad in small steps. Mouse zooms, trackpad pans.
     const notch = e.deltaMode !== 0 || (Math.abs(e.deltaY) >= 50 && e.deltaX === 0);
-    if (e.ctrlKey || e.metaKey || (notch && !e.shiftKey)) {
+    // With the hand picked, the wheel scrolls the map like a page. Ctrl still zooms.
+    const scrolls = store.ui.tool === 'hand';
+    if (e.ctrlKey || e.metaKey || (notch && !e.shiftKey && !scrolls)) {
       const scale = e.deltaMode === 1 ? 33 : 1;
       camera.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * scale * (e.ctrlKey ? 0.01 : 0.0016)));
     } else {
-      camera.panBy(e.shiftKey ? -e.deltaY : -e.deltaX, e.shiftKey ? 0 : -e.deltaY);
+      const lines = e.deltaMode === 1 ? 33 : 1;
+      camera.panBy(
+        (e.shiftKey ? -e.deltaY : -e.deltaX) * lines,
+        (e.shiftKey ? 0 : -e.deltaY) * lines,
+      );
     }
   };
 

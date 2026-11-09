@@ -78,6 +78,8 @@ export interface Link {
   toItem?: Id;
   status: Status;
   label?: string;
+  /** The pen colour the arrow was drawn in, kept on the finished map. Missing for plain ink. */
+  color?: InkColor;
   sourceStrokes: Id[];
 }
 
@@ -123,4 +125,4 @@ export interface MapDoc {
 }
 
 export type View = 'sketch' | 'both' | 'map';
-export type Tool = 'select' | 'pen' | 'eraser' | 'text' | 'arrow' | 'lasso';
+export type Tool = 'select' | 'hand' | 'pen' | 'eraser' | 'text' | 'arrow' | 'lasso';

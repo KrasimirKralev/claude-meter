@@ -20,6 +20,7 @@ const VIEWS: { id: View; label: string }[] = [
 
 const TOOLS: { id: Tool; label: string; icon: IconName; key: string; inMap: boolean }[] = [
   { id: 'select', label: 'Select', icon: 'select', key: 'V', inMap: true },
+  { id: 'hand', label: 'Hand: drag to move around', icon: 'hand', key: 'H', inMap: true },
   { id: 'pen', label: 'Pen', icon: 'pen', key: 'P', inMap: false },
   { id: 'eraser', label: 'Eraser', icon: 'eraser', key: 'E', inMap: false },
   { id: 'text', label: 'Text', icon: 'text', key: 'T', inMap: true },

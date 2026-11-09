@@ -208,6 +208,10 @@ button:disabled {
   cursor: cell;
 }
 
+.surface[data-tool='hand'] {
+  cursor: grab;
+}
+
 .surface[data-panning='true'] {
   cursor: grabbing;
 }
@@ -255,7 +259,7 @@ button:disabled {
   transform-origin: 0 0;
 }
 
-.surface:is([data-tool='pen'], [data-tool='lasso'], [data-tool='eraser']) .world * {
+.surface:is([data-tool='pen'], [data-tool='lasso'], [data-tool='eraser'], [data-tool='hand']) .world * {
   pointer-events: none !important;
 }
 
@@ -753,6 +757,39 @@ button:disabled {
 
 .link-layer marker path {
   fill: currentColor;
+}
+
+/* An arrow drawn in a pen colour stays that colour, darker on light backgrounds for contrast. */
+.link-layer {
+  --pen-yellow: #c79a00;
+  --pen-pink: #d6408f;
+  --pen-aqua: #0e9c9a;
+  --pen-peach: #d9722b;
+  --pen-periwinkle: #4f63d9;
+}
+
+:root[data-theme='dark'] .link-layer {
+  --pen-yellow: #ffe14d;
+  --pen-pink: #ff8cc6;
+  --pen-aqua: #6fe3e1;
+  --pen-peach: #ffb27a;
+  --pen-periwinkle: #a9b8ff;
+}
+
+.link-layer .c-yellow {
+  color: var(--pen-yellow);
+}
+.link-layer .c-pink {
+  color: var(--pen-pink);
+}
+.link-layer .c-aqua {
+  color: var(--pen-aqua);
+}
+.link-layer .c-peach {
+  color: var(--pen-peach);
+}
+.link-layer .c-periwinkle {
+  color: var(--pen-periwinkle);
 }
 
 .link-line {

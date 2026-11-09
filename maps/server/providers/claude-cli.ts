@@ -70,7 +70,11 @@ const emptyFolder = (): string => {
   return folder;
 };
 
-export const createClaudeCliProvider = (command: string, model: string): Provider => ({
+export const createClaudeCliProvider = (
+  command: string,
+  model: string,
+  effort: string = process.env.BALONCHE_EFFORT ?? 'low',
+): Provider => ({
   name: 'Claude Code',
   model,
   async *stream(request, signal) {
@@ -93,7 +97,7 @@ export const createClaudeCliProvider = (command: string, model: string): Provide
         '--tools',
         '',
         '--effort',
-        'low',
+        effort,
         '--model',
         model,
         '--system-prompt',

@@ -9,8 +9,9 @@ import type { Provider } from './types.ts';
 
 const KEY_FILE = join(homedir(), '.config', 'balonche', 'anthropic-key');
 const API_MODEL = 'claude-opus-5-5';
-// Fastest of the three when timed on the example map, with the same quality as Opus there.
-const CLI_MODEL = 'claude-sonnet-5-5';
+// Opus at low effort answered as fast as Sonnet on a real nested sketch (first idea about 2 s,
+// all about 5 s) and named the boxes better. BALONCHE_EFFORT raises the effort when wanted.
+const CLI_MODEL = 'claude-opus-5-5';
 
 const readKey = (): string | null => {
   if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;

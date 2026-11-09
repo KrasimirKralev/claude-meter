@@ -138,10 +138,12 @@ describe('loading nesting from a file', () => {
   it('keeps parents, circled lines and arrow ends', () => {
     const doc = fixture();
     doc.bubbles[0].items[0].mark = 'aqua';
+    doc.links[0].color = 'yellow';
     const loaded = load(doc);
     expect(loaded.bubbles[1].parent).toBe('frame');
     expect(loaded.bubbles[0].items[0].mark).toBe('aqua');
     expect(loaded.links[0].fromItem).toBe('frame-1');
+    expect(loaded.links[0].color).toBe('yellow');
     expect(loaded.proposals[4].body).toEqual({ kind: 'label', link: 'l', label: 'builds', previous: '' });
   });
 

@@ -87,6 +87,7 @@ export const applyRecognition = (doc: MapDoc, result: Recognition, run: number):
       status: 'pending',
       sourceStrokes: link.strokeIds,
     };
+    if (link.color !== 'ink') out.color = link.color;
     const fromItem = link.fromItem === undefined ? undefined : from.items[link.fromItem];
     const toItem = link.toItem === undefined ? undefined : to.items[link.toItem];
     if (fromItem) out.fromItem = fromItem.id;

@@ -8,6 +8,7 @@ import { childRows, mapWidth, NEST_GAP, noteTail } from '../map/layout.ts';
 import { routeAnchored } from '../map/links.ts';
 import { BUBBLE_INK, MAP_STYLES } from '../map/styles.ts';
 import type { MapStyle } from '../map/styles.ts';
+import { INK_PALETTES } from '../canvas/ink.ts';
 import { store } from '../state/store.ts';
 
 const MARGIN = 60;
@@ -121,12 +122,14 @@ interface Scene {
   rects: SceneRect[];
   texts: SceneText[];
   tails: SceneTail[];
-  links: { d: string; label?: string; mid: { x: number; y: number } }[];
+  links: { d: string; label?: string; mid: { x: number; y: number }; color: string }[];
 }
 
 const buildScene = (doc: MapDoc): Scene => {
   const style: MapStyle = MAP_STYLES[doc.style];
   const theme = THEMES[store.ui.theme];
+  // The same arrow colours as on the page: bright on dark, deeper on light.
+  const pens = INK_PALETTES[store.ui.theme === 'dark' ? 'dark' : 'light'];
   const bubbles = visibleBubbles(doc, 'map');
   const rects: SceneRect[] = [];
   const texts: SceneText[] = [];
@@ -258,7 +261,7 @@ const buildScene = (doc: MapDoc): Scene => {
     const fromLine = link.fromItem ? (lineBoxes.get(link.fromItem) ?? null) : null;
     const toLine = link.toItem ? (lineBoxes.get(link.toItem) ?? null) : null;
     const route = routeAnchored(a, b, fromLine, toLine, others);
-    return [{ d: route.d, label: link.label, mid: route.mid }];
+    return [{ d: route.d, label: link.label, mid: route.mid, color: link.color ? pens[link.color] : theme.line }];
   });
 
   const body = unionBoxes([...boxes.values()]) ?? { x: 0, y: 0, w: 600, h: 300 };
@@ -333,6 +336,8 @@ export const exportPng = async (): Promise<Blob> => {
   ctx.lineCap = 'round';
   for (const link of scene.links) {
     const path = new Path2D(link.d);
+    ctx.strokeStyle = link.color;
+    ctx.fillStyle = link.color;
     ctx.stroke(path);
     const points = link.d.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
     const [x2, y2] = points.slice(-2);
@@ -484,16 +489,20 @@ export const exportSvg = async (): Promise<string> => {
     `<defs><style>${fontCss}</style>`,
     `<pattern id="dots" width="${DOT}" height="${DOT}" patternUnits="userSpaceOnUse" x="${scene.originX}" y="${scene.originY}">` +
       `<circle cx="${DOT / 2}" cy="${DOT / 2}" r="1" fill="${scene.theme.dot}"/></pattern>`,
-    `<marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">` +
-      `<path d="M1 1L9 5L1 9z" fill="${scene.theme.line}"/></marker>`,
+    ...[...new Set(scene.links.map((link) => link.color))].map(
+      (color, i) =>
+        `<marker id="head${i}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">` +
+        `<path d="M1 1L9 5L1 9z" fill="${color}"/></marker>`,
+    ),
     `<filter id="soft" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="10" stdDeviation="14" flood-opacity="0.35"/></filter>`,
     '</defs>',
     `<rect x="${scene.originX}" y="${scene.originY}" width="${scene.width}" height="${scene.height}" fill="${scene.theme.bg}"/>`,
     `<rect x="${scene.originX}" y="${scene.originY}" width="${scene.width}" height="${scene.height}" fill="url(#dots)"/>`,
   ];
+  const heads = [...new Set(scene.links.map((link) => link.color))];
   for (const link of scene.links) {
     parts.push(
-      `<path d="${link.d}" fill="none" stroke="${scene.theme.line}" stroke-width="3" stroke-linecap="round" marker-end="url(#head)"/>`,
+      `<path d="${link.d}" fill="none" stroke="${link.color}" stroke-width="3" stroke-linecap="round" marker-end="url(#head${heads.indexOf(link.color)})"/>`,
     );
   }
   for (const rect of scene.rects) {

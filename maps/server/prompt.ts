@@ -8,6 +8,7 @@ How to read the input:
 - "lines" are what was written in a box. A line with "circled" had a circle drawn around it in that colour. An arrow that starts at a circled line comes from that one line, not from the whole box.
 - An arrow that starts at a box comes from the whole box: everything in it, together.
 - "reads" spells each arrow out in words. An arrow usually means leads to, causes, supports or is needed for. Decide which from the words at both ends and the boxes around them.
+- "drawn" is the pen colour of a box or an arrow, and "circled" the colour of a circle. A shared colour often ties things together, such as a circled line and the arrow leaving it.
 - "at" is where something was drawn, on a 0 to 100 grid over the sketch. Use it only to understand the layout.
 - A box whose title is empty and that has lines holds a list of equals. It needs a name.
 
@@ -89,6 +90,7 @@ export const buildUserPrompt = (request: DigitizeRequest): string => {
       if (link.fromItem) out.fromItem = link.fromItem;
       if (link.toItem) out.toItem = link.toItem;
       if (link.label) out.label = link.label;
+      if (link.color) out.drawn = link.color;
       out.reads = `${end(link.from, link.fromItem)} → ${end(link.to, link.toItem)}`;
       return out;
     }),

@@ -115,7 +115,7 @@ export const changeView = (view: View): void => {
   clearTimeout(morphTimer);
   const needsPen = view !== 'map' && store.ui.tool === 'select' && store.doc.bubbles.length === 0;
   const tool: Tool =
-    view === 'map' && !['select', 'text', 'arrow'].includes(store.ui.tool)
+    view === 'map' && !['select', 'hand', 'text', 'arrow'].includes(store.ui.tool)
       ? 'select'
       : needsPen
         ? 'pen'
@@ -148,7 +148,7 @@ export const changeView = (view: View): void => {
 };
 
 export const setTool = (tool: Tool): void => {
-  if (store.ui.view === 'map' && !['select', 'text', 'arrow'].includes(tool)) {
+  if (store.ui.view === 'map' && !['select', 'hand', 'text', 'arrow'].includes(tool)) {
     changeView('sketch');
   }
   store.setUi({ tool, selection: [], selectedBubble: null, selectedLink: null });

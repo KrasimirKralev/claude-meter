@@ -119,6 +119,7 @@ const toLink = (value: unknown): Link => {
     sourceStrokes: strings(raw.sourceStrokes),
   };
   if (raw.label !== undefined) link.label = string(raw.label);
+  if (raw.color !== undefined) link.color = oneOf(raw.color, INK);
   if (raw.fromItem !== undefined) link.fromItem = string(raw.fromItem);
   if (raw.toItem !== undefined) link.toItem = string(raw.toItem);
   return link;

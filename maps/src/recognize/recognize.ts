@@ -53,6 +53,7 @@ export interface OutLink {
   /** Index into the items of `to`, when the arrow points at one circled line. */
   toItem?: number;
   strokeIds: Id[];
+  color: InkColor;
 }
 
 export interface Recognition {
@@ -431,7 +432,7 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
     a === b || (groupOf(a) === groupOf(b) && !(a.ringOf && b.ringOf));
 
   const usedTicks = new Set<Id>();
-  const rawLinks: { from: Shape; to: Shape; strokeIds: Id[] }[] = [];
+  const rawLinks: { from: Shape; to: Shape; strokeIds: Id[]; color: InkColor }[] = [];
   const inkCandidates: InStroke[] = [];
   // Longest first, so a shaft claims its head before that head could pass for a short arrow.
   const shortestLast = [...openLines, ...ticks].sort(
@@ -468,6 +469,7 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
       from: reversed ? b : a,
       to: reversed ? a : b,
       strokeIds: [stroke.id, ...parts.map((t) => t.id)],
+      color: stroke.color,
     });
   }
 
@@ -565,7 +567,12 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
     .map((link) => {
       const from = endOf(link.from);
       const to = endOf(link.to);
-      const out: OutLink = { from: from.group, to: to.group, strokeIds: link.strokeIds };
+      const out: OutLink = {
+        from: from.group,
+        to: to.group,
+        strokeIds: link.strokeIds,
+        color: link.color,
+      };
       if (from.item !== undefined) out.fromItem = from.item;
       if (to.item !== undefined) out.toItem = to.item;
       return out;
