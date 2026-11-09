@@ -1,6 +1,7 @@
 // Inside the desktop app, a small preload script adds `window.meterMaps`. The app uses it to list
 // maps and ask for one to open. In an ordinary browser tab it is absent and all of this does nothing.
 
+import { visibleRoots } from '../doc/ops.ts';
 import type { MapDoc } from '../doc/types.ts';
 import { MAP_STYLES } from '../map/styles.ts';
 
@@ -46,8 +47,9 @@ const REPORT_DELAY_MS = 400;
 const bridge = (): MeterBridge | undefined =>
   (globalThis as { meterMaps?: MeterBridge }).meterMaps;
 
+// Bubbles drawn inside others have no place of their own on the map, so the thumbnail skips them.
 const previewBubbles = (doc: MapDoc): MapDoc['bubbles'] =>
-  doc.bubbles.filter((b) => b.status === 'accepted').slice(0, PREVIEW_BUBBLES);
+  visibleRoots(doc, 'map').slice(0, PREVIEW_BUBBLES);
 
 /** The finished map's bubbles, scaled to fit a 100-wide box, for the app to draw as a thumbnail. */
 export const previewOf = (doc: MapDoc): PreviewBubble[] => {

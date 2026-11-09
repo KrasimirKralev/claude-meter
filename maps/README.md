@@ -25,6 +25,12 @@ Node 24 or newer is required. `npm run dev` runs the same app with live reload o
 3. **Map.** The drawn lines are gone. Groups are candy-coloured bubbles in custom fonts. Export a plan
    for Claude Code, a Markdown file, a PNG or SVG image, or a JSON backup. Press F to present.
 
+Nested sketches work too. A box drawn inside a box shows inside it on the map. A circle drawn
+snugly around one line marks that line, and an arrow drawn from the circle starts at that line, not
+at the whole box. Lines typed one by one count as equals, so the AI names the box from all of them,
+labels each arrow with what it means, and writes a summary that follows the arrows. Pressing
+Digitize again reads the sketch afresh wherever nothing was accepted yet.
+
 A box drawn with a coloured pen becomes a bubble of that colour. Press `?` in the app for every
 shortcut. Shortcuts follow physical keys, so they work on the Bulgarian keyboard layout too.
 

@@ -3,25 +3,22 @@
 import { LineSplitter } from '../../shared/digitize.ts';
 import type { DigitizeRequest, StreamEvent } from '../../shared/digitize.ts';
 import { changeView, fitView } from '../canvas/actions.ts';
-import { claimedStrokeIds, claimedTextIds, unionBoxes } from '../doc/ops.ts';
+import { claimedStrokeIds, claimedTextIds, dropPending, unionBoxes } from '../doc/ops.ts';
 import { bindAiProposal } from '../doc/proposals.ts';
-import type { Bubble, Id, Link, MapDoc, Proposal } from '../doc/types.ts';
+import type { Bubble, Id, Link, Proposal } from '../doc/types.ts';
 import { ripple } from '../effects/ripple.ts';
 import { recognizeInWorker } from '../recognize/client.ts';
 import { showToast, store } from '../state/store.ts';
 import { applyRecognition } from './apply.ts';
+import { buildRequest } from './request.ts';
+import type { Scope } from './request.ts';
 import { snapshotSketch } from './snapshot.ts';
 
 /** Longer than the server's own limit, so this only fires if the server itself stops answering. */
 const CLIENT_TIMEOUT_MS = 40_000;
 const REACH_FAILED = 'Could not reach the AI. Your sketch and the local map are safe. Try again.';
 
-/** When part of the canvas was selected, only that part may leave this computer. */
-export interface Scope {
-  bubbles: ReadonlySet<Id>;
-  texts: ReadonlySet<Id>;
-  strokes: ReadonlySet<Id>;
-}
+export type { Scope } from './request.ts';
 
 let controller: AbortController | null = null;
 let generation = 0;
@@ -33,30 +30,6 @@ export const stopDigitize = (): void => {
   if (store.ui.digitize.state === 'streaming') {
     store.setUi({ digitize: { ...store.ui.digitize, state: 'idle' } });
   }
-};
-
-const buildRequest = (doc: MapDoc, scope: Scope | null, image: string | undefined): DigitizeRequest => {
-  const live = doc.bubbles.filter(
-    (b) => b.status !== 'rejected' && (!scope || scope.bubbles.has(b.id)),
-  );
-  const claimed = claimedTextIds(doc);
-  const liveIds = new Set(live.map((b) => b.id));
-  return {
-    title: doc.title,
-    bubbles: live.map((b) => ({
-      id: b.id,
-      kind: b.kind,
-      title: b.title,
-      items: b.items.map((i) => ({ id: i.id, text: i.text })),
-    })),
-    links: doc.links
-      .filter((l) => l.status !== 'rejected' && liveIds.has(l.from) && liveIds.has(l.to))
-      .map((l) => ({ from: l.from, to: l.to })),
-    looseText: doc.texts
-      .filter((t) => !claimed.has(t.id) && (!scope || scope.texts.has(t.id)))
-      .map((t) => t.text),
-    image,
-  };
 };
 
 /** A group the AI read from ink has no drawn position yet, so it goes below everything else. */
@@ -171,11 +144,12 @@ export const digitize = async (
   const mine = generation;
   stopDigitize();
   const started = performance.now();
-  const before = store.doc;
-  const claimedStrokes = claimedStrokeIds(before);
-  const claimedTexts = claimedTextIds(before);
   const selection = new Set(store.ui.selection);
   const scoped = selection.size > 0;
+  // Reading again replaces the last reading wherever nobody accepted any of it yet.
+  const before = dropPending(store.doc, scoped ? selection : null);
+  const claimedStrokes = claimedStrokeIds(before);
+  const claimedTexts = claimedTextIds(before);
   const strokes = before.strokes.filter(
     (s) => !claimedStrokes.has(s.id) && (!scoped || selection.has(s.id)),
   );
@@ -208,9 +182,9 @@ export const digitize = async (
     return;
   }
 
-  const known = new Set(store.doc.bubbles.map((b) => b.id));
+  const known = new Set(before.bubbles.map((b) => b.id));
   store.setUi({ rippleOrigin: origin });
-  store.commit((doc) => applyRecognition(doc, result, run));
+  store.commit((doc) => applyRecognition(dropPending(doc, scoped ? selection : null), result, run));
   const localMs = performance.now() - started;
   store.setUi({
     selection: [],

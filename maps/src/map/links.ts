@@ -64,6 +64,15 @@ const hitsDown = (x: number, y0: number, y1: number, boxes: Box[]): boolean =>
       Math.min(y0, y1) <= b.y + b.h + GAP,
   );
 
+/** Whether any straight run of a route passes through one of the boxes. */
+const pathHits = (points: Point[], boxes: Box[]): boolean =>
+  points.slice(1).some(([x1, y1], i) => {
+    const [x0, y0] = points[i];
+    if (y0 === y1) return hitsAcross(y0, x0, x1, boxes);
+    if (x0 === x1) return hitsDown(x0, y0, y1, boxes);
+    return false;
+  });
+
 export const routeLink = (a: Box, b: Box, obstacles: Box[] = []): Route => {
   const [y0, y1] = overlap(a.y, a.y + a.h, b.y, b.y + b.h);
   const [x0, x1] = overlap(a.x, a.x + a.w, b.x, b.x + b.w);
@@ -86,19 +95,26 @@ export const routeLink = (a: Box, b: Box, obstacles: Box[] = []): Route => {
     );
     const floor =
       Math.max(a.y + a.h, b.y + b.h, ...between.map((o) => o.y + o.h)) + CLEARANCE;
+    const ceiling = Math.min(a.y, b.y, ...between.map((o) => o.y)) - CLEARANCE;
     // Centres belong to straight arrows. These ends sit off-centre, toward each other, so a routed
     // arrow can never merge with a straight one into something that reads as one line.
     const ax = a.x + a.w * (rightward ? 0.75 : 0.25);
     const bx = b.x + b.w * (rightward ? 0.25 : 0.75);
-    return {
-      d: roundedPath([
-        [ax, a.y + a.h + GAP],
-        [ax, floor],
-        [bx, floor],
-        [bx, b.y + b.h + GAP],
-      ]),
-      mid: { x: (ax + bx) / 2, y: floor },
-    };
+    const under: Point[] = [
+      [ax, a.y + a.h + GAP],
+      [ax, floor],
+      [bx, floor],
+      [bx, b.y + b.h + GAP],
+    ];
+    const over: Point[] = [
+      [ax, a.y - GAP],
+      [ax, ceiling],
+      [bx, ceiling],
+      [bx, b.y - GAP],
+    ];
+    // Underneath reads best, unless another bubble sits on that path and would hide it.
+    const points = pathHits(under, obstacles) && !pathHits(over, obstacles) ? over : under;
+    return { d: roundedPath(points), mid: { x: (ax + bx) / 2, y: points[1][1] } };
   }
 
   if (x1 - x0 >= MIN_OVERLAP && (a.y + a.h <= b.y || b.y + b.h <= a.y)) {
@@ -110,25 +126,28 @@ export const routeLink = (a: Box, b: Box, obstacles: Box[] = []): Route => {
     if (!hitsDown(x, from, to, obstacles)) {
       return { d: `M${x} ${from}L${x} ${to}`, mid: { x, y: (from + to) / 2 } };
     }
-    const wall =
-      Math.max(
-        a.x + a.w,
-        b.x + b.w,
-        ...obstacles
-          .filter((o) => Math.max(from, to) >= o.y && Math.min(from, to) <= o.y + o.h)
-          .map((o) => o.x + o.w),
-      ) + CLEARANCE;
+    const inBand = obstacles.filter(
+      (o) => Math.max(from, to) >= o.y && Math.min(from, to) <= o.y + o.h,
+    );
+    const rightWall = Math.max(a.x + a.w, b.x + b.w, ...inBand.map((o) => o.x + o.w)) + CLEARANCE;
+    const leftWall = Math.min(a.x, b.x, ...inBand.map((o) => o.x)) - CLEARANCE;
     const ay = a.y + a.h * (downward ? 0.75 : 0.25);
     const by = b.y + b.h * (downward ? 0.25 : 0.75);
-    return {
-      d: roundedPath([
-        [a.x + a.w + GAP, ay],
-        [wall, ay],
-        [wall, by],
-        [b.x + b.w + GAP, by],
-      ]),
-      mid: { x: wall, y: (ay + by) / 2 },
-    };
+    const right: Point[] = [
+      [a.x + a.w + GAP, ay],
+      [rightWall, ay],
+      [rightWall, by],
+      [b.x + b.w + GAP, by],
+    ];
+    const left: Point[] = [
+      [a.x - GAP, ay],
+      [leftWall, ay],
+      [leftWall, by],
+      [b.x - GAP, by],
+    ];
+    // The right side reads best, unless another bubble sits on that path and would hide it.
+    const points = pathHits(right, obstacles) && !pathHits(left, obstacles) ? left : right;
+    return { d: roundedPath(points), mid: { x: points[1][0], y: (ay + by) / 2 } };
   }
 
   // Neither faces the other: one rounded elbow, leaving from the bottom or top of the first bubble.
@@ -146,4 +165,73 @@ export const routeLink = (a: Box, b: Box, obstacles: Box[] = []): Route => {
     ]),
     mid: { x: startX, y: (startY + endY) / 2 },
   };
+};
+
+const clamp = (value: number, low: number, high: number): number =>
+  low > high ? (low + high) / 2 : Math.max(low, Math.min(high, value));
+
+/** The label of a routed arrow sits on its longest straight run. */
+const midOf = (points: Point[]): { x: number; y: number } => {
+  let best = 0;
+  let mid = { x: points[0][0], y: points[0][1] };
+  for (let i = 1; i < points.length; i += 1) {
+    const [ax, ay] = points[i - 1];
+    const [bx, by] = points[i];
+    const length = Math.hypot(bx - ax, by - ay);
+    if (length > best) {
+      best = length;
+      mid = { x: (ax + bx) / 2, y: (ay + by) / 2 };
+    }
+  }
+  return mid;
+};
+
+/**
+ * An arrow that leaves one line of a bubble: out of the bubble's side at that line's height, then
+ * across to the target. Straight when the target is level with the line.
+ */
+const fromLine = (a: Box, lineY: number, b: Box): Point[] => {
+  const leftOf = b.x + b.w <= a.x;
+  const rightOf = b.x >= a.x + a.w;
+  if (leftOf || rightOf) {
+    const startX = rightOf ? a.x + a.w + GAP : a.x - GAP;
+    const endX = rightOf ? b.x - GAP : b.x + b.w + GAP;
+    const endY = b.h < 40 ? b.y + b.h / 2 : clamp(lineY, b.y + 20, b.y + b.h - 20);
+    if (Math.abs(endY - lineY) < 4) return [[startX, lineY], [endX, lineY]];
+    const midX = (startX + endX) / 2;
+    return [[startX, lineY], [midX, lineY], [midX, endY], [endX, endY]];
+  }
+  // The target sits above or below: leave by the nearer side, then come down onto its top.
+  const below = b.y + b.h / 2 > lineY;
+  const toRight = b.x + b.w / 2 >= a.x + a.w / 2;
+  const startX = toRight ? a.x + a.w + GAP : a.x - GAP;
+  const columnX = toRight ? a.x + a.w + CLEARANCE : a.x - CLEARANCE;
+  const endY = below ? b.y - GAP : b.y + b.h + GAP;
+  const gapY = below ? Math.max(a.y + a.h, lineY) : Math.min(a.y, lineY);
+  const turnY = (gapY + endY) / 2;
+  const endX = clamp(b.x + b.w / 2, b.x + 24, b.x + b.w - 24);
+  return [[startX, lineY], [columnX, lineY], [columnX, turnY], [endX, turnY], [endX, endY]];
+};
+
+/**
+ * Routes an arrow whose ends may be single lines. `aLine` and `bLine` are the bands of those lines;
+ * without either, it is the ordinary bubble to bubble route.
+ */
+export const routeAnchored = (
+  a: Box,
+  b: Box,
+  aLine: Box | null,
+  bLine: Box | null,
+  obstacles: Box[] = [],
+): Route => {
+  if (!aLine && !bLine) return routeLink(a, b, obstacles);
+  let points: Point[];
+  if (aLine) {
+    points = fromLine(a, aLine.y + aLine.h / 2, bLine ?? b);
+  } else {
+    // Into one line: the same route traced from that line back to the start, then turned around.
+    const line = bLine as Box;
+    points = fromLine(b, line.y + line.h / 2, a).reverse();
+  }
+  return { d: roundedPath(points), mid: midOf(points) };
 };

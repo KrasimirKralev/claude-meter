@@ -1,6 +1,6 @@
 // Present: full screen, no toolbars, and the arrow keys walk through the map along its arrows.
 
-import { fitView, focusBox, heightOf } from '../canvas/actions.ts';
+import { boxOfBubble, fitView, focusBox } from '../canvas/actions.ts';
 import { walkOrder } from '../map/walk.ts';
 import { showToast, store } from '../state/store.ts';
 
@@ -10,13 +10,9 @@ const focusStep = (): void => {
   const bubble = walkOrder(store.doc)[present.index];
   if (!bubble) return;
   const margin = 24;
+  const box = boxOfBubble(bubble, 'map');
   focusBox(
-    {
-      x: bubble.map.x - margin,
-      y: bubble.map.y - margin,
-      w: bubble.map.w + margin * 2,
-      h: heightOf(bubble, bubble.map.w) + margin * 2,
-    },
+    { x: box.x - margin, y: box.y - margin, w: box.w + margin * 2, h: box.h + margin * 2 },
     1.9,
   );
 };

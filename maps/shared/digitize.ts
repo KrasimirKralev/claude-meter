@@ -4,13 +4,30 @@ export interface DigitizeBubble {
   id: string;
   kind: 'group' | 'note';
   title: string;
-  items: { id: string; text: string }[];
+  /** `mark` is the colour of a circle drawn around that line. */
+  items: { id: string; text: string; mark?: string }[];
+  /** The bubble this one was drawn inside. */
+  parent?: string;
+  /** Pen colour of the drawn shape, when it had one. */
+  color?: string;
+  /** Where it was drawn, on a 0 to 100 grid over the whole sketch, so the model can read layout. */
+  at?: { x: number; y: number; w: number; h: number };
+}
+
+export interface DigitizeLink {
+  id: string;
+  from: string;
+  to: string;
+  /** The line of `from` the arrow was drawn from, when it started at one circled line. */
+  fromItem?: string;
+  toItem?: string;
+  label?: string;
 }
 
 export interface DigitizeRequest {
   title: string;
   bubbles: DigitizeBubble[];
-  links: { from: string; to: string }[];
+  links: DigitizeLink[];
   /** Typed text that no shape claimed. */
   looseText: string[];
   /** PNG as base64. Sent only when the sketch holds ink the local pass could not read. */
@@ -24,7 +41,8 @@ export type AiProposal =
   | { kind: 'rewrite'; bubble: string; item: string; text: string }
   | { kind: 'add-item'; bubble: string; text: string }
   | { kind: 'move-item'; item: string; from: string; to: string }
-  | { kind: 'link'; from: string; to: string; label?: string }
+  | { kind: 'link'; from: string; to: string; fromItem?: string; toItem?: string; label?: string }
+  | { kind: 'label'; link: string; label: string }
   | { kind: 'group'; title: string; items: string[] };
 
 export type StreamEvent =
@@ -83,9 +101,22 @@ export const validateProposal = (raw: unknown): AiProposal | null => {
     case 'link': {
       const from = id(o.from);
       const to = id(o.to);
-      if (!from || !to || from === to) return null;
+      if (!from || !to) return null;
+      const proposal: AiProposal = { kind: 'link', from, to };
+      const fromItem = id(o.fromItem);
+      const toItem = id(o.toItem);
+      // An arrow inside one bubble only makes sense between two of its lines.
+      if (from === to && !(fromItem && toItem && fromItem !== toItem)) return null;
+      if (fromItem) proposal.fromItem = fromItem;
+      if (toItem) proposal.toItem = toItem;
       const label = text(o.label);
-      return label ? { kind: 'link', from, to, label } : { kind: 'link', from, to };
+      if (label) proposal.label = label;
+      return proposal;
+    }
+    case 'label': {
+      const link = id(o.link);
+      const label = text(o.label);
+      return link && label && label.length <= 60 ? { kind: 'label', link, label } : null;
     }
     case 'group': {
       const title = text(o.title);

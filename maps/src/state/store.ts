@@ -21,6 +21,15 @@ export interface DigitizeStatus {
   totalMs?: number;
 }
 
+/** A box relative to the top-left corner of the outermost bubble around it. */
+export interface Anchor {
+  root: Id;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface UiState {
   view: View;
   tool: Tool;
@@ -44,6 +53,11 @@ export interface UiState {
   headerH: number;
   /** Measured bubble heights per view, kept out of the document because they follow the fonts. */
   heights: { both: Record<Id, number>; map: Record<Id, number> };
+  /**
+   * Where nested bubbles and lines sit inside the bubble on the canvas that holds them, measured from
+   * the page per view, so an arrow can start at one line or at a box drawn inside another.
+   */
+  anchors: { both: Record<Id, Anchor>; map: Record<Id, Anchor> };
 }
 
 const MAX_HISTORY = 200;
@@ -70,6 +84,7 @@ export const initialUi = (): UiState => ({
   rippleOrigin: null,
   headerH: 0,
   heights: { both: {}, map: {} },
+  anchors: { both: {}, map: {} },
 });
 
 type Listener = () => void;
@@ -110,6 +125,7 @@ export class Store {
       focusedProposal: null,
       digitize: { state: 'idle' },
       heights: { both: {}, map: {} },
+      anchors: { both: {}, map: {} },
     };
     this.emit();
   }

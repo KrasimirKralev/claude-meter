@@ -2,7 +2,17 @@
 // otherwise crash the page on every start and make every other map unreachable.
 
 import { boxOfPoints, createDoc } from './ops.ts';
-import type { Bubble, BubbleItem, Link, MapDoc, Placement, Proposal, Stroke, TextNote } from './types.ts';
+import type {
+  Bubble,
+  BubbleItem,
+  Id,
+  Link,
+  MapDoc,
+  Placement,
+  Proposal,
+  Stroke,
+  TextNote,
+} from './types.ts';
 
 const REFUSED = 'This file is not a Balonche map.';
 
@@ -73,14 +83,16 @@ const toPlacement = (value: unknown): Placement => {
 
 const toItem = (value: unknown): BubbleItem => {
   const raw = object(value);
-  return { id: string(raw.id), text: string(raw.text) };
+  const item: BubbleItem = { id: string(raw.id), text: string(raw.text) };
+  if (raw.mark !== undefined) item.mark = oneOf(raw.mark, INK);
+  return item;
 };
 
 const toBubble = (value: unknown): Bubble => {
   const raw = object(value);
   const slot = number(raw.slot);
   if (!Number.isInteger(slot) || slot < 0 || slot > 4) fail();
-  return {
+  const bubble: Bubble = {
     id: string(raw.id),
     kind: raw.kind === 'note' ? 'note' : raw.kind === 'group' ? 'group' : fail(),
     title: string(raw.title),
@@ -93,6 +105,8 @@ const toBubble = (value: unknown): Bubble => {
     sourceStrokes: strings(raw.sourceStrokes),
     sourceTexts: strings(raw.sourceTexts),
   };
+  if (raw.parent !== undefined) bubble.parent = string(raw.parent);
+  return bubble;
 };
 
 const toLink = (value: unknown): Link => {
@@ -105,6 +119,8 @@ const toLink = (value: unknown): Link => {
     sourceStrokes: strings(raw.sourceStrokes),
   };
   if (raw.label !== undefined) link.label = string(raw.label);
+  if (raw.fromItem !== undefined) link.fromItem = string(raw.fromItem);
+  if (raw.toItem !== undefined) link.toItem = string(raw.toItem);
   return link;
 };
 
@@ -116,6 +132,13 @@ const toBody = (value: unknown): Proposal['body'] => {
       return { kind: raw.kind, bubble: string(raw.bubble) };
     case 'link':
       return { kind: 'link', link: string(raw.link) };
+    case 'label':
+      return {
+        kind: 'label',
+        link: string(raw.link),
+        label: string(raw.label),
+        previous: string(raw.previous),
+      };
     case 'rename':
       return {
         kind: 'rename',
@@ -161,19 +184,60 @@ const toProposal = (value: unknown): Proposal => {
   return proposal;
 };
 
+/**
+ * Nesting that points nowhere, or in a circle, would hang or hide a bubble, so it is dropped rather
+ * than refusing the whole map. The same goes for an arrow end naming a line its bubble lacks.
+ */
+const repairStructure = (bubbles: Bubble[], links: Link[]): { bubbles: Bubble[]; links: Link[] } => {
+  const byId = new Map(bubbles.map((b) => [b.id, b]));
+  const loops = (bubble: Bubble): boolean => {
+    const seen = new Set([bubble.id]);
+    let current = bubble.parent;
+    while (current) {
+      if (seen.has(current)) return true;
+      seen.add(current);
+      current = byId.get(current)?.parent;
+    }
+    return false;
+  };
+  const broken = new Set(
+    bubbles
+      .filter((b) => b.parent !== undefined && (!byId.has(b.parent) || loops(b)))
+      .map((b) => b.id),
+  );
+  const fixed = bubbles.map((b) => {
+    if (!broken.has(b.id)) return b;
+    const { parent: _parent, ...rest } = b;
+    return rest;
+  });
+  const hasItem = (bubbleId: Id, itemId: Id): boolean =>
+    byId.get(bubbleId)?.items.some((i) => i.id === itemId) ?? false;
+  const fixedLinks = links.map((link) => {
+    const next = { ...link };
+    if (next.fromItem !== undefined && !hasItem(next.from, next.fromItem)) delete next.fromItem;
+    if (next.toItem !== undefined && !hasItem(next.to, next.toItem)) delete next.toItem;
+    return next;
+  });
+  return { bubbles: fixed, links: fixedLinks };
+};
+
 /** Returns a complete map, or throws. Nothing from the input is trusted unchecked. */
 export const validateDoc = (value: unknown): MapDoc => {
   const raw = object(value);
   if (raw.version !== 1) fail();
   const base = createDoc(string(raw.title));
+  const { bubbles, links } = repairStructure(
+    list(raw.bubbles).map(toBubble),
+    list(raw.links).map(toLink),
+  );
   return {
     ...base,
     id: raw.id === undefined ? base.id : string(raw.id),
     summary: raw.summary === undefined ? '' : string(raw.summary),
     strokes: list(raw.strokes).map(toStroke),
     texts: list(raw.texts).map(toText),
-    bubbles: list(raw.bubbles).map(toBubble),
-    links: list(raw.links).map(toLink),
+    bubbles,
+    links,
     proposals: list(raw.proposals).map(toProposal),
     style: raw.style === undefined ? 'candy' : oneOf(raw.style, STYLES),
     bulgarianLetters: raw.bulgarianLetters === true,

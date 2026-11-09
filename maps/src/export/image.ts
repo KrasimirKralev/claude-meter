@@ -1,10 +1,11 @@
 // PNG and SVG of the finished map, drawn from the document so the sketch lines can never appear.
 // Both formats share one scene, so they match each other.
 
-import { hasRealTitle, unionBoxes, visibleBubbles } from '../doc/ops.ts';
-import type { Box, Bubble, MapDoc } from '../doc/types.ts';
-import { noteTail } from '../map/layout.ts';
-import { routeLink } from '../map/links.ts';
+import { hasRealTitle, isShownIn, shownParent, shownRoot, unionBoxes, visibleBubbles } from '../doc/ops.ts';
+import type { Box, Bubble, InkColor, MapDoc } from '../doc/types.ts';
+import { childrenIn } from '../map/boxes.ts';
+import { childRows, mapWidth, NEST_GAP, noteTail } from '../map/layout.ts';
+import { routeAnchored } from '../map/links.ts';
 import { BUBBLE_INK, MAP_STYLES } from '../map/styles.ts';
 import type { MapStyle } from '../map/styles.ts';
 import { store } from '../state/store.ts';
@@ -13,6 +14,16 @@ const MARGIN = 60;
 const DOT = 22;
 const ITEM_SIZE = 15;
 const ITEM_LINE = 20.25;
+const NESTED_EDGE = 'rgba(20, 21, 26, 0.14)';
+/** Same as the circled lines on the page. */
+const MARK_COLORS: Record<InkColor, string> = {
+  ink: '#1f2430',
+  yellow: '#c79a00',
+  pink: '#d6408f',
+  aqua: '#0e9c9a',
+  peach: '#d9722b',
+  periwinkle: '#4f63d9',
+};
 
 interface Theme {
   bg: string;
@@ -90,6 +101,8 @@ interface SceneRect {
   fill: string;
   shadow?: boolean;
   edge?: string;
+  /** Thicker for a line circled in the sketch. */
+  edgeWidth?: number;
 }
 
 /** The note's pointer: two base corners on the bubble's edge and a tip outside it. */
@@ -120,7 +133,12 @@ const buildScene = (doc: MapDoc): Scene => {
   const tails: SceneTail[] = [];
   const titleFont = `${style.titleWeight} ${style.titleSize}px "${style.titleFont}"`;
   const bodyFont = `${style.bodyWeight} ${ITEM_SIZE}px "${style.bodyFont}"`;
+  const nestedTitleFont = `${style.titleWeight} ${style.titleSize * 0.8}px "${style.titleFont}"`;
   const boxes = new Map<string, Box>();
+  const lineBoxes = new Map<string, Box>();
+  const shown = isShownIn('map');
+  const childrenOf = childrenIn(doc.bubbles, 'map');
+  const roots = bubbles.filter((b) => !shownParent(doc.bubbles, b, shown));
 
   const place = (bubble: Bubble): void => {
     const { x, y, w } = bubble.map;
@@ -149,27 +167,52 @@ const buildScene = (doc: MapDoc): Scene => {
       );
       return;
     }
-    const titleLines = bubble.title ? wrap(bubble.title, titleFont, w - 44) : [];
-    const titleLine = style.titleSize * 1.2;
-    let cursor = y + 22;
-    const titleTexts = titleLines.map((text, i) => ({
-      x: x + 22,
-      y: cursor + style.titleSize * 0.95 + i * titleLine,
-      text,
-      font: titleFont,
-      fill: BUBBLE_INK,
-    }));
-    cursor += titleLines.length * titleLine + 12;
-    const itemRects: SceneRect[] = [];
-    const itemTexts: SceneText[] = [];
-    for (const item of bubble.items) {
-      cursor += 8;
-      const lines = wrap(item.text, bodyFont, w - 44 - 28);
+    placeGroup(bubble, x, y, w, false);
+  };
+
+  /** Lays out a group and everything drawn inside it, and returns its height. */
+  const placeGroup = (bubble: Bubble, x: number, y: number, w: number, nested: boolean): number => {
+    const pad = nested ? 16 : 22;
+    const font = nested ? nestedTitleFont : titleFont;
+    const size = nested ? style.titleSize * 0.8 : style.titleSize;
+    // Pushed first and sized last, so it paints under everything inside it.
+    const frame: SceneRect = {
+      x,
+      y,
+      w,
+      h: 0,
+      r: nested ? style.radius * 0.6 : style.radius,
+      fill: style.colors[bubble.slot % 5],
+      shadow: !nested,
+      edge: nested ? NESTED_EDGE : undefined,
+      edgeWidth: nested ? 2 : undefined,
+    };
+    rects.push(frame);
+    const titleLines = bubble.title ? wrap(bubble.title, font, w - pad * 2) : [];
+    const titleLine = size * 1.2;
+    let cursor = y + pad;
+    titleLines.forEach((text, i) =>
+      texts.push({ x: x + pad, y: cursor + size * 0.95 + i * titleLine, text, font, fill: BUBBLE_INK }),
+    );
+    cursor += titleLines.length * titleLine + (titleLines.length > 0 ? 12 : 0);
+    bubble.items.forEach((item, index) => {
+      if (index > 0 || titleLines.length > 0) cursor += 8;
+      const lines = wrap(item.text, bodyFont, w - pad * 2 - 28);
       const h = 18 + lines.length * ITEM_LINE;
-      itemRects.push({ x: x + 22, y: cursor, w: w - 44, h, r: style.itemRadius, fill: style.itemBg });
+      rects.push({
+        x: x + pad,
+        y: cursor,
+        w: w - pad * 2,
+        h,
+        r: style.itemRadius,
+        fill: style.itemBg,
+        edge: item.mark ? MARK_COLORS[item.mark] : undefined,
+        edgeWidth: item.mark ? 2.5 : undefined,
+      });
+      lineBoxes.set(item.id, { x, y: cursor, w, h });
       lines.forEach((text, i) =>
-        itemTexts.push({
-          x: x + 36,
+        texts.push({
+          x: x + pad + 14,
           y: cursor + 9 + 15 + i * ITEM_LINE,
           text,
           font: bodyFont,
@@ -177,26 +220,44 @@ const buildScene = (doc: MapDoc): Scene => {
         }),
       );
       cursor += h;
+    });
+    for (const row of childRows(childrenOf(bubble))) {
+      cursor += NEST_GAP;
+      let left = x + pad;
+      let tallest = 0;
+      for (const child of row) {
+        const childW = mapWidth(child, childrenOf, true);
+        tallest = Math.max(tallest, placeGroup(child, left, cursor, childW, true));
+        left += childW + NEST_GAP;
+      }
+      cursor += tallest;
     }
-    const h = cursor + 22 - y;
-    boxes.set(bubble.id, { x, y, w, h });
-    rects.push({ x, y, w, h, r: style.radius, fill: style.colors[bubble.slot % 5], shadow: true });
-    rects.push(...itemRects);
-    texts.push(...titleTexts, ...itemTexts);
+    frame.h = cursor + pad - y;
+    boxes.set(bubble.id, { x, y, w, h: frame.h });
+    return frame.h;
   };
-  // Groups first, because a note's tail aims at the nearest group.
-  bubbles.filter((b) => b.kind === 'group').forEach(place);
-  bubbles.filter((b) => b.kind === 'note').forEach(place);
+  // Groups first, because a note's tail aims at the nearest group. Bubbles drawn inside another are
+  // placed by the one around them.
+  roots.filter((b) => b.kind === 'group').forEach(place);
+  roots.filter((b) => b.kind === 'note').forEach(place);
 
   const links = doc.links.flatMap((link) => {
     if (link.status !== 'accepted') return [];
     const a = boxes.get(link.from);
     const b = boxes.get(link.to);
     if (!a || !b) return [];
-    const others = [...boxes.entries()]
-      .filter(([id]) => id !== link.from && id !== link.to)
-      .map(([, box]) => box);
-    const route = routeLink(a, b, others);
+    const ends = new Set(
+      [link.from, link.to].map((id) => {
+        const bubble = bubbles.find((x) => x.id === id) as Bubble;
+        return shownRoot(doc.bubbles, bubble, shown).id;
+      }),
+    );
+    const others = roots
+      .filter((r) => !ends.has(r.id))
+      .flatMap((r) => (boxes.has(r.id) ? [boxes.get(r.id) as Box] : []));
+    const fromLine = link.fromItem ? (lineBoxes.get(link.fromItem) ?? null) : null;
+    const toLine = link.toItem ? (lineBoxes.get(link.toItem) ?? null) : null;
+    const route = routeAnchored(a, b, fromLine, toLine, others);
     return [{ d: route.d, label: link.label, mid: route.mid }];
   });
 
@@ -303,7 +364,7 @@ export const exportPng = async (): Promise<Blob> => {
     if (rect.edge) {
       ctx.save();
       ctx.strokeStyle = rect.edge;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = rect.edgeWidth ?? 1;
       ctx.beginPath();
       ctx.roundRect(rect.x, rect.y, rect.w, rect.h, rect.r);
       ctx.stroke();
@@ -439,7 +500,9 @@ export const exportSvg = async (): Promise<string> => {
     parts.push(
       `<rect x="${rect.x}" y="${rect.y}" width="${rect.w}" height="${rect.h}" rx="${rect.r}" fill="${rect.fill}"${
         rect.shadow ? ' filter="url(#soft)"' : ''
-      }${rect.edge ? ` stroke="${rect.edge}"` : ''}/>`,
+      }${rect.edge ? ` stroke="${rect.edge}"` : ''}${
+        rect.edgeWidth ? ` stroke-width="${rect.edgeWidth}"` : ''
+      }/>`,
     );
   }
   for (const tail of scene.tails) {

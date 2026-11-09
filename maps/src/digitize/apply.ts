@@ -1,6 +1,6 @@
 // Turns the local recognizer's result into pending bubbles, links and proposals.
 
-import { newId } from '../doc/ops.ts';
+import { isShownIn, newId, shownParent } from '../doc/ops.ts';
 import type { Bubble, InkColor, Link, MapDoc, Proposal } from '../doc/types.ts';
 import { layoutBubbles } from '../map/layout.ts';
 import type { Recognition } from '../recognize/recognize.ts';
@@ -17,9 +17,14 @@ export const applyLayout = (
   doc: MapDoc,
   heightOf: (bubble: Bubble, width: number) => number,
 ): MapDoc => {
+  // Only bubbles standing on their own are placed. The ones drawn inside them travel along.
+  const shown = isShownIn('map');
+  const childrenOf = (parent: Bubble): Bubble[] =>
+    doc.bubbles.filter((b) => shown(b) && shownParent(doc.bubbles, b, shown)?.id === parent.id);
   const placed = layoutBubbles(
-    doc.bubbles.filter((b) => b.status === 'accepted'),
+    doc.bubbles.filter((b) => shown(b) && !shownParent(doc.bubbles, b, shown)),
     heightOf,
+    childrenOf,
   );
   let changed = false;
   const bubbles = doc.bubbles.map((bubble) => {
@@ -40,7 +45,7 @@ export const applyRecognition = (doc: MapDoc, result: Recognition, run: number):
     id: newId(),
     kind: 'group',
     title: group.title,
-    items: group.items.map((text) => ({ id: newId(), text })),
+    items: group.items.map(({ text, mark }) => (mark ? { id: newId(), text, mark } : { id: newId(), text })),
     status: 'pending',
     slot: SLOT_OF_COLOR[group.color] ?? (taken + index) % 5,
     sketch: {
@@ -67,13 +72,27 @@ export const applyRecognition = (doc: MapDoc, result: Recognition, run: number):
     sourceStrokes: [],
     sourceTexts: note.textIds,
   }));
-  const links: Link[] = result.links.map((link) => ({
-    id: newId(),
-    from: groups[link.from].id,
-    to: groups[link.to].id,
-    status: 'pending',
-    sourceStrokes: link.strokeIds,
-  }));
+  result.groups.forEach((group, index) => {
+    if (group.parent !== undefined && groups[group.parent]) {
+      groups[index].parent = groups[group.parent].id;
+    }
+  });
+  const links: Link[] = result.links.map((link) => {
+    const from = groups[link.from];
+    const to = groups[link.to];
+    const out: Link = {
+      id: newId(),
+      from: from.id,
+      to: to.id,
+      status: 'pending',
+      sourceStrokes: link.strokeIds,
+    };
+    const fromItem = link.fromItem === undefined ? undefined : from.items[link.fromItem];
+    const toItem = link.toItem === undefined ? undefined : to.items[link.toItem];
+    if (fromItem) out.fromItem = fromItem.id;
+    if (toItem) out.toItem = toItem.id;
+    return out;
+  });
   const make = (body: Proposal['body']): Proposal => ({
     id: newId(),
     status: 'pending',

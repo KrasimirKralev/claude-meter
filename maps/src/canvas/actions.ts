@@ -12,9 +12,10 @@ import {
   removeTexts,
   unionBoxes,
   updateBubble,
-  visibleBubbles,
+  visibleRoots,
 } from '../doc/ops.ts';
 import type { Box, Bubble, Id, MapDoc, Tool, View } from '../doc/types.ts';
+import { bubbleBox, childrenIn } from '../map/boxes.ts';
 import { estimateHeight } from '../map/layout.ts';
 import { showToast, store } from '../state/store.ts';
 import { camera } from './camera.ts';
@@ -29,11 +30,19 @@ export const headerHeight = (doc: MapDoc): number => {
 };
 
 export const heightOf = (bubble: Bubble, width: number): number =>
-  store.ui.heights.map[bubble.id] ?? estimateHeight(bubble, width);
+  store.ui.heights.map[bubble.id] ??
+  estimateHeight(bubble, width, childrenIn(store.doc.bubbles, 'map'));
+
+/** Where a bubble is on the canvas, including one drawn inside another. */
+export const boxOfBubble = (bubble: Bubble, view: 'map' | 'both'): Box =>
+  bubbleBox(store.doc.bubbles, bubble, view, {
+    heights: store.ui.heights[view],
+    anchors: store.ui.anchors[view],
+  });
 
 /** Places the header above the top-left of whatever is on the map. */
 export const headerPosition = (doc: MapDoc): { x: number; y: number } => {
-  const accepted = visibleBubbles(doc, 'map');
+  const accepted = visibleRoots(doc, 'map');
   const height = headerHeight(doc);
   if (accepted.length === 0) return { x: 0, y: -height };
   return {
@@ -45,7 +54,7 @@ export const headerPosition = (doc: MapDoc): { x: number; y: number } => {
 export const contentBox = (view: View): Box | null => {
   const doc = store.doc;
   if (view === 'map') {
-    const boxes = visibleBubbles(doc, 'map').map((b) => ({
+    const boxes = visibleRoots(doc, 'map').map((b) => ({
       x: b.map.x,
       y: b.map.y,
       w: b.map.w,
@@ -59,7 +68,7 @@ export const contentBox = (view: View): Box | null => {
   }
   const boxes: Box[] = [...doc.strokes.map((s) => s.box), ...doc.texts.map(textBox)];
   if (view === 'both') {
-    for (const b of visibleBubbles(doc, 'both')) {
+    for (const b of visibleRoots(doc, 'both')) {
       boxes.push({
         x: b.sketch.x,
         y: b.sketch.y,
@@ -127,9 +136,14 @@ export const changeView = (view: View): void => {
     store.setUi({ morphing: false });
     // Real heights arrive after the fonts settle. Only move again if it is worth noticing.
     const settled = contentBox(view);
-    if (first && settled && Math.abs(settled.h - first.h) + Math.abs(settled.w - first.w) > 40) {
-      fitView();
-    }
+    if (!first || !settled) return;
+    const grew = Math.abs(settled.h - first.h) + Math.abs(settled.w - first.w) > 40;
+    // A title measured late can push the top of the map under the toolbar, which always shows.
+    const { y, z } = camera.state;
+    const area = freeArea();
+    const clipped =
+      settled.y * z + y < area.y - 4 || (settled.y + settled.h) * z + y > area.y + area.h + 4;
+    if (grew || clipped) fitView();
   }, 460);
 };
 

@@ -36,6 +36,8 @@ export interface TextNote {
 export interface BubbleItem {
   id: Id;
   text: string;
+  /** Circled in the sketch, in this colour. An arrow drawn from the circle starts at this line. */
+  mark?: InkColor;
 }
 
 export interface Placement {
@@ -62,12 +64,18 @@ export interface Bubble {
   pinned: boolean;
   sourceStrokes: Id[];
   sourceTexts: Id[];
+  /** The bubble this one was drawn inside. It shows inside that bubble whenever both are shown. */
+  parent?: Id;
 }
 
 export interface Link {
   id: Id;
   from: Id;
   to: Id;
+  /** The line of `from` the arrow leaves from. Without it, the arrow leaves the whole bubble. */
+  fromItem?: Id;
+  /** The line of `to` the arrow points at. */
+  toItem?: Id;
   status: Status;
   label?: string;
   sourceStrokes: Id[];
@@ -77,6 +85,7 @@ export type ProposalBody =
   | { kind: 'group'; bubble: Id }
   | { kind: 'note'; bubble: Id }
   | { kind: 'link'; link: Id }
+  | { kind: 'label'; link: Id; label: string; previous: string }
   | { kind: 'rename'; bubble: Id; title: string; previous: string }
   | { kind: 'rewrite'; bubble: Id; item: Id; text: string; previous: string }
   | { kind: 'add-item'; bubble: Id; text: string }

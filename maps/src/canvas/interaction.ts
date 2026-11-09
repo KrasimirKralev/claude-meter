@@ -6,10 +6,12 @@ import {
   addStroke,
   boxOfPoints,
   claimedTextIds,
+  isShownIn,
   moveSketchItems,
   newId,
   removeStrokes,
   removeTexts,
+  shownRoot,
   updateBubble,
 } from '../doc/ops.ts';
 import type { Box, Id, InkColor, Stroke, TextNote } from '../doc/types.ts';
@@ -252,14 +254,16 @@ export const attachInteraction = (root: HTMLElement, deps: InteractionDeps): (()
     const bubbleEl = target.closest<HTMLElement>('[data-bubble]');
     if (bubbleEl && view !== 'sketch') {
       const id = bubbleEl.dataset.bubble as Id;
-      const bubble = store.doc.bubbles.find((b) => b.id === id);
-      if (!bubble) return;
+      const clicked = store.doc.bubbles.find((b) => b.id === id);
+      if (!clicked) return;
       const inMap = view === 'map';
+      // A bubble drawn inside another one moves with it, so dragging it drags the outermost one.
+      const bubble = shownRoot(store.doc.bubbles, clicked, isShownIn(inMap ? 'map' : 'both'));
       const place = inMap ? bubble.map : bubble.sketch;
       store.setUi({ selectedBubble: id, selectedLink: null, selection: [] });
       gesture = {
         type: 'move-bubble',
-        id,
+        id: bubble.id,
         inMap,
         startX: x,
         startY: y,

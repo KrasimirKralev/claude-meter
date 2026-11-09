@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Bubble } from '../doc/types.ts';
-import { BUBBLE_W, layoutBubbles, mapWidth, NOTE_W, WIDE_W } from './layout.ts';
-import { routeLink } from './links.ts';
+import { BUBBLE_W, layoutBubbles, mapWidth, NEST_PAD, NOTE_W, WIDE_W } from './layout.ts';
+import { routeAnchored, routeLink } from './links.ts';
 
 const bubble = (id: string, x: number, y: number, extra: Partial<Bubble> = {}): Bubble => ({
   id,
@@ -117,5 +117,64 @@ describe('routeLink', () => {
 
   it('stays straight when the other bubble is not in the way', () => {
     expect(routeLink(box(0, 0), box(200, 0), [box(900, 900)]).d).toBe('M107 36L193 36');
+  });
+});
+
+describe('layout of a sketch drawn in columns', () => {
+  it('keeps a lone box on the side it was drawn on, under the box above it', () => {
+    const placed = layoutBubbles(
+      [bubble('a', 0, 0), bubble('b', 900, 0), bubble('c', 900, 400), bubble('d', 0, 700)],
+      () => 150,
+    );
+    expect(placed.get('c')?.x).toBe(placed.get('b')?.x);
+    expect(placed.get('d')?.x).toBe(placed.get('a')?.x);
+  });
+
+  it('makes room for the boxes drawn inside a box', () => {
+    const outer = bubble('outer', 0, 0, { sketch: { x: 0, y: 0, w: 800, h: 400 } });
+    const kids = [bubble('k1', 20, 50), bubble('k2', 400, 50)];
+    const width = mapWidth(outer, (b) => (b.id === 'outer' ? kids : []));
+    expect(width).toBe(240 * 2 + 14 + NEST_PAD * 2);
+  });
+});
+
+describe('routes past other bubbles', () => {
+  const box = (x: number, y: number, w = 100, h = 100) => ({ x, y, w, h });
+
+  it('goes around the left when the right side is taken', () => {
+    const { mid } = routeLink(box(0, 0), box(0, 400), [box(0, 200), box(100, 50, 200, 50)]);
+    expect(mid.x).toBeLessThan(0);
+  });
+
+  it('goes over the top when the space underneath is taken', () => {
+    const { mid } = routeLink(box(0, 0), box(400, 0), [box(200, 0), box(-50, 120, 600, 40)]);
+    expect(mid.y).toBeLessThan(0);
+  });
+});
+
+describe('arrows from one line', () => {
+  const box = (x: number, y: number, w = 200, h = 200) => ({ x, y, w, h });
+  const line = (y: number) => ({ x: 0, y, w: 200, h: 30 });
+
+  it('leaves the side of the bubble at the height of that line', () => {
+    const { d } = routeAnchored(box(0, 0), box(400, 0), line(60), null);
+    expect(d).toBe('M207 75L393 75');
+  });
+
+  it('turns once to reach a target lower down', () => {
+    const { d } = routeAnchored(box(0, 0), box(400, 300), line(60), null);
+    expect(d.startsWith('M207 75')).toBe(true);
+    expect(d.endsWith('L393 320')).toBe(true);
+  });
+
+  it('comes into one line from the side', () => {
+    const { d } = routeAnchored(box(400, 0), box(0, 0), null, line(60));
+    expect(d.endsWith('L207 75')).toBe(true);
+  });
+
+  it('comes down onto a target below', () => {
+    const { d } = routeAnchored(box(0, 0), box(0, 400), line(60), null);
+    expect(d.startsWith('M207 75')).toBe(true);
+    expect(d.endsWith('393')).toBe(true);
   });
 });

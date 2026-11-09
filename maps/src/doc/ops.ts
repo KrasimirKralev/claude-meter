@@ -102,12 +102,122 @@ export const updateBubble = (doc: MapDoc, id: Id, patch: Partial<Bubble>): MapDo
   bubbles: doc.bubbles.map((b) => (b.id === id ? { ...b, ...patch } : b)),
 });
 
-export const removeBubble = (doc: MapDoc, id: Id): MapDoc => ({
-  ...doc,
-  bubbles: doc.bubbles.filter((b) => b.id !== id),
-  links: doc.links.filter((l) => l.from !== id && l.to !== id),
-  proposals: doc.proposals.filter((p) => !('bubble' in p.body) || p.body.bubble !== id),
-});
+/** Deleting a bubble keeps what was drawn inside it: those move up to the bubble around it. */
+export const removeBubble = (doc: MapDoc, id: Id): MapDoc => {
+  const removed = doc.bubbles.find((b) => b.id === id);
+  return {
+    ...doc,
+    bubbles: doc.bubbles
+      .filter((b) => b.id !== id)
+      .map((b) => {
+        if (b.parent !== id) return b;
+        const { parent: _parent, ...rest } = b;
+        return removed?.parent ? { ...rest, parent: removed.parent } : rest;
+      }),
+    links: doc.links.filter((l) => l.from !== id && l.to !== id),
+    proposals: doc.proposals.filter((p) => !('bubble' in p.body) || p.body.bubble !== id),
+  };
+};
+
+/**
+ * The bubble a bubble shows inside: its nearest ancestor that is itself shown. A rejected or still
+ * pending parent leaves its child standing on its own until the parent joins the view.
+ */
+export const shownParent = (
+  bubbles: readonly Bubble[],
+  bubble: Bubble,
+  shown: (b: Bubble) => boolean,
+): Bubble | undefined => {
+  const seen = new Set<Id>([bubble.id]);
+  let current = bubble.parent;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const parent = bubbles.find((b) => b.id === current);
+    if (!parent) return undefined;
+    if (shown(parent)) return parent;
+    current = parent.parent;
+  }
+  return undefined;
+};
+
+/** The outermost shown bubble this one sits in, or the bubble itself. */
+export const shownRoot = (
+  bubbles: readonly Bubble[],
+  bubble: Bubble,
+  shown: (b: Bubble) => boolean,
+): Bubble => {
+  let current = bubble;
+  for (let parent = shownParent(bubbles, current, shown); parent; ) {
+    current = parent;
+    parent = shownParent(bubbles, current, shown);
+  }
+  return current;
+};
+
+export const isShownIn =
+  (view: 'both' | 'map') =>
+  (bubble: Bubble): boolean =>
+    view === 'map' ? bubble.status === 'accepted' : bubble.status !== 'rejected';
+
+/** Ids of a bubble and everything drawn inside it, at any depth. */
+export const withDescendants = (doc: MapDoc, id: Id): Set<Id> => {
+  const ids = new Set([id]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const b of doc.bubbles) {
+      if (b.parent && ids.has(b.parent) && !ids.has(b.id)) {
+        ids.add(b.id);
+        grew = true;
+      }
+    }
+  }
+  return ids;
+};
+
+/**
+ * Before Digitize reads the sketch again, what it proposed last time and nobody accepted goes, so
+ * the new reading replaces it instead of being blocked by it. With a selection, only what was read
+ * from inside the selection goes. Accepted and rejected work stays as it is.
+ */
+export const dropPending = (doc: MapDoc, scope: ReadonlySet<Id> | null): MapDoc => {
+  const inScope = (sources: Id[]): boolean => !scope || sources.every((id) => scope.has(id));
+  const dropped = new Set(
+    doc.bubbles
+      .filter(
+        (b) =>
+          b.status === 'pending' &&
+          (!scope ||
+            (b.sourceStrokes.length + b.sourceTexts.length > 0 &&
+              inScope([...b.sourceStrokes, ...b.sourceTexts]))),
+      )
+      .map((b) => b.id),
+  );
+  const links = doc.links.filter(
+    (l) =>
+      !dropped.has(l.from) &&
+      !dropped.has(l.to) &&
+      !(l.status === 'pending' && (!scope || (l.sourceStrokes.length > 0 && inScope(l.sourceStrokes)))),
+  );
+  const linkIds = new Set(links.map((l) => l.id));
+  const bubbles = doc.bubbles
+    .filter((b) => !dropped.has(b.id))
+    .map((b) => {
+      if (!b.parent || !dropped.has(b.parent)) return b;
+      const { parent: _parent, ...rest } = b;
+      return rest;
+    });
+  const proposals = doc.proposals.filter((p) => {
+    if (p.status !== 'pending') return true;
+    // Without a selection, the AI reads the whole map again, so its old ideas are replaced too.
+    if (!scope) return false;
+    const body = p.body;
+    if ('bubble' in body && dropped.has(body.bubble)) return false;
+    if ((body.kind === 'link' || body.kind === 'label') && !linkIds.has(body.link)) return false;
+    if (body.kind === 'move-item' && (dropped.has(body.from) || dropped.has(body.to))) return false;
+    return true;
+  });
+  return { ...doc, bubbles, links, proposals };
+};
 
 export const setItems = (doc: MapDoc, bubbleId: Id, items: BubbleItem[]): MapDoc =>
   updateBubble(doc, bubbleId, { items });
@@ -129,9 +239,13 @@ export const removeLink = (doc: MapDoc, id: Id): MapDoc => ({
 
 /** Bubbles shown in a view. Rejected ones stay in the document so Undo can restore them. */
 export const visibleBubbles = (doc: MapDoc, view: 'both' | 'map'): Bubble[] =>
-  doc.bubbles.filter((b) =>
-    view === 'map' ? b.status === 'accepted' : b.status !== 'rejected',
-  );
+  doc.bubbles.filter(isShownIn(view));
+
+/** Shown bubbles that sit on the canvas themselves, not inside another shown bubble. */
+export const visibleRoots = (doc: MapDoc, view: 'both' | 'map'): Bubble[] => {
+  const shown = isShownIn(view);
+  return doc.bubbles.filter((b) => shown(b) && !shownParent(doc.bubbles, b, shown));
+};
 
 /** Text that a live bubble has already claimed is drawn by that bubble instead. */
 export const claimedTextIds = (doc: MapDoc): Set<Id> => {

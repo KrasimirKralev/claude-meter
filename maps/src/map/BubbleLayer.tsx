@@ -1,11 +1,14 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { heightOf, relayout } from '../canvas/actions.ts';
 import { camera } from '../canvas/camera.ts';
-import { newId, updateBubble } from '../doc/ops.ts';
-import type { Bubble, BubbleItem, Id, View } from '../doc/types.ts';
+import { isShownIn, newId, shownParent, updateBubble } from '../doc/ops.ts';
+import type { Bubble, BubbleItem, Id, InkColor, View } from '../doc/types.ts';
 import { store, useStore } from '../state/store.ts';
+import type { Anchor } from '../state/store.ts';
 import { Icon } from '../ui/primitives.tsx';
-import { noteTail } from './layout.ts';
+import { childrenIn } from './boxes.ts';
+import type { ShownView } from './boxes.ts';
+import { childRows, mapWidth, noteTail } from './layout.ts';
 import type { Tail } from './layout.ts';
 
 const placeCaretAtEnd = (element: HTMLElement): void => {
@@ -30,10 +33,12 @@ interface FieldProps {
   field: 'title' | Id;
   /** Shown only while the field is empty. It is never written into the map. */
   placeholder?: string;
+  /** The colour of the circle drawn around this line in the sketch. */
+  mark?: InkColor;
 }
 
 /** One line of a bubble. Plain text until clicked, then a small editor. */
-const Field = ({ bubble, value, field, placeholder }: FieldProps) => {
+const Field = ({ bubble, value, field, placeholder, mark }: FieldProps) => {
   const isTitle = field === 'title';
   const editing = useStore((s) => {
     const e = s.ui.editing;
@@ -141,10 +146,15 @@ const Field = ({ bubble, value, field, placeholder }: FieldProps) => {
   const Tag = isTitle ? 'h2' : 'li';
   const hint =
     placeholder ?? (isTitle ? (bubble.kind === 'note' ? 'Note' : 'Title') : 'Write something');
+  // Lines are measured by id, so an arrow drawn from one of them can start right there.
+  const lineProps = isTitle
+    ? {}
+    : { 'data-item': field, className: mark ? `marked mark-${mark}` : undefined };
   if (editing) {
     return (
       <Tag
         ref={ref as never}
+        {...lineProps}
         data-edit={field}
         data-placeholder={hint}
         contentEditable="plaintext-only"
@@ -157,7 +167,7 @@ const Field = ({ bubble, value, field, placeholder }: FieldProps) => {
     );
   }
   return (
-    <Tag data-edit={field} data-placeholder={hint}>
+    <Tag {...lineProps} data-edit={field} data-placeholder={hint}>
       {value}
     </Tag>
   );
@@ -167,11 +177,16 @@ interface BubbleViewProps {
   bubble: Bubble;
   view: View;
   index: number;
-  selected: boolean;
-  spotlight: boolean;
-  /** A name the AI has proposed but nobody has accepted yet. */
-  pendingName?: string;
+  selected: Id | null;
+  spotlight: Id | null;
+  /** Names the AI has proposed but nobody has accepted yet. */
+  pendingNames: Map<Id, string>;
   tail?: Tail;
+  /** Bubbles drawn inside this one, in the rows they were drawn in. */
+  rowsOf: (bubble: Bubble) => Bubble[][];
+  /** Width on the finished map, which grows to hold the bubbles inside. */
+  widthOf: (bubble: Bubble, nested: boolean) => number;
+  nested?: boolean;
 }
 
 /**
@@ -185,8 +200,15 @@ const riseDelay = (x: number, y: number): number => {
   return Math.min(60, Math.hypot(x * z + cx - origin.x, y * z + cy - origin.y) * 0.05);
 };
 
-const BubbleView = memo(({ bubble, view, index, selected, spotlight, pendingName, tail }: BubbleViewProps) => {
+const BubbleView = memo((props: BubbleViewProps) => {
+  const { bubble, view, index, tail, rowsOf, widthOf, nested = false } = props;
+  const selected = props.selected === bubble.id;
+  const spotlight = props.spotlight === bubble.id;
+  const pendingName = props.pendingNames.get(bubble.id);
+  const rows = rowsOf(bubble);
   const place = view === 'map' ? bubble.map : bubble.sketch;
+  // Inside another bubble, the page places it. On its own, the layout does.
+  const width = nested ? (view === 'map' ? widthOf(bubble, true) : undefined) : view === 'map' ? widthOf(bubble, false) : place.w;
   const [rise] = useState(() => riseDelay(bubble.sketch.x, bubble.sketch.y));
   // Only ink and no words: the marks must stay readable through the proposal.
   const inkOnly =
@@ -210,7 +232,9 @@ const BubbleView = memo(({ bubble, view, index, selected, spotlight, pendingName
         `status-${bubble.status}`,
         `slot-${bubble.slot}`,
         inkOnly ? 'ink-only' : '',
-        bubble.items.length === 0 ? 'no-items' : '',
+        bubble.items.length === 0 && rows.length === 0 ? 'no-items' : '',
+        rows.length > 0 ? 'has-children' : '',
+        nested ? 'nested' : '',
         selected ? 'selected' : '',
         spotlight ? 'spotlight' : '',
       ].join(' ')}
@@ -229,29 +253,49 @@ const BubbleView = memo(({ bubble, view, index, selected, spotlight, pendingName
       }}
       style={
         {
-          width: place.w,
+          width,
           // Over the sketch a card covers the shape it came from, not just the top of it.
-          minHeight: view === 'both' && bubble.kind === 'group' ? bubble.sketch.h : undefined,
-          transform: `translate3d(${place.x}px, ${place.y}px, 0)`,
+          minHeight:
+            view === 'both' && bubble.kind === 'group' && !nested ? bubble.sketch.h : undefined,
+          transform: nested ? undefined : `translate3d(${place.x}px, ${place.y}px, 0)`,
           '--i': index,
           '--rise': `${rise}ms`,
           '--tail-pos': tail ? `${tail.pos}px` : undefined,
         } as React.CSSProperties
       }
     >
-      {bubble.status === 'pending' && <span className="chip">Proposed</span>}
+      {bubble.status === 'pending' && (!nested || view !== 'map') && (
+        <span className="chip">Proposed</span>
+      )}
       <Field
         bubble={bubble}
         value={bubble.title}
         field="title"
-        placeholder={inkOnly ? (pendingName ?? '') : undefined}
+        placeholder={pendingName ?? (inkOnly ? '' : undefined)}
       />
       {bubble.kind === 'group' && bubble.items.length > 0 && (
         <ul>
           {bubble.items.map((item) => (
-            <Field key={item.id} bubble={bubble} value={item.text} field={item.id} />
+            <Field
+              key={item.id}
+              bubble={bubble}
+              value={item.text}
+              field={item.id}
+              mark={item.mark}
+            />
           ))}
         </ul>
+      )}
+      {rows.length > 0 && (
+        <div className="bubble-children">
+          {rows.map((row) => (
+            <div className="nest-row" key={row[0].id}>
+              {row.map((child) => (
+                <BubbleView key={child.id} {...props} bubble={child} tail={undefined} nested />
+              ))}
+            </div>
+          ))}
+        </div>
       )}
       {bubble.kind === 'group' && (
         <button
@@ -269,6 +313,45 @@ const BubbleView = memo(({ bubble, view, index, selected, spotlight, pendingName
   );
 });
 
+/** Where every nested bubble and every line sits inside its outermost bubble, from the page. */
+const measureAnchors = (container: HTMLElement, key: ShownView): void => {
+  const next: Record<Id, Anchor> = {};
+  container.querySelectorAll<HTMLElement>(':scope > [data-bubble]').forEach((root) => {
+    const rootId = root.dataset.bubble as Id;
+    root.querySelectorAll<HTMLElement>('[data-bubble], [data-item]').forEach((element) => {
+      let x = 0;
+      let y = 0;
+      let node: HTMLElement | null = element;
+      // Offsets ignore transforms, so the morph between views cannot skew what is measured.
+      while (node && node !== root) {
+        x += node.offsetLeft;
+        y += node.offsetTop;
+        node = node.offsetParent as HTMLElement | null;
+      }
+      if (node !== root) return;
+      const id = (element.dataset.bubble ?? element.dataset.item) as Id;
+      next[id] = { root: rootId, x, y, w: element.offsetWidth, h: element.offsetHeight };
+    });
+  });
+  const previous = store.ui.anchors[key];
+  const ids = Object.keys(next);
+  const same =
+    ids.length === Object.keys(previous).length &&
+    ids.every((id) => {
+      const a = previous[id];
+      const b = next[id];
+      return (
+        a !== undefined &&
+        a.root === b.root &&
+        Math.abs(a.x - b.x) <= 1 &&
+        Math.abs(a.y - b.y) <= 1 &&
+        Math.abs(a.w - b.w) <= 1 &&
+        Math.abs(a.h - b.h) <= 1
+      );
+    });
+  if (!same) store.setUi({ anchors: { ...store.ui.anchors, [key]: next } });
+};
+
 export const BubbleLayer = () => {
   const bubbles = useStore((s) => s.doc.bubbles);
   const view = useStore((s) => s.ui.view);
@@ -276,10 +359,26 @@ export const BubbleLayer = () => {
   const spotlightId = useStore((s) => s.ui.present?.bubble ?? null);
   const heightsMap = useStore((s) => s.ui.heights.map);
   const containerRef = useRef<HTMLDivElement>(null);
+  const key: ShownView = view === 'map' ? 'map' : 'both';
 
   const docId = useStore((s) => s.doc.id);
   const visible = bubbles.filter((b) => b.status !== 'rejected');
-  const accepted = visible.filter((b) => b.status === 'accepted');
+  const shown = isShownIn(key);
+  // A bubble drawn inside another shows inside it whenever that one is shown in this view.
+  const parentOf = new Map<Id, Id>();
+  for (const bubble of visible) {
+    const parent = shownParent(bubbles, bubble, shown);
+    if (parent) parentOf.set(bubble.id, parent.id);
+  }
+  const roots = visible.filter((b) => !parentOf.has(b.id));
+  const childrenOf = (parent: Bubble): Bubble[] =>
+    visible.filter((b) => parentOf.get(b.id) === parent.id);
+  const rowsOf = (bubble: Bubble): Bubble[][] => childRows(childrenOf(bubble));
+  const mapChildrenOf = childrenIn(bubbles, 'map');
+  const widthOf = (bubble: Bubble, nested: boolean): number => mapWidth(bubble, mapChildrenOf, nested);
+  const structureKey = visible.map((b) => `${b.id}<${parentOf.get(b.id) ?? ''}`).join(',');
+
+  const accepted = roots.filter((b) => b.status === 'accepted');
   const proposals = useStore((s) => s.doc.proposals);
   const pendingNames = new Map<Id, string>();
   for (const proposal of proposals) {
@@ -290,16 +389,19 @@ export const BubbleLayer = () => {
   const groupBoxes = accepted
     .filter((b) => b.kind === 'group')
     .map((b) => ({ x: b.map.x, y: b.map.y, w: b.map.w, h: heightOf(b, b.map.w) }));
-  const acceptedKey = accepted.map((b) => `${b.id}:${b.pinned}:${b.items.length}`).join(',');
+  const acceptedKey = bubbles
+    .filter((b) => b.status === 'accepted')
+    .map((b) => `${b.id}:${b.pinned}:${b.items.length}:${b.parent ?? ''}`)
+    .join(',');
 
   // Bubble heights follow fonts and text, so they are measured from the page.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
     const observer = new ResizeObserver((entries) => {
-      const key = store.ui.view === 'map' ? 'map' : 'both';
+      const heightKey = store.ui.view === 'map' ? 'map' : 'both';
       let changed = false;
-      const next = { ...store.ui.heights[key] };
+      const next = { ...store.ui.heights[heightKey] };
       for (const entry of entries) {
         const element = entry.target as HTMLElement;
         const id = element.dataset.bubble;
@@ -310,11 +412,17 @@ export const BubbleLayer = () => {
           changed = true;
         }
       }
-      if (changed) store.setUi({ heights: { ...store.ui.heights, [key]: next } });
+      if (changed) store.setUi({ heights: { ...store.ui.heights, [heightKey]: next } });
+      measureAnchors(container, heightKey);
     });
     container.querySelectorAll<HTMLElement>('[data-bubble]').forEach((b) => observer.observe(b));
     return () => observer.disconnect();
-  }, [docId, visible.map((b) => b.id).join(','), view]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [docId, structureKey, view]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Text edits and new lines move what sits below them without resizing anything observed.
+  useLayoutEffect(() => {
+    if (containerRef.current) measureAnchors(containerRef.current, key);
+  });
 
   useEffect(() => {
     if (view === 'map') relayout();
@@ -322,15 +430,17 @@ export const BubbleLayer = () => {
 
   return (
     <div ref={containerRef}>
-      {visible.map((bubble, index) => (
+      {roots.map((bubble) => (
         <BubbleView
           key={bubble.id}
           bubble={bubble}
           view={view}
-          index={index}
-          selected={selected === bubble.id}
-          spotlight={spotlightId === bubble.id}
-          pendingName={pendingNames.get(bubble.id)}
+          index={visible.indexOf(bubble)}
+          selected={selected}
+          spotlight={spotlightId}
+          pendingNames={pendingNames}
+          rowsOf={rowsOf}
+          widthOf={widthOf}
           tail={
             bubble.kind === 'note' && view === 'map'
               ? noteTail(

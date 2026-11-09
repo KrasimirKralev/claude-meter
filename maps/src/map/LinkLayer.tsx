@@ -1,42 +1,38 @@
-import { estimateHeight } from './layout.ts';
-import { routeLink } from './links.ts';
+import { isShownIn, shownRoot } from '../doc/ops.ts';
 import type { Box, Bubble } from '../doc/types.ts';
 import { useStore } from '../state/store.ts';
+import { bubbleBox, lineBox } from './boxes.ts';
+import { routeAnchored } from './links.ts';
 
 export const LinkLayer = () => {
   const links = useStore((s) => s.doc.links);
   const bubbles = useStore((s) => s.doc.bubbles);
   const view = useStore((s) => s.ui.view);
   const heights = useStore((s) => s.ui.heights);
+  const anchors = useStore((s) => s.ui.anchors);
   const selected = useStore((s) => s.ui.selectedLink);
 
-  const boxOf = (bubble: Bubble): Box => {
-    const place = view === 'map' ? bubble.map : bubble.sketch;
-    const measured = view === 'map' ? heights.map[bubble.id] : heights.both[bubble.id];
-    return {
-      x: place.x,
-      y: place.y,
-      w: place.w,
-      h: measured ?? estimateHeight(bubble, place.w),
-    };
-  };
+  const key = view === 'map' ? 'map' : 'both';
+  const measured = { heights: heights[key], anchors: anchors[key] };
+  const shown = isShownIn(key);
+  const boxOf = (bubble: Bubble): Box => bubbleBox(bubbles, bubble, key, measured);
+  const rootOf = (bubble: Bubble): Bubble => shownRoot(bubbles, bubble, shown);
 
-  const shown = links.flatMap((link) => {
+  const shownLinks = links.flatMap((link) => {
     if (link.status === 'rejected') return [];
     if (view === 'map' && link.status !== 'accepted') return [];
     const from = bubbles.find((b) => b.id === link.from);
     const to = bubbles.find((b) => b.id === link.to);
     if (!from || !to || from.status === 'rejected' || to.status === 'rejected') return [];
     if (view === 'map' && (from.status !== 'accepted' || to.status !== 'accepted')) return [];
+    // The bubbles that hold either end are crossed on purpose, so only the others are in the way.
+    const ends = new Set([rootOf(from).id, rootOf(to).id]);
     const others = bubbles
-      .filter(
-        (b) =>
-          b.id !== from.id &&
-          b.id !== to.id &&
-          (view === 'map' ? b.status === 'accepted' : b.status !== 'rejected'),
-      )
+      .filter((b) => shown(b) && rootOf(b) === b && !ends.has(b.id))
       .map(boxOf);
-    return [{ link, route: routeLink(boxOf(from), boxOf(to), others) }];
+    const fromLine = link.fromItem ? lineBox(bubbles, from, link.fromItem, key, measured) : null;
+    const toLine = link.toItem ? lineBox(bubbles, to, link.toItem, key, measured) : null;
+    return [{ link, route: routeAnchored(boxOf(from), boxOf(to), fromLine, toLine, others) }];
   });
 
   return (
@@ -66,7 +62,7 @@ export const LinkLayer = () => {
             <path d="M1 1L9 5L1 9z" />
           </marker>
         </defs>
-        {shown.map(({ link, route }) => (
+        {shownLinks.map(({ link, route }) => (
           <g key={link.id} className={`link-group ${selected === link.id ? 'selected' : ''}`}>
             <path className="link-hit" data-link={link.id} d={route.d} />
             <path
@@ -78,7 +74,7 @@ export const LinkLayer = () => {
           </g>
         ))}
       </svg>
-      {shown
+      {shownLinks
         .filter(({ link }) => link.label)
         .map(({ link, route }) => (
           <div
