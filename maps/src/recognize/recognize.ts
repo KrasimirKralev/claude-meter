@@ -87,9 +87,11 @@ interface Shape {
 }
 
 const NEAR_SHAPE = 46;
-const JOIN_ENDS = 20;
+const JOIN_ENDS = 24;
 const HEAD_RANGE = 36;
 const MAX_TICK = 90;
+/** Closer than this to a drawn border, an arrow end belongs to the box, not to a line in it. */
+const BORDER = 16;
 
 const dist = (a: Point, b: Point): number => Math.hypot(a.x - b.x, a.y - b.y);
 
@@ -147,6 +149,10 @@ const distanceToBox = (p: Point, b: Box): number => {
   return Math.hypot(dx, dy);
 };
 
+/** How far a point sits inside a box, from its nearest side. Zero or less outside it. */
+const insetOf = (p: Point, b: Box): number =>
+  Math.min(p.x - b.x, b.x + b.w - p.x, p.y - b.y, b.y + b.h - p.y);
+
 const isClosed = (points: Float32Array, box: Box, length: number): boolean => {
   if (box.w < 48 || box.h < 36) return false;
   if (length < 1.5 * (box.w + box.h)) return false;
@@ -155,47 +161,88 @@ const isClosed = (points: Float32Array, box: Box, length: number): boolean => {
 
 const cleanLine = (line: string): string => line.replace(/^\s*[-–—•*]\s+/, '').trim();
 
-/** Boxes drawn with several strokes: straight lines whose ends all meet another line's end. */
-const findJoinedShapes = (lines: InStroke[]): InStroke[][] => {
-  const straight = lines.filter((s) => {
-    const span = dist(first(s.points), last(s.points));
-    return span > 30 && pathLength(s.points) <= span * 1.3;
-  });
-  const parent = straight.map((_, i) => i);
-  const find = (i: number): number => {
-    let root = i;
-    while (parent[root] !== root) root = parent[root];
-    parent[i] = root;
-    return root;
-  };
-  const degree = straight.map(() => [0, 0]);
-  for (let a = 0; a < straight.length; a += 1) {
-    for (let b = a + 1; b < straight.length; b += 1) {
-      const ends = (s: InStroke) => [first(s.points), last(s.points)];
-      ends(straight[a]).forEach((ea, ia) => {
-        ends(straight[b]).forEach((eb, ib) => {
-          if (dist(ea, eb) <= JOIN_ENDS) {
-            degree[a][ia] += 1;
-            degree[b][ib] += 1;
-            parent[find(a)] = find(b);
-          }
-        });
-      });
-    }
+/**
+ * Boxes drawn with several strokes of any form: sides, corners or a long hook, each end meeting
+ * another stroke's end. Strokes left with a loose end are peeled off first, so an arrow drawn from
+ * a corner does not stop the box around it from closing.
+ */
+const findJoinedShapes = (lines: InStroke[]): { strokes: InStroke[]; outline?: Float32Array }[] => {
+  const ends = (s: InStroke): Point[] => [first(s.points), last(s.points)];
+  const meets = (a: InStroke, b: InStroke): boolean =>
+    ends(a).some((ea) => ends(b).some((eb) => dist(ea, eb) <= JOIN_ENDS));
+  const endJoined = (s: InStroke, end: Point, pool: InStroke[]): boolean =>
+    pool.some((o) => o !== s && ends(o).some((e) => dist(e, end) <= JOIN_ENDS));
+  let pool = [...lines];
+  for (let changed = true; changed; ) {
+    const kept = pool.filter((s) => ends(s).every((end) => endJoined(s, end, pool)));
+    changed = kept.length !== pool.length;
+    pool = kept;
   }
-  const components = new Map<number, InStroke[]>();
-  straight.forEach((s, i) => {
-    const root = find(i);
-    components.set(root, [...(components.get(root) ?? []), s]);
-  });
-  return [...components.entries()]
-    .filter(([root, group]) => {
-      if (group.length < 3) return false;
-      return straight.every(
-        (_, i) => find(i) !== root || (degree[i][0] > 0 && degree[i][1] > 0),
-      );
-    })
-    .map(([, group]) => group);
+  const seen = new Set<InStroke>();
+  const shapes: { strokes: InStroke[]; outline?: Float32Array }[] = [];
+  for (const start of pool) {
+    if (seen.has(start)) continue;
+    const component: InStroke[] = [];
+    const queue = [start];
+    seen.add(start);
+    while (queue.length > 0) {
+      const s = queue.pop() as InStroke;
+      component.push(s);
+      for (const other of pool) {
+        if (!seen.has(other) && meets(s, other)) {
+          seen.add(other);
+          queue.push(other);
+        }
+      }
+    }
+    const box = unionBox(component.map((s) => boxOf(s.points)));
+    if (component.length < 2 || box.w < 48 || box.h < 36) continue;
+    shapes.push({ strokes: component, outline: chainOutline(component) });
+  }
+  return shapes;
+};
+
+/** The strokes of one drawn shape joined end to end, for inside tests. Missing if they branch. */
+const chainOutline = (strokes: InStroke[]): Float32Array | undefined => {
+  const [head, ...rest] = strokes;
+  const parts: Float32Array[] = [head.points];
+  let end = last(head.points);
+  const left = new Set(rest);
+  while (left.size > 0) {
+    let next: { stroke: InStroke; reversed: boolean } | null = null;
+    let best = JOIN_ENDS;
+    for (const s of left) {
+      const toStart = dist(end, first(s.points));
+      const toEnd = dist(end, last(s.points));
+      if (toStart <= best) {
+        best = toStart;
+        next = { stroke: s, reversed: false };
+      }
+      if (toEnd <= best) {
+        best = toEnd;
+        next = { stroke: s, reversed: true };
+      }
+    }
+    if (!next) return undefined;
+    left.delete(next.stroke);
+    const points = next.reversed ? reversePoints(next.stroke.points) : next.stroke.points;
+    parts.push(points);
+    end = last(points);
+  }
+  const outline = new Float32Array(parts.reduce((sum, p) => sum + p.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    outline.set(part, offset);
+    offset += part.length;
+  }
+  return outline;
+};
+
+const reversePoints = (p: Float32Array): Float32Array => {
+  const out = new Float32Array(p.length);
+  const n = p.length / 3;
+  for (let i = 0; i < n; i += 1) out.set(p.subarray((n - 1 - i) * 3, (n - i) * 3), i * 3);
+  return out;
 };
 
 const unionBox = (boxes: Box[]): Box => {
@@ -209,6 +256,8 @@ const unionBox = (boxes: Box[]): Box => {
   };
 };
 
+const lineHeight = (text: InText): number => text.h / Math.max(1, text.text.split('\n').length);
+
 const clusterFreeText = (texts: InText[]): InText[][] => {
   const clusters: InText[][] = [];
   const sorted = [...texts].sort((a, b) => a.y - b.y);
@@ -216,7 +265,8 @@ const clusterFreeText = (texts: InText[]): InText[][] => {
     const home = clusters.find((cluster) =>
       cluster.some((other) => {
         const verticalGap = text.y - (other.y + other.h);
-        return verticalGap <= 40 && Math.abs(text.x - other.x) <= 120;
+        // Lines placed by hand drift, so the gap allowed grows with the size of the text.
+        return verticalGap <= Math.max(40, 2 * lineHeight(other)) && Math.abs(text.x - other.x) <= 120;
       }),
     );
     if (home) home.push(text);
@@ -257,20 +307,36 @@ const pointAlong = (p: Float32Array, distance: number, fromEnd: boolean): Point 
 };
 
 interface Entry {
+  /** The typed text this came from, so an arrow drawn from one of its lines can find that line. */
+  id: Id;
   lines: string[];
+  /** For each line kept, its row in the typed text. Blank rows are dropped. */
+  rows: number[];
   x: number;
   y: number;
   h: number;
   mark?: InkColor;
 }
 
-const entryOf = (text: InText, mark?: InkColor): Entry => ({
-  lines: text.text.split('\n').map(cleanLine).filter(Boolean),
-  x: text.x,
-  y: text.y,
-  h: text.h,
-  mark,
-});
+/** One line of a group while it is being read, with the typed row it came from. */
+interface Line extends OutItem {
+  source: string;
+}
+
+const sourceOf = (id: Id, row: number): string => `${id}:${row}`;
+
+const entryOf = (text: InText, mark?: InkColor): Entry => {
+  const lines: string[] = [];
+  const rows: number[] = [];
+  text.text.split('\n').forEach((raw, row) => {
+    const line = cleanLine(raw);
+    if (line) {
+      lines.push(line);
+      rows.push(row);
+    }
+  });
+  return { id: text.id, lines, rows, x: text.x, y: text.y, h: text.h, mark };
+};
 
 const median = (values: number[]): number => {
   const sorted = [...values].sort((a, b) => a - b);
@@ -283,26 +349,28 @@ const median = (values: number[]): number => {
  * apart: a colon, a clear step to the left, a clear gap below it, or a whole typed list under it. Equals get no title here,
  * so the AI names the group instead of one line being promoted by accident.
  */
-const splitTitle = (unsorted: Entry[]): { title: string; items: OutItem[] } => {
+const splitTitle = (unsorted: Entry[]): { title: string; titleSource?: string; items: Line[] } => {
   const entries = unsorted
     .filter((e) => e.lines.length > 0)
     .sort((a, b) => a.y - b.y || a.x - b.x);
-  const asItems = (list: Entry[]): OutItem[] =>
-    list.flatMap((e) => e.lines.map((text) => (e.mark ? { text, mark: e.mark } : { text })));
+  const asItems = (list: Entry[]): Line[] =>
+    list.flatMap((e) =>
+      e.lines.map((text, k) => {
+        const source = sourceOf(e.id, e.rows[k]);
+        return e.mark ? { text, mark: e.mark, source } : { text, source };
+      }),
+    );
   if (entries.length === 0) return { title: '', items: [] };
   const [head, ...rest] = entries;
-  const titled = (title: string, items: OutItem[]): { title: string; items: OutItem[] } => ({
-    title: title.replace(/:\s*$/, ''),
+  const titled = (items: Line[]): { title: string; titleSource: string; items: Line[] } => ({
+    title: head.lines[0].replace(/:\s*$/, ''),
+    titleSource: sourceOf(head.id, head.rows[0]),
     items,
   });
-  if (entries.length === 1) {
-    const [title, ...others] = head.lines;
-    return titled(title, others.map((text) => ({ text })));
-  }
+  const headBody = { ...head, lines: head.lines.slice(1), rows: head.rows.slice(1), mark: undefined };
+  if (entries.length === 1) return titled(asItems([headBody]));
   if (head.mark) return { title: '', items: asItems(entries) };
-  if (head.lines.length > 1) {
-    return titled(head.lines[0], asItems([{ ...head, lines: head.lines.slice(1) }, ...rest]));
-  }
+  if (head.lines.length > 1) return titled(asItems([{ ...headBody, mark: head.mark }, ...rest]));
   const gaps = entries.slice(1).map((e, i) => e.y - (entries[i].y + entries[i].h));
   // Typed lines are placed by hand, so only a clear step to the left counts as a heading.
   const outdented = head.x <= Math.min(...rest.map((e) => e.x)) - 16;
@@ -310,10 +378,11 @@ const splitTitle = (unsorted: Entry[]): { title: string; items: OutItem[] } => {
     head.lines[0].endsWith(':') ||
     outdented ||
     (rest.length === 1 && rest[0].lines.length > 1) ||
-    (gaps.length >= 2 && gaps[0] >= Math.max(20, 1.8 * median(gaps.slice(1))));
-  return standsApart
-    ? titled(head.lines[0], asItems(rest))
-    : { title: '', items: asItems(entries) };
+    // A gap only counts when it is clearly wider than a line. Unsure cases stay equals, because
+    // the AI can still promote the first line, while a wrong title here is a line lost.
+    (gaps.length >= 2 &&
+      gaps[0] >= Math.max(20, 1.5 * (head.h / head.lines.length), 1.8 * median(gaps.slice(1))));
+  return standsApart ? titled(asItems(rest)) : { title: '', items: asItems(entries) };
 };
 
 export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => {
@@ -348,11 +417,12 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
   }
 
   const joined = new Set<Id>();
-  for (const group of findJoinedShapes(lines)) {
+  for (const { strokes: group, outline } of findJoinedShapes(lines)) {
     group.forEach((s) => joined.add(s.id));
     shapes.push({
       strokeIds: group.map((s) => s.id),
       box: unionBox(group.map((s) => boxOf(s.points))),
+      outline,
       color: group[0].color,
       textIds: [],
       texts: [],
@@ -406,14 +476,24 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
   const live = shapes.filter((s) => !s.merged && !s.ringOf);
   const ringsIn = (shape: Shape): Shape[] => shapes.filter((s) => s.ringOf === shape);
 
+  // Words typed outside every shape are things too: an arrow can start or end at them.
+  const words: Shape[] = clusterFreeText(freeTexts).map((cluster) => ({
+    strokeIds: [],
+    box: unionBox(cluster),
+    color: 'ink',
+    textIds: cluster.map((t) => t.id),
+    texts: cluster,
+    inkIds: [],
+  }));
+
   // An arrow end belongs to the innermost thing it is drawn from: a circled line, then the
-  // smallest shape. The test point sits a little back along the arrow, inside what it leaves, so
-  // an arrow starting where two circles touch goes with the circle it actually leaves.
+  // smallest shape or typed word. The test point sits a little back along the arrow, inside what it
+  // leaves, so an arrow starting where two circles touch goes with the circle it actually leaves.
+  const candidates = [...live, ...shapes.filter((s) => s.ringOf), ...words].sort(
+    (a, b) => area(a.box) - area(b.box),
+  );
   const anchorAt = (point: Point, inward: Point): Shape | null => {
     const probe = { x: point.x + inward.x * PROBE, y: point.y + inward.y * PROBE };
-    const candidates = [...live, ...shapes.filter((s) => s.ringOf)].sort(
-      (a, b) => area(a.box) - area(b.box),
-    );
     const inside = candidates.find((s) => insideShape(probe, s));
     if (inside) return inside;
     let best: Shape | null = null;
@@ -427,12 +507,41 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
     }
     return best;
   };
+
+  // An arrow drawn from right at a typed line comes from that line, the way a circle would say,
+  // so a box of names can point each name somewhere else. Half a line of slack either way, except
+  // at the drawn border: an arrow leaving from the edge of a box comes from the whole box.
+  const lineAt = (shape: Shape, point: Point): string | undefined => {
+    if (shape.ringOf) return undefined;
+    const atBorder = shape.strokeIds.length > 0 && insetOf(point, shape.box) < BORDER;
+    let best: string | undefined;
+    let bestDistance = Infinity;
+    for (const text of shape.texts) {
+      const rows = Math.max(1, text.text.split('\n').length);
+      const height = text.h / rows;
+      const d = distanceToBox(point, text);
+      if (d > (atBorder ? 0 : height / 2) || d >= bestDistance) continue;
+      const row = Math.min(rows - 1, Math.max(0, Math.floor((point.y - text.y) / height)));
+      best = sourceOf(text.id, row);
+      bestDistance = d;
+    }
+    return best;
+  };
+
   const groupOf = (shape: Shape): Shape => shape.ringOf ?? shape;
   const sameEnd = (a: Shape, b: Shape): boolean =>
     a === b || (groupOf(a) === groupOf(b) && !(a.ringOf && b.ringOf));
 
+  interface RawLink {
+    from: Shape;
+    to: Shape;
+    fromLine?: string;
+    toLine?: string;
+    strokeIds: Id[];
+    color: InkColor;
+  }
   const usedTicks = new Set<Id>();
-  const rawLinks: { from: Shape; to: Shape; strokeIds: Id[]; color: InkColor }[] = [];
+  const rawLinks: RawLink[] = [];
   const inkCandidates: InStroke[] = [];
   // Longest first, so a shaft claims its head before that head could pass for a short arrow.
   const shortestLast = [...openLines, ...ticks].sort(
@@ -451,7 +560,12 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
     const arriving = unit(pointAlong(stroke.points, 20, true), end);
     const a = anchorAt(start, { x: -leaving.x, y: -leaving.y });
     const b = anchorAt(end, arriving);
-    if (!a || !b || sameEnd(a, b)) {
+    const aLine = a ? lineAt(a, start) : undefined;
+    const bLine = b ? lineAt(b, end) : undefined;
+    // Inside one box, only an arrow drawn with the arrow tool between two of its lines is a link.
+    // A pen mark there is more likely an underline or handwriting.
+    const betweenLines = a === b && stroke.arrow === true && aLine && bLine && aLine !== bLine;
+    if (!a || !b || (sameEnd(a, b) && !betweenLines)) {
       if (!stroke.arrow) inkCandidates.push(stroke);
       continue;
     }
@@ -464,10 +578,18 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
     );
     const reversed = !stroke.arrow && heads.length === 0 && tails.length > 0;
     const parts = reversed ? tails : heads;
+    // A plain pen line touching a typed word is as likely an underline as a link, so it needs a head.
+    if (!stroke.arrow && parts.length === 0 && (words.includes(a) || words.includes(b))) {
+      usedTicks.delete(stroke.id);
+      inkCandidates.push(stroke);
+      continue;
+    }
     parts.forEach((t) => usedTicks.add(t.id));
     rawLinks.push({
       from: reversed ? b : a,
       to: reversed ? a : b,
+      fromLine: reversed ? bLine : aLine,
+      toLine: reversed ? aLine : bLine,
       strokeIds: [stroke.id, ...parts.map((t) => t.id)],
       color: stroke.color,
     });
@@ -483,8 +605,10 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
     else if (pathLength(stroke.points) < MAX_TICK) looseInk += 1;
   }
 
-  interface Built extends Omit<OutGroup, 'parent'> {
-    shape?: Shape;
+  interface Built extends Omit<OutGroup, 'parent' | 'items'> {
+    shape: Shape;
+    items: Line[];
+    titleSource?: string;
     /** The circles whose lines became items, in item order, so arrows can find their line. */
     itemRings: (Shape | undefined)[];
   }
@@ -501,7 +625,7 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
     .map((shape) => {
       const rings = ringsIn(shape);
       const ringEntries = rings.map((ring) => ({ ring, entry: entryOf(ring.texts[0], ring.color) }));
-      const { title, items } = splitTitle([
+      const { title, titleSource, items } = splitTitle([
         ...shape.texts.map((t) => entryOf(t)),
         ...ringEntries.map((r) => r.entry),
       ]);
@@ -519,6 +643,7 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
         shape,
         box: shape.box,
         title,
+        titleSource,
         items,
         itemRings,
         strokeIds: [...shape.strokeIds, ...rings.flatMap((r) => r.strokeIds)],
@@ -528,23 +653,26 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
       };
     });
 
+  // A typed word an arrow touches is a thing on the map, even alone. Untouched, a lone line is a note.
+  const linked = new Set(rawLinks.flatMap((l) => [l.from, l.to]));
   const notes: OutNote[] = [];
-  for (const cluster of clusterFreeText(freeTexts)) {
-    const { title, items } = splitTitle(cluster.map((t) => entryOf(t)));
-    const box = unionBox(cluster);
-    if (items.length > 0) {
+  for (const word of words) {
+    const { title, titleSource, items } = splitTitle(word.texts.map((t) => entryOf(t)));
+    if (items.length > 0 || (title && linked.has(word))) {
       groups.push({
-        box,
+        shape: word,
+        box: word.box,
         title,
+        titleSource,
         items,
         itemRings: items.map(() => undefined),
         strokeIds: [],
-        textIds: cluster.map((t) => t.id),
+        textIds: word.textIds,
         color: 'ink',
         inkIds: [],
       });
     } else if (title) {
-      notes.push({ box, text: title, textIds: cluster.map((t) => t.id) });
+      notes.push({ box: word.box, text: title, textIds: word.textIds });
     }
   }
 
@@ -556,8 +684,13 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
   const indexOf = (shape: Shape | undefined): number =>
     shape ? ordered.findIndex((g) => g.shape === shape) : -1;
 
-  const endOf = (shape: Shape): { group: number; item?: number } => {
-    if (!shape.ringOf) return { group: indexOf(shape) };
+  const endOf = (shape: Shape, line: string | undefined): { group: number; item?: number } => {
+    if (!shape.ringOf) {
+      const group = indexOf(shape);
+      // A line that became the title stands for the whole box.
+      const item = group >= 0 && line ? ordered[group].items.findIndex((i) => i.source === line) : -1;
+      return item >= 0 ? { group, item } : { group };
+    }
     const group = indexOf(shape.ringOf);
     const item = group >= 0 ? ordered[group].itemRings.indexOf(shape) : -1;
     return item >= 0 ? { group, item } : { group };
@@ -565,8 +698,8 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
 
   const links: OutLink[] = rawLinks
     .map((link) => {
-      const from = endOf(link.from);
-      const to = endOf(link.to);
+      const from = endOf(link.from, link.fromLine);
+      const to = endOf(link.to, link.toLine);
       const out: OutLink = {
         from: from.group,
         to: to.group,
@@ -577,13 +710,22 @@ export const recognize = (strokes: InStroke[], texts: InText[]): Recognition => 
       if (to.item !== undefined) out.toItem = to.item;
       return out;
     })
-    .filter((link) => link.from >= 0 && link.to >= 0);
+    // Two lines that read as one end, such as a title and the box, make no arrow.
+    .filter((link) => {
+      if (link.from < 0 || link.to < 0) return false;
+      if (link.from !== link.to) return true;
+      return link.fromItem !== undefined && link.toItem !== undefined && link.fromItem !== link.toItem;
+    });
 
   const inkCount = ordered.reduce((sum, g) => sum + g.inkIds.length, looseInk);
 
   return {
-    groups: ordered.map(({ shape, itemRings: _rings, ...group }) => {
-      let parent = shape?.parent;
+    groups: ordered.map(({ shape, itemRings: _rings, titleSource: _title, items, ...rest }) => {
+      const group: OutGroup = {
+        ...rest,
+        items: items.map(({ source: _source, ...item }) => item),
+      };
+      let parent = shape.parent;
       while (parent && indexOf(parent) < 0) parent = parent.parent;
       const index = indexOf(parent);
       return index >= 0 ? { ...group, parent: index } : group;

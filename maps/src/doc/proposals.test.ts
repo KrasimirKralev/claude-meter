@@ -93,6 +93,22 @@ describe('bindAiProposal', () => {
     expect(bindAiProposal(doc, { kind: 'link', from: 'a', to: 'b' }, place)).toBeNull();
   });
 
+  it('lets a later name for the same arrow or box replace the one still waiting', () => {
+    const doc = fixture();
+    const first = bindAiProposal(doc, { kind: 'label', link: 'l', label: 'has' }, place);
+    const withFirst = { ...doc, proposals: [...doc.proposals, first!.proposal] };
+    const second = bindAiProposal(withFirst, { kind: 'label', link: 'l', label: 'drives' }, place);
+    expect(second?.replaces).toBe(first?.proposal.id);
+    // The rename already waiting in the fixture came from the AI too.
+    expect(bindAiProposal(doc, { kind: 'rename', bubble: 'a', title: 'Alpha 3' }, place)?.replaces).toBe('pr');
+  });
+
+  it('drops a new group that only repeats things already on the map', () => {
+    const doc = fixture();
+    expect(bindAiProposal(doc, { kind: 'group', title: 'Cars', items: ['one', 'Beta'] }, place)).toBeNull();
+    expect(bindAiProposal(doc, { kind: 'group', title: 'Cars', items: ['one', 'two'] }, place)).not.toBeNull();
+  });
+
   it('creates a pending bubble for a new group', () => {
     const bound = bindAiProposal(fixture(), { kind: 'group', title: 'New', items: ['x'] }, place);
     expect(bound?.bubble?.status).toBe('pending');

@@ -8,6 +8,8 @@ const MIN_OVERLAP = 28;
 const TITLE_LINE = 36;
 const CORNER = 16;
 const CLEARANCE = 30;
+const LANE_START = 18;
+const LANE_STEP = 14;
 
 export interface Route {
   d: string;
@@ -190,7 +192,7 @@ const midOf = (points: Point[]): { x: number; y: number } => {
  * An arrow that leaves one line of a bubble: out of the bubble's side at that line's height, then
  * across to the target. Straight when the target is level with the line.
  */
-const fromLine = (a: Box, lineY: number, b: Box): Point[] => {
+const fromLine = (a: Box, lineY: number, b: Box, lane?: number): Point[] => {
   const leftOf = b.x + b.w <= a.x;
   const rightOf = b.x >= a.x + a.w;
   if (leftOf || rightOf) {
@@ -198,7 +200,13 @@ const fromLine = (a: Box, lineY: number, b: Box): Point[] => {
     const endX = rightOf ? b.x - GAP : b.x + b.w + GAP;
     const endY = b.h < 40 ? b.y + b.h / 2 : clamp(lineY, b.y + 20, b.y + b.h - 20);
     if (Math.abs(endY - lineY) < 4) return [[startX, lineY], [endX, lineY]];
-    const midX = (startX + endX) / 2;
+    // Several arrows leaving one side each turn in a lane of their own, close to the bubble, so
+    // they never run on top of each other and each keeps a long last run for its name.
+    const toward = rightOf ? 1 : -1;
+    const midX =
+      lane === undefined
+        ? (startX + endX) / 2
+        : startX + toward * Math.min(LANE_START + lane * LANE_STEP, Math.abs(endX - startX) - CORNER * 2);
     return [[startX, lineY], [midX, lineY], [midX, endY], [endX, endY]];
   }
   // The target sits above or below: leave by the nearer side, then come down onto its top.
@@ -223,15 +231,61 @@ export const routeAnchored = (
   aLine: Box | null,
   bLine: Box | null,
   obstacles: Box[] = [],
+  /** Which turn, counted out from the bubble, this arrow takes among those leaving its side. */
+  lane?: number,
 ): Route => {
   if (!aLine && !bLine) return routeLink(a, b, obstacles);
   let points: Point[];
   if (aLine) {
-    points = fromLine(a, aLine.y + aLine.h / 2, bLine ?? b);
+    points = fromLine(a, aLine.y + aLine.h / 2, bLine ?? b, lane);
   } else {
     // Into one line: the same route traced from that line back to the start, then turned around.
     const line = bLine as Box;
     points = fromLine(b, line.y + line.h / 2, a).reverse();
   }
+  // In a lane, the name goes on the last run into the target, where no other arrow runs.
+  if (lane !== undefined && aLine && points.length > 2) {
+    const [[ax, ay], [bx, by]] = points.slice(-2);
+    return { d: roundedPath(points), mid: { x: (ax + bx) / 2, y: (ay + by) / 2 } };
+  }
   return { d: roundedPath(points), mid: midOf(points) };
+};
+
+export interface LaneArrow {
+  id: string;
+  /** The bubble the arrow leaves. */
+  from: string;
+  a: Box;
+  b: Box;
+  fromLine: Box | null;
+  toLine: Box | null;
+}
+
+/**
+ * Arrows leaving lines on one side of the same bubble each get a lane. The one going furthest
+ * turns closest to the bubble, so arrows going the same way never cross. A lone arrow gets none.
+ */
+export const assignLanes = (arrows: LaneArrow[]): Map<string, number> => {
+  const lanes = new Map<string, number>();
+  const sides = new Map<string, { id: string; reach: number; up: boolean }[]>();
+  for (const { id, from, a, b, fromLine, toLine } of arrows) {
+    if (!fromLine || toLine) continue;
+    const side = b.x >= a.x + a.w ? 'right' : b.x + b.w <= a.x ? 'left' : null;
+    if (!side) continue;
+    const lineY = fromLine.y + fromLine.h / 2;
+    const targetY = b.y + b.h / 2;
+    const key = `${from}:${side}`;
+    const arrow = { id, reach: Math.abs(targetY - lineY), up: targetY < lineY };
+    sides.set(key, [...(sides.get(key) ?? []), arrow]);
+  }
+  for (const group of sides.values()) {
+    if (group.length < 2) continue;
+    for (const up of [true, false]) {
+      group
+        .filter((g) => g.up === up)
+        .sort((x, y) => y.reach - x.reach)
+        .forEach((g, index) => lanes.set(g.id, index));
+    }
+  }
+  return lanes;
 };

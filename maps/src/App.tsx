@@ -74,7 +74,7 @@ export const App = () => {
   useEffect(() => {
     if (!menu || menu === 'help') return undefined;
     const close = (e: PointerEvent): void => {
-      if (!(e.target as HTMLElement).closest('[role=menu],[aria-haspopup]')) {
+      if (!(e.target as HTMLElement).closest('[role=menu],[aria-haspopup],[data-menu-panel]')) {
         store.setUi({ menu: null });
       }
     };

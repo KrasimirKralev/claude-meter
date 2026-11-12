@@ -138,6 +138,9 @@
   .acct:hover { background: var(--hover); }
   .acct:focus-visible { outline-offset: -4px; }
   .acct.active, .acct.active:hover { background: var(--yellow); color: var(--on-candy); }
+  /* Active follows the CLI: nothing to pick, so a row is not a button. */
+  .acct.fixed { cursor: default; }
+  .acct.fixed:not(.active):hover { background: none; }
   /* A failed or throttled read: the last numbers stay, faded, and the row says why. */
   .acct.stale .cells { opacity: 0.6; }
   .acct.stale .pct b, .acct.stale .pct small { color: var(--text-dim); }
@@ -161,8 +164,6 @@
     background: var(--ink); color: var(--surface);
   }
   .acct.active .name em { background: var(--on-candy); color: #ffffff; }
-  /* Outlined, so "where the CLI runs" can't be read as "active". */
-  .name em.cli, .acct.active .name em.cli { background: none; color: inherit; box-shadow: inset 0 0 0 1.5px currentColor; }
   .reset { font-size: 12px; line-height: 1.25; color: var(--text-dim); min-height: 15px; }
   .reset strong, .reset span { display: inline-block; }
   .acct.active .reset, .acct.active .lab, .acct.active .pct small { color: var(--on-yellow-dim); }

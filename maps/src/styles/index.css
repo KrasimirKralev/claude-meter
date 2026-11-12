@@ -183,6 +183,67 @@ button:disabled {
   scrollbar-color: var(--arrow) transparent;
 }
 
+/* ---------- The maps menu ---------- */
+
+/* A small canvas: the same dots, with the map or the sketch drawn on it. */
+.map-thumb {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg) radial-gradient(var(--dot) 0.8px, transparent 0.8px) 0 0 / 8px 8px;
+}
+
+.map-thumb-link {
+  fill: none;
+  stroke: var(--map-line);
+  stroke-width: 0.8;
+  opacity: 0.65;
+}
+
+.map-thumb-ink {
+  fill: none;
+  stroke-width: 1.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.map-thumb-note {
+  fill: var(--mute);
+}
+
+.maps-search {
+  color: var(--ink);
+  caret-color: var(--accent);
+  outline: none;
+}
+
+.maps-search:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* The row the arrow keys are on. */
+.map-row.is-active > [role='menuitem'] {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.map-row-delete {
+  opacity: 0;
+}
+
+.map-row:hover .map-row-delete,
+.map-row:focus-within .map-row-delete {
+  opacity: 1;
+}
+
+/* No hover on a touch board, so the control is simply there. */
+@media (hover: none) {
+  .map-row-delete {
+    opacity: 1;
+  }
+}
+
 /* ---------- Canvas ---------- */
 
 .surface {
@@ -992,11 +1053,11 @@ button:disabled {
 
   .map-title {
     width: auto;
-    max-width: calc(100vw - 400px);
+    max-width: calc(100vw - 448px);
   }
 
   input.map-title {
-    width: calc(100vw - 400px);
+    width: calc(100vw - 448px);
   }
 }
 

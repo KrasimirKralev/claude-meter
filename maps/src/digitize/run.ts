@@ -77,11 +77,12 @@ const streamProposals = async (
       case 'proposal': {
         const bound = bindAiProposal(store.doc, event.proposal, placeBelow);
         if (!bound) break;
-        const add: { proposals: Proposal[]; bubbles: Bubble[]; links: Link[] } = {
+        const add: { proposals: Proposal[]; bubbles: Bubble[]; links: Link[]; drop?: Id[] } = {
           proposals: [bound.proposal],
           bubbles: bound.bubble ? [bound.bubble] : [],
           links: bound.link ? [bound.link] : [],
         };
+        if (bound.replaces) add.drop = [bound.replaces];
         store.appendFromStream(run, add);
         if (store.ui.digitize.firstMs === undefined) {
           setStatus({ firstMs: performance.now() - started });

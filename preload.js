@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   launchAuthLogin: () => ipcRenderer.invoke('launch-auth-login'),
   getAccounts: () => ipcRenderer.invoke('get-accounts'),
   setActiveAccount: (id) => ipcRenderer.invoke('set-active-account', id),
+  moveCliToAccount: (id) => ipcRenderer.invoke('move-cli-to-account', id),
   openExternalUrl: (url) => ipcRenderer.send('open-external-url', url),
   setMinContentHeight: (h) => ipcRenderer.send('widget-min-height', h),
   onAuthStatusChanged: (cb) => {

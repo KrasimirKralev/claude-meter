@@ -32,3 +32,17 @@ test('never mid-break, and at most once per ten minutes across the restart', () 
   assert.strictEqual(shouldRelaunch({ ...base, lastRelaunchAt: base.now - 5 * 60 * 1000 }), false);
   assert.strictEqual(shouldRelaunch({ ...base, lastRelaunchAt: base.now - 11 * 60 * 1000 }), true);
 });
+
+test('quietWait holds a popup for 15 s after start and 10 s after a display change', () => {
+  const { quietWait } = require('../display-scale');
+  const t0 = 1e12;
+  // Fresh process, no display change yet: the start floor alone.
+  assert.strictEqual(quietWait({ now: t0 + 3000, startedAt: t0, lastChangeAt: 0 }), 12000);
+  assert.strictEqual(quietWait({ now: t0 + 15000, startedAt: t0, lastChangeAt: 0 }), 0);
+  // A display change 4 s ago on an old process: six more seconds.
+  assert.strictEqual(quietWait({ now: t0 + 600000, startedAt: t0, lastChangeAt: t0 + 596000 }), 6000);
+  // Both floors pending: the longer one wins.
+  assert.strictEqual(quietWait({ now: t0 + 2000, startedAt: t0, lastChangeAt: t0 + 1000 }), 13000);
+  // Quiet for long: no wait.
+  assert.strictEqual(quietWait({ now: t0 + 600000, startedAt: t0, lastChangeAt: t0 + 100000 }), 0);
+});

@@ -47,6 +47,7 @@ export const buildRequest = (
       };
       const parent = parentIn(b);
       if (parent) out.parent = parent;
+      if (b.kind === 'group' && b.sourceStrokes.length === 0 && b.sourceTexts.length > 0) out.free = true;
       const color = b.sourceStrokes.map((id) => strokeColor.get(id)).find(Boolean);
       if (color && color !== 'ink') out.color = color;
       if (area && b.sourceStrokes.length + b.sourceTexts.length > 0) {

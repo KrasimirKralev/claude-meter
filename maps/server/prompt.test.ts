@@ -45,3 +45,33 @@ describe('what the AI is shown', () => {
     );
   });
 });
+
+describe('things written with no box around them', () => {
+  const prompt = JSON.parse(
+    buildUserPrompt({
+      title: 'Untitled map',
+      bubbles: [
+        {
+          id: 'people',
+          kind: 'group',
+          title: '',
+          items: [
+            { id: 'p1', text: 'Anton' },
+            { id: 'p2', text: 'Boris' },
+          ],
+        },
+        { id: 'car', kind: 'group', title: 'Skoda', items: [], free: true },
+      ],
+      links: [{ id: 'l1', from: 'people', fromItem: 'p1', to: 'car' }],
+      looseText: [],
+    }),
+  ) as { boxes: { id: string; free?: boolean }[]; arrows: { reads: string }[] };
+
+  it('marks a word typed on its own as free, so the AI reads it as one thing', () => {
+    expect(prompt.boxes.find((b) => b.id === 'car')?.free).toBe(true);
+  });
+
+  it('spells an arrow to it as going to that word', () => {
+    expect(prompt.arrows[0].reads).toBe('line "Anton" of box untitled ("Anton", "Boris") → word "Skoda"');
+  });
+});

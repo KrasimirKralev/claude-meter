@@ -60,7 +60,7 @@ const TitleEditor = () => {
     return (
       <input
         ref={inputRef}
-        className="map-title w-[calc(50vw-286px)] max-w-[420px] rounded-md bg-hover px-2.5 py-0.5 text-[20px] font-semibold tracking-[-0.01em] outline-none"
+        className="map-title w-[calc(50vw-334px)] max-w-[420px] rounded-md bg-hover px-2.5 py-0.5 text-[20px] font-semibold tracking-[-0.01em] outline-none"
         aria-label="Map name"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -76,7 +76,7 @@ const TitleEditor = () => {
   return (
     <button
       type="button"
-      className="map-title max-w-[calc(50vw-286px)] truncate rounded-md px-2.5 py-0.5 text-[20px] font-semibold tracking-[-0.01em] hover:bg-hover"
+      className="map-title max-w-[calc(50vw-334px)] truncate rounded-md px-2.5 py-0.5 text-[20px] font-semibold tracking-[-0.01em] hover:bg-hover"
       title="Rename this map"
       onClick={() => setDraft(title)}
     >

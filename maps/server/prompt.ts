@@ -7,14 +7,17 @@ How to read the input:
 - "boxes" is a tree. A box under "inside" was drawn inside the box above it and is part of that box's topic.
 - "lines" are what was written in a box. A line with "circled" had a circle drawn around it in that colour. An arrow that starts at a circled line comes from that one line, not from the whole box.
 - An arrow that starts at a box comes from the whole box: everything in it, together.
+- An arrow from one line is about that one thing. When each line of a box sends its own arrows, the box is a set of separate things, such as people, parts or options, and every line is a thing of its own.
+- A box marked "free" was typed with no shape drawn around it. With no lines it is a single thing in its own right, such as a name, an object or a place.
+- A box that one line points into usually describes that line, and its lines can be of different kinds, such as a degree and two jobs.
 - "reads" spells each arrow out in words. An arrow usually means leads to, causes, supports or is needed for. Decide which from the words at both ends and the boxes around them.
 - "drawn" is the pen colour of a box or an arrow, and "circled" the colour of a circle. A shared colour often ties things together, such as a circled line and the arrow leaving it.
 - "at" is where something was drawn, on a 0 to 100 grid over the sketch. Use it only to understand the layout.
 - A box whose title is empty and that has lines holds a list of equals. It needs a name.
 
 Work through the map in this order, and output your lines in this order:
-1. Every box whose title is empty and that has lines gets a "rename": a short name, one to four words, for what all of its lines have in common, read in the light of the arrows going into and out of it. The name must cover every line, so never name a box after just one of its lines. The one exception: when the first line is plainly the heading of the lines below it, give exactly that line as the name, and it becomes the heading.
-2. Every arrow whose meaning is clear gets a "label": a short verb phrase, one to three lower-case words, saying how its start leads to its end, such as "builds", "reduces" or "leads to". Use the arrow's id.
+1. Every box whose title is empty and that has lines gets a "rename": a short name, one to four words, for what all of its lines have in common, read in the light of the arrows going into and out of it. Name the kinds of thing the lines are: a box of names is people, a box holding a degree and two jobs is education and work. The name must cover every line, so never name a box after just one of its lines. When the arrows into a box all come from one line, the box is about that line, so put that line first, such as "Anton: education and work". The one exception: when the first line is plainly the heading of the lines below it, give exactly that line as the name, and it becomes the heading.
+2. Every arrow whose meaning is clear gets a "label": one to three lower-case words saying how its start relates to its end, such as "drives", "works as", "builds" or "leads to". Be specific: never a vague label such as "has", "is linked to" or "has a profile". Never repeat the name of the box it points at: a label is the relation, the box name is the thing. Arrows that say the same kind of thing get the same label, so the map reads as one pattern. Use the arrow's id.
 3. A "map-title" and a "summary". The summary follows the arrows in one or two sentences: what gets done, and what that leads to.
 4. Fixes for clear typos: "rewrite" for a line, "rename" for a title. Otherwise keep the person's own words. Never rephrase for style.
 5. Only after all of that, and only when the map clearly implies it: a missing arrow ("link"), a missing line ("add-item"), or a line in the wrong box ("move-item").
@@ -30,7 +33,7 @@ Allowed lines:
 {"kind":"link","from":"<box id>","to":"<box id>","fromItem":"<line id>","label":"..."}  a missing arrow; fromItem, toItem and label are optional
 {"kind":"add-item","bubble":"<box id>","text":"..."}  a clearly missing line that the map itself implies
 {"kind":"move-item","item":"<line id>","from":"<box id>","to":"<box id>"}  a line that belongs in another box
-{"kind":"group","title":"...","items":["..."]}  a new box, only for loose text or handwriting outside every drawn shape
+{"kind":"group","title":"...","items":["..."]}  a new box, only for loose text or handwriting outside every drawn shape, never for words already on the map
 
 Rules:
 - Keep the person's language. Bulgarian stays Bulgarian, English stays English. Never translate.
@@ -44,6 +47,7 @@ Rules:
 interface Node {
   id: string;
   title: string;
+  free?: true;
   lines?: { id: string; text: string; circled?: string }[];
   drawn?: string;
   at?: DigitizeBubble['at'];
@@ -60,6 +64,7 @@ export const buildUserPrompt = (request: DigitizeRequest): string => {
   const ids = new Set(groups.map((b) => b.id));
   const node = (bubble: DigitizeBubble): Node => {
     const out: Node = { id: bubble.id, title: bubble.title };
+    if (bubble.free) out.free = true;
     if (bubble.items.length > 0) {
       out.lines = bubble.items.map(({ id, text, mark }) => (mark ? { id, text, circled: mark } : { id, text }));
     }
@@ -79,7 +84,11 @@ export const buildUserPrompt = (request: DigitizeRequest): string => {
   const end = (boxId: string, itemId: string | undefined): string => {
     const bubble = byId.get(boxId);
     const item = itemId ? bubble?.items.find((i) => i.id === itemId) : undefined;
-    return item ? `line "${item.text}" of box ${name(bubble)}` : `whole box ${name(bubble)}`;
+    if (item) return `line "${item.text}" of box ${name(bubble)}`;
+    if (bubble?.free) {
+      return bubble.items.length === 0 ? `word ${name(bubble)}` : `typed list ${name(bubble)}`;
+    }
+    return `whole box ${name(bubble)}`;
   };
   return JSON.stringify({
     title: request.title,

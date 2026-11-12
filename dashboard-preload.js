@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   launchAuthLogin: () => ipcRenderer.invoke('launch-auth-login'),
   getAccounts: () => ipcRenderer.invoke('get-accounts'),
   setActiveAccount: (id) => ipcRenderer.invoke('set-active-account', id),
+  moveCliToAccount: (id) => ipcRenderer.invoke('move-cli-to-account', id),
   onAuthStatusChanged: (cb) => {
     if (authStatusHandler) ipcRenderer.removeListener('auth-status-changed', authStatusHandler);
     authStatusHandler = (_e, data) => cb(data);

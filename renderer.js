@@ -13,6 +13,12 @@ var pendingAccountId = null;
 var pendingAccountTimer = null;
 // Name the CLI launcher reports for itself; falls back to the product name.
 var cliLauncherName = 'Claude Code';
+// True while a launcher says where the CLI is: Active follows it, and no row is a button.
+var activeFollowsCli = false;
+// True when a click on a row can ask the launcher to move every session to that account.
+var cliMove = false;
+var cliMoving = false;
+var moveNotice = null;    // { text, detail, error, until }: the answer to a click, in the status line
 
 function createElement(tag, cls, text) {
   var el = document.createElement(tag);
@@ -176,11 +182,21 @@ function buildAccountRow(acc, index) {
   var row = createElement('li', 'acct' + (chosen ? ' active' : '')
     + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : '')
     + (state.status === 'limited' || state.status === 'error' || state.status === 'out' ? ' stale' : ''));
-  row.setAttribute('role', 'button');
-  row.setAttribute('tabindex', '0');
-  row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
+  if (cliMove) {
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    if (chosen) row.setAttribute('aria-current', 'true');
+  } else if (activeFollowsCli) {
+    row.classList.add('fixed');
+    if (chosen) row.setAttribute('aria-current', 'true');
+  } else {
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
+  }
   row.setAttribute('data-id', acc.id);
-  row.title = accountTooltip(acc);
+  row.title = accountTooltip(acc)
+    + (cliMove ? '\nClick: move every ' + cliLauncherName + ' session to this account' : '');
 
   var bullet = createElement('span', 'bullet b-' + (index % 4), name.charAt(0).toUpperCase());
   bullet.setAttribute('aria-hidden', 'true');
@@ -189,11 +205,11 @@ function buildAccountRow(acc, index) {
   var who = createElement('div', 'who');
   var nameEl = createElement('span', 'name');
   nameEl.appendChild(createElement('span', 'name-text', name));
-  if (chosen) nameEl.appendChild(createElement('em', null, 'Active'));
-  if (acc.cliActive) {
-    var cli = createElement('em', 'cli', 'CLI');
-    cli.title = cliLauncherName + ' is running on this account';
-    nameEl.appendChild(cli);
+  if (chosen) {
+    // One badge: where the CLI runs IS the active account.
+    var badge = createElement('em', null, 'Active');
+    if (acc.cliActive) badge.title = cliLauncherName + ' is running on this account';
+    nameEl.appendChild(badge);
   }
   who.appendChild(nameEl);
   var reset = createElement('span', 'reset');
@@ -233,13 +249,16 @@ function buildAccountRow(acc, index) {
   }
   row.appendChild(pct);
 
-  row.addEventListener('click', function() { selectAccount(acc); });
-  row.addEventListener('keydown', function(e) {
-    // Keys pressed on a button inside the row belong to that button.
-    if (e.target !== row || (e.key !== 'Enter' && e.key !== ' ')) return;
-    e.preventDefault();
-    selectAccount(acc);
-  });
+  if (cliMove || !activeFollowsCli) {
+    var act = cliMove ? moveCli : selectAccount;
+    row.addEventListener('click', function() { act(acc); });
+    row.addEventListener('keydown', function(e) {
+      // Keys pressed on a button inside the row belong to that button.
+      if (e.target !== row || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      act(acc);
+    });
+  }
   return { acc: acc, reset: reset, row: row };
 }
 
@@ -311,8 +330,35 @@ function showActiveAccountUsage() {
   if (typeof reportMinHeight === 'function') reportMinHeight();
 }
 
+// A click on a row: the launcher moves every running session to that account.
+// Active is not set here; it follows the launcher's record when the move lands.
+function moveCli(acc) {
+  if (cliMoving || !window.electronAPI.moveCliToAccount) return;
+  cliMoving = true;
+  showMoveNotice({ ok: true, text: 'Moving ' + cliLauncherName + ' to ' + (acc.name || acc.id) + '…' }, 25000);
+  window.electronAPI.moveCliToAccount(acc.id).then(function(res) {
+    cliMoving = false;
+    showMoveNotice(res && res.text ? res : { ok: false, text: 'The move did not answer' }, 10000);
+  }, function() {
+    cliMoving = false;
+    showMoveNotice({ ok: false, text: 'The move failed' }, 10000);
+  });
+}
+
+function showMoveNotice(res, ms) {
+  moveNotice = { text: res.text, detail: res.detail || '', error: !res.ok, until: Date.now() + ms };
+  updateFooter();
+}
+
 function updateFooter() {
   var footer = document.getElementById('footerHint');
+  if (moveNotice && Date.now() < moveNotice.until) {
+    footer.textContent = moveNotice.text;
+    footer.title = moveNotice.detail || moveNotice.text;
+    footer.className = moveNotice.error ? 'footer-hint error' : 'footer-hint';
+    return;
+  }
+  if (moveNotice) { moveNotice = null; footer.title = ''; }
   if (lastSyncError) {
     footer.textContent = lastSyncError;
     footer.className = 'footer-hint error';
@@ -393,6 +439,9 @@ window.electronAPI.onUsageUpdate(function(payload) {
     if (typeof payload.cliLauncher === 'string' && payload.cliLauncher) {
       cliLauncherName = payload.cliLauncher;
     }
+    activeFollowsCli = payload.activeFollowsCli === true;
+    cliMove = payload.cliMove === true;
+    if (activeFollowsCli) clearPendingAccount(); // a click from before it took over is not held
     if (pendingAccountId && payload.activeAccountId !== pendingAccountId) {
       // Main has not applied the click yet — hold the user's choice.
       activeAccountId = pendingAccountId;

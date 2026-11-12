@@ -389,10 +389,14 @@ export const BubbleLayer = () => {
   const groupBoxes = accepted
     .filter((b) => b.kind === 'group')
     .map((b) => ({ x: b.map.x, y: b.map.y, w: b.map.w, h: heightOf(b, b.map.w) }));
-  const acceptedKey = bubbles
-    .filter((b) => b.status === 'accepted')
-    .map((b) => `${b.id}:${b.pinned}:${b.items.length}:${b.parent ?? ''}`)
-    .join(',');
+  const links = useStore((s) => s.doc.links);
+  // Arrows from lines shape the layout too, so accepting one lays the map out again.
+  const acceptedKey = [
+    ...bubbles
+      .filter((b) => b.status === 'accepted')
+      .map((b) => `${b.id}:${b.pinned}:${b.items.length}:${b.parent ?? ''}`),
+    ...links.filter((l) => l.status === 'accepted').map((l) => `${l.id}:${l.fromItem ?? ''}`),
+  ].join(',');
 
   // Bubble heights follow fonts and text, so they are measured from the page.
   useEffect(() => {

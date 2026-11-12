@@ -128,6 +128,18 @@ describe('appendFromStream', () => {
     body: { kind: 'summary' as const, text: 'x' },
   };
 
+  it('replaces a waiting proposal the stream supersedes, everywhere in history', () => {
+    const store = new Store();
+    store.commit((doc) => ({ ...doc, run: 1 }));
+    store.appendFromStream(1, { proposals: [proposal], bubbles: [], links: [] });
+    titled(store, 'after the first');
+    const better = { ...proposal, id: 'q', body: { kind: 'summary' as const, text: 'y' } };
+    store.appendFromStream(1, { proposals: [better], bubbles: [], links: [], drop: ['p'] });
+    expect(store.doc.proposals.map((p) => p.id)).toEqual(['q']);
+    store.undo();
+    expect(store.doc.proposals.map((p) => p.id)).toEqual(['q']);
+  });
+
   it('survives an undo within the same run', () => {
     const store = new Store();
     store.commit((doc) => ({ ...doc, run: 1 }));

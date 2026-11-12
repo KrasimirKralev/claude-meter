@@ -4,6 +4,7 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { NESTED_STROKES, NESTED_TEXTS } from '../../src/recognize/nested-sketch.fixture.ts';
+import { RELATIONS_STROKES, RELATIONS_TEXTS } from '../../src/recognize/relations-sketch.fixture.ts';
 import { openBlank } from './helpers.ts';
 
 /** Puts a sketch straight into the open map's storage, then reloads it. */
@@ -133,4 +134,46 @@ test('a box drawn inside a box shows inside it, over the sketch and on the map',
     const inner = await child.boundingBox();
     expect(inner && box && inner.x >= box.x && inner.x + inner.width <= box.x + box.width).toBe(true);
   }
+});
+
+test('a box of names in three strokes sends an arrow from each name, laid out in one column', async ({
+  page,
+}) => {
+  await openBlank(page);
+  const strokes = RELATIONS_STROKES.map((s) => ({ ...s, points: Array.from(s.points) }));
+  await loadSketch(page, strokes, RELATIONS_TEXTS);
+  await page.getByRole('button', { name: 'Digitize' }).click();
+
+  const people = page.locator('[data-bubble]').filter({ hasText: 'Boris' });
+  await expect(people.locator('li')).toHaveText(['Anton', 'Boris', 'Ivan']);
+  // Three boxes of facts, the box of names, and three single words an arrow points at.
+  await expect(page.locator('section[data-bubble]')).toHaveCount(7);
+  await expect(page.locator('section.kind-note')).toHaveCount(0);
+  await expect(page.locator('.link-line')).toHaveCount(6);
+
+  await page.getByRole('button', { name: 'Accept all and see the map' }).click();
+  await expect(page.locator('.surface[data-view="map"]')).toBeVisible();
+  await page.waitForTimeout(1200);
+  // Every arrow leaves the box at the height of one of the names.
+  const names = await people.locator('li').evaluateAll((items) =>
+    items.map((li) => {
+      const box = li.getBoundingClientRect();
+      return box.y + box.height / 2;
+    }),
+  );
+  const starts = await page.locator('.link-line').evaluateAll((paths) =>
+    paths.map((p) => {
+      const start = (p as SVGPathElement).getPointAtLength(0);
+      const matrix = (p as SVGPathElement).getScreenCTM() as DOMMatrix;
+      return new DOMPoint(start.x, start.y).matrixTransform(matrix).y;
+    }),
+  );
+  for (const y of starts) expect(names.some((name) => Math.abs(name - y) < 6)).toBe(true);
+  // Everything the names point at stands in one column to the right.
+  const lefts = await page.locator('section[data-bubble]').evaluateAll((sections) =>
+    sections
+      .filter((s) => !s.textContent?.includes('Boris'))
+      .map((s) => Math.round(s.getBoundingClientRect().x)),
+  );
+  expect(new Set(lefts).size).toBe(1);
 });

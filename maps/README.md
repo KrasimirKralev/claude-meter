@@ -25,9 +25,13 @@ Node 24 or newer is required. `npm run dev` runs the same app with live reload o
 3. **Map.** The drawn lines are gone. Groups are candy-coloured bubbles in custom fonts. Export a plan
    for Claude Code, a Markdown file, a PNG or SVG image, or a JSON backup. Press F to present.
 
-Nested sketches work too. A box drawn inside a box shows inside it on the map. A circle drawn
-snugly around one line marks that line, and an arrow drawn from the circle starts at that line, not
-at the whole box. Lines typed one by one count as equals, so the AI names the box from all of them,
+Nested sketches work too. A box drawn inside a box shows inside it on the map, and a box may be
+drawn in several strokes. A circle drawn snugly around one line marks that line, and an arrow drawn
+from the circle starts at that line, not at the whole box. So does an arrow drawn from right at a
+typed line, with no circle: a box of names can send each name its own arrows. A word typed on its
+own that an arrow touches is a thing on the map too. When the lines of a box point at different
+things, the map shows that box with everything its lines point at in one column beside it, in the
+order of its lines. Lines typed one by one count as equals, so the AI names the box from all of them,
 labels each arrow with what it means, and writes a summary that follows the arrows. Pressing
 Digitize again reads the sketch afresh wherever nothing was accepted yet.
 
@@ -52,6 +56,9 @@ when it holds pen marks that may be handwriting. The server listens on 127.0.0.1
 
 In this browser's database, saved after every change. Use **Export > JSON backup** to keep a copy
 anywhere else, and **Export > Open a JSON backup** to bring one back.
+
+The **Maps** button, or `M`, lists every saved map with a small picture of it. Type to find one by
+name, move with the arrow keys, and press Enter to open it.
 
 ## Tests
 

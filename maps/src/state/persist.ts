@@ -7,6 +7,8 @@ import { createDoc } from '../doc/ops.ts';
 import type { MapDoc, Tool } from '../doc/types.ts';
 import { validateDoc } from '../doc/validate.ts';
 import { showToast, store } from './store.ts';
+import { summaryOf } from './summary.ts';
+import type { MapSummary } from './summary.ts';
 
 const DB_NAME = 'balonche';
 const STORE = 'maps';
@@ -15,13 +17,9 @@ const RESCUE_PREFIX = 'balonche-rescue-';
 /** Set by the crash screen, so the next start opens a clean map instead of the one that crashed. */
 export const START_BLANK = 'balonche-start-blank';
 const TAB_ID = Math.random().toString(36).slice(2);
-const MAP_TOOLS: Tool[] = ['select', 'text', 'arrow'];
+const MAP_TOOLS: Tool[] = ['select', 'hand', 'text', 'arrow'];
 
-export interface MapSummary {
-  id: string;
-  title: string;
-  updatedAt: number;
-}
+export type { MapSummary } from './summary.ts';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -99,9 +97,7 @@ export const deleteMap = async (id: string): Promise<void> => {
 
 export const listMaps = async (): Promise<MapSummary[]> => {
   const all = await run<MapDoc[]>('readonly', (m) => m.getAll());
-  return all
-    .map(({ id, title, updatedAt }) => ({ id, title, updatedAt }))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return all.map(summaryOf).sort((a, b) => b.updatedAt - a.updatedAt);
 };
 
 const rememberOpen = (id: string): void => {

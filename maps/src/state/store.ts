@@ -188,12 +188,20 @@ export class Store {
    * Adds what the AI stream delivers to the document and to every saved state of the same run, so
    * undoing an Accept never loses proposals that arrived after it.
    */
-  appendFromStream(run: number, add: { proposals: Proposal[]; bubbles: Bubble[]; links: Link[] }): void {
+  appendFromStream(
+    run: number,
+    add: { proposals: Proposal[]; bubbles: Bubble[]; links: Link[]; drop?: Id[] },
+  ): void {
+    const drop = new Set(add.drop ?? []);
     const patch = (doc: MapDoc): MapDoc =>
       doc.run === run
         ? {
             ...doc,
-            proposals: [...doc.proposals, ...add.proposals],
+            // Only a proposal still waiting is replaced. One already decided stays in the history.
+            proposals: [
+              ...doc.proposals.filter((p) => !(drop.has(p.id) && p.status === 'pending')),
+              ...add.proposals,
+            ],
             bubbles: [...doc.bubbles, ...add.bubbles],
             links: [...doc.links, ...add.links],
           }

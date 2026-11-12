@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { fitView } from '../canvas/actions.ts';
 import { stopDigitize } from '../digitize/run.ts';
 import { createExampleDoc } from '../doc/example.ts';
 import { createDoc, newId } from '../doc/ops.ts';
 import { deleteMap, listMaps, loadMap, openMap, openNewMap, saveOpenMap } from '../state/persist.ts';
-import type { MapSummary } from '../state/persist.ts';
 import { showToast, store, useStore } from '../state/store.ts';
-import { Button, Icon } from './primitives.tsx';
+import { filterMaps, sizeLabel } from '../state/summary.ts';
+import type { MapSummary } from '../state/summary.ts';
+import { MapThumb } from './MapThumb.tsx';
+import { Button, Icon, IconButton } from './primitives.tsx';
 
 const afterOpen = (): void => {
   stopDigitize();
@@ -27,21 +29,55 @@ export const MapsMenu = () => {
   const current = useStore((s) => s.doc.id);
   const [maps, setMaps] = useState<MapSummary[]>([]);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  /** The row the arrow keys are on. Enter opens it. */
+  const [active, setActive] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const shown = filterMaps(maps, query);
 
   useEffect(() => {
     if (!open) {
       setConfirming(null);
+      setQuery('');
       return;
     }
+    // Typing starts a search at once, so finding a map never needs the mouse.
+    inputRef.current?.focus();
     // The open map may hold changes the idle save has not written yet.
     void saveOpenMap()
       .then(listMaps)
-      .then(setMaps)
+      .then((all) => {
+        setMaps(all);
+        setActive(Math.max(0, all.findIndex((map) => map.id === store.doc.id)));
+      })
       .catch((error: unknown) => {
         console.error('Listing maps failed', error);
         showToast('Your saved maps could not be listed. Try again.');
       });
   }, [open]);
+
+  useEffect(() => {
+    listRef.current?.querySelector('.is-active')?.scrollIntoView({ block: 'nearest' });
+  }, [active, shown.length]);
+
+  const onSearchKey = (e: React.KeyboardEvent): void => {
+    // Letters typed here are a search, never a canvas shortcut.
+    e.stopPropagation();
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      setActive((index) => Math.max(0, Math.min(shown.length - 1, index + step)));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const target = shown[Math.min(active, shown.length - 1)];
+      if (target) void switchTo(target.id);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      if (query) setQuery('');
+      else close();
+    }
+  };
 
   const close = (): void => store.setUi({ menu: null });
 
@@ -84,40 +120,117 @@ export const MapsMenu = () => {
     afterOpen();
   };
 
+  const startNew = (): void => {
+    close();
+    void saveOpenMap().then(() => {
+      openNewMap(createDoc());
+      store.setUi({ tool: 'pen' });
+      afterOpen();
+    });
+  };
+
   return (
     <div className="relative">
       <button
         type="button"
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-label="Your maps"
-        title="Your maps"
-        className="flex h-9 items-center gap-1 rounded-lg px-1.5 hover:bg-hover"
+        title="Your maps (M)"
+        className="flex h-9 items-center gap-1.5 rounded-lg px-1.5 hover:bg-hover"
         onClick={() => store.setUi({ menu: open ? null : 'maps' })}
       >
         <img src="/favicon.svg" alt="" className="size-6" />
+        <span className="text-[14px] font-semibold">Maps</span>
         <Icon name="chevron" size={14} />
       </button>
       {open && (
         <div
-          role="menu"
-          className="scroll-thin absolute top-11 left-0 z-20 max-h-[70vh] w-[320px] overflow-y-auto rounded-xl border border-line bg-surface p-2 shadow-float"
+          data-menu-panel
+          role="dialog"
+          aria-label="Your maps"
+          className="absolute top-[46px] -left-[7px] z-20 flex max-h-[min(76vh,640px)] w-[400px] max-w-[calc(100vw-32px)] flex-col rounded-xl border border-line bg-surface shadow-float"
         >
-          <div className="grid gap-1 pb-2">
-            <Button
-              variant="primary"
-              onClick={() => {
-                close();
-                void saveOpenMap().then(() => {
-                  openNewMap(createDoc());
-                  store.setUi({ tool: 'pen' });
-                  afterOpen();
-                });
-              }}
-            >
+          <div className="flex items-center gap-2 p-2">
+            <label className="relative min-w-0 flex-1">
+              <span className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-mute">
+                <Icon name="search" size={16} />
+              </span>
+              <input
+                ref={inputRef}
+                type="text"
+                role="searchbox"
+                enterKeyHint="go"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="Find a map"
+                placeholder="Find a map"
+                className="maps-search h-9 w-full rounded-lg border border-line bg-raised pr-2.5 pl-8 placeholder:text-mute"
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setActive(0);
+                }}
+                onKeyDown={onSearchKey}
+              />
+            </label>
+            <Button variant="primary" onClick={startNew}>
               New map
             </Button>
+          </div>
+          <ul
+            ref={listRef}
+            role="menu"
+            aria-label="Maps, newest first"
+            className="scroll-thin m-0 grid min-h-0 list-none grid-cols-[minmax(0,1fr)] gap-0.5 overflow-y-auto border-t border-line p-2"
+          >
+            {shown.map((map, index) => (
+              <li
+                key={map.id}
+                className={`map-row flex items-center gap-1 rounded-lg ${index === active ? 'is-active' : ''}`}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  aria-current={map.id === current}
+                  onClick={() => void switchTo(map.id)}
+                  className={`flex min-w-0 flex-1 items-center gap-3 rounded-lg p-1.5 text-left ${
+                    map.id === current ? 'bg-soft' : 'hover:bg-hover'
+                  }`}
+                >
+                  <MapThumb thumb={map.thumb} style={map.style} />
+                  <span className="min-w-0 flex-1">
+                    <span className="line-clamp-2 leading-snug font-medium">{map.title}</span>
+                    <span className="block truncate text-[12px] text-mute">
+                      {age(map.updatedAt)} · {sizeLabel(map)}
+                      {map.id === current ? ' · open now' : ''}
+                    </span>
+                  </span>
+                </button>
+                {confirming === map.id ? (
+                  <Button small className="!text-danger" onClick={() => void remove(map.id)}>
+                    Delete for good
+                  </Button>
+                ) : (
+                  <IconButton
+                    icon="trash"
+                    label={`Delete ${map.title}`}
+                    className="map-row-delete text-mute"
+                    onClick={() => setConfirming(map.id)}
+                  />
+                )}
+              </li>
+            ))}
+            {shown.length === 0 && (
+              <li className="px-2 py-6 text-center text-mute" role="none">
+                {maps.length === 0 ? 'No maps yet.' : `No map has “${query.trim()}” in its name.`}
+              </li>
+            )}
+          </ul>
+          <div className="flex gap-2 border-t border-line p-2">
             <Button
+              small
+              className="flex-1"
               onClick={() => {
                 close();
                 stopDigitize();
@@ -130,6 +243,8 @@ export const MapsMenu = () => {
               Duplicate this map
             </Button>
             <Button
+              small
+              className="flex-1"
               onClick={() => {
                 close();
                 void saveOpenMap().then(() => {
@@ -141,39 +256,6 @@ export const MapsMenu = () => {
               Open the example
             </Button>
           </div>
-          <ul className="m-0 grid list-none grid-cols-[minmax(0,1fr)] gap-0.5 border-t border-line p-0 pt-2">
-            {maps.map((map) => (
-              <li key={map.id} className="flex items-center gap-1">
-                <button
-                  type="button"
-                  role="menuitem"
-                  aria-current={map.id === current}
-                  onClick={() => void switchTo(map.id)}
-                  className={`min-w-0 flex-1 rounded-lg px-2.5 py-1.5 text-left hover:bg-hover ${
-                    map.id === current ? 'bg-soft' : ''
-                  }`}
-                >
-                  <span className="block truncate font-medium">{map.title}</span>
-                  <span className="block text-[12px] text-mute">{age(map.updatedAt)}</span>
-                </button>
-                {confirming === map.id ? (
-                  <Button small className="!text-danger" onClick={() => void remove(map.id)}>
-                    Delete for good
-                  </Button>
-                ) : (
-                  <Button
-                    small
-                    variant="plain"
-                    className="!text-mute"
-                    aria-label={`Delete ${map.title}`}
-                    onClick={() => setConfirming(map.id)}
-                  >
-                    Delete
-                  </Button>
-                )}
-              </li>
-            ))}
-          </ul>
         </div>
       )}
     </div>

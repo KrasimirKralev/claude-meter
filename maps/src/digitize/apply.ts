@@ -1,6 +1,6 @@
 // Turns the local recognizer's result into pending bubbles, links and proposals.
 
-import { isShownIn, newId, shownParent } from '../doc/ops.ts';
+import { isShownIn, newId, shownParent, shownRoot } from '../doc/ops.ts';
 import type { Bubble, InkColor, Link, MapDoc, Proposal } from '../doc/types.ts';
 import { layoutBubbles } from '../map/layout.ts';
 import type { Recognition } from '../recognize/recognize.ts';
@@ -21,10 +21,25 @@ export const applyLayout = (
   const shown = isShownIn('map');
   const childrenOf = (parent: Bubble): Bubble[] =>
     doc.bubbles.filter((b) => shown(b) && shownParent(doc.bubbles, b, shown)?.id === parent.id);
+  // Arrows count only between bubbles on the map, by the ones standing on their own that hold them.
+  const rootId = (id: string): string | undefined => {
+    const bubble = doc.bubbles.find((b) => b.id === id);
+    if (!bubble || !shown(bubble)) return undefined;
+    return shownRoot(doc.bubbles, bubble, shown).id;
+  };
+  const links = doc.links.flatMap((link) => {
+    if (link.status !== 'accepted') return [];
+    const from = rootId(link.from);
+    const to = rootId(link.to);
+    if (!from || !to) return [];
+    // A line counts only when it belongs to the bubble standing on its own.
+    return [{ from, to, fromItem: from === link.from ? link.fromItem : undefined }];
+  });
   const placed = layoutBubbles(
     doc.bubbles.filter((b) => shown(b) && !shownParent(doc.bubbles, b, shown)),
     heightOf,
     childrenOf,
+    links,
   );
   let changed = false;
   const bubbles = doc.bubbles.map((bubble) => {

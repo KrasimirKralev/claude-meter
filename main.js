@@ -22,7 +22,7 @@ const http = require('http');
 const https = require('https');
 const os = require('os');
 const url = require('url');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const crypto = require('crypto');
 
 // --- HTML entity escaping (prevent injection in OAuth callback responses) ---
@@ -45,6 +45,8 @@ try {
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 const BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-bounds.json');
+const DIGEST_FILE = path.join(CLAUDE_DIR, 'usage-widget-digest.json'); // the day the digest was last shown
+const PROCESS_STARTED_AT = Date.now();
 const SETTINGS_FILE = path.join(CLAUDE_DIR, 'usage-widget-settings.json');
 const TASKS_FILE = path.join(CLAUDE_DIR, 'usage-widget-tasks.json');
 const TASKS_BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-tasks-bounds.json');
@@ -298,6 +300,7 @@ const { readJsonOr, writeJsonAtomic, writeTextAtomic } = require('./safe-file');
 const { parseSmartText } = require('./smart-text');
 const calendarLib = require('./calendar-lib');
 const widgetLib = require('./widget-lib');
+const cliAccount = require('./cli-account');
 const RELAX_MUSIC_DIR = path.join(os.homedir(), 'Music', 'relax');
 const RELAX_MUSIC_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-music.json');
 const RELAX_TICK_MS = 5000;
@@ -1106,6 +1109,10 @@ function initAccounts() {
       || accountList[0];
     activeAccountId = preferred ? preferred.id : null;
   }
+  // Where a launcher session is wins over the stored choice. Only the id here:
+  // the callers redraw when the accounts' signature (it holds the id) changed.
+  const cliId = cliAccountId();
+  if (cliId) activeAccountId = cliId;
 }
 
 // --- Live account discovery ---
@@ -1194,11 +1201,14 @@ function cliLauncherName() {
 // Re-read the marker; broadcast only when what we display actually changed.
 function refreshCliActiveAccount() {
   const next = readCliActiveAccount();
-  const beforeEmail = normalizeEmail(cliActiveAccount && cliActiveAccount.email);
+  const before = cliAccountId();
   const beforeLauncher = cliLauncherName();
-  const afterEmail = normalizeEmail(next && next.email);
+  const beforeManaged = !!cliActiveAccount;
   cliActiveAccount = next;
-  if (beforeEmail !== afterEmail || beforeLauncher !== cliLauncherName()) {
+  // Every read, not only when the e-mail moves: a session opening on the account
+  // a headless run had claimed changes nothing in the record but `session_dir`.
+  if (followCliAccount()) return; // it redrew everything
+  if (before !== cliAccountId() || beforeLauncher !== cliLauncherName() || beforeManaged !== !!cliActiveAccount) {
     updateTrayTooltip();
     broadcastUsage();
   }
@@ -1222,10 +1232,72 @@ function startCliMarkerWatcher() {
   cleanupTimers.push(poll);
 }
 
+// The account a launcher session is on, or null. Headless runs rewrite the same
+// record without a session and are not followed (cli-account.js).
+function cliAccountId() {
+  return cliAccount.cliAccountId(cliActiveAccount, enabledAccounts());
+}
+
 function isCliActive(ctx) {
-  const marker = normalizeEmail(cliActiveAccount && cliActiveAccount.email);
-  if (!marker) return false;
-  return normalizeEmail(ctx.email) === marker;
+  return !!ctx && ctx.id === cliAccountId();
+}
+
+// One marker, not two: Active is where the CLI is. With a launcher on this
+// machine nobody picks the active account by hand; without one (no record at
+// all) a click on a row still does.
+function activeFollowsCli() {
+  return !!cliActiveAccount;
+}
+
+function setActiveAccount(id) {
+  if (activeAccountId === id || !accountCtx[id]) return false;
+  activeAccountId = id;
+  saveSettings();
+  const ctx = accountCtx[id];
+  updateTrayTooltip();
+  if (ctx.cachedUsage) updateTrayBadge(ctx.cachedUsage);
+  broadcastUsage();
+  syncIfStale(ctx);
+  return true;
+}
+
+// A click on an account asks the launcher to move every running session there.
+// The launcher's own helper does it (it imports the launcher: its lock, its
+// records, its log); the meter only runs it and shows the answer. Active is not
+// touched here - it moves when the launcher's record does.
+const CLI_MOVE_HELPER = path.join(os.homedir(), '.local', 'bin', 'clx-move');
+const CLI_MOVE_TIMEOUT_MS = 20 * 1000;
+let cliMoveBusy = false;
+
+function cliMoveAvailable() {
+  if (!activeFollowsCli()) return false;
+  try { return fs.statSync(CLI_MOVE_HELPER).isFile(); } catch { return false; }
+}
+
+function moveCliToAccount(id) {
+  const ctx = accountCtx[id];
+  const key = ctx ? cliAccount.launcherAccountKey(ctx.dir) : null;
+  if (!key || !cliMoveAvailable()) {
+    return Promise.resolve({ ok: false, text: 'Not moved: the launcher cannot be asked', detail: '' });
+  }
+  if (cliMoveBusy) return Promise.resolve({ ok: false, text: 'A move is already running', detail: '' });
+  cliMoveBusy = true;
+  return new Promise((resolve) => {
+    // No shell, a fixed program, one argument taken from a directory name.
+    execFile(CLI_MOVE_HELPER, [key], { timeout: CLI_MOVE_TIMEOUT_MS, maxBuffer: 256 * 1024 }, (err, stdout) => {
+      cliMoveBusy = false;
+      const result = cliAccount.readMoveResult(stdout);
+      if (!result && err) console.log('[cli-move] ' + (err.killed ? 'timed out' : String(err.message).slice(0, 200)));
+      refreshCliActiveAccount(); // the record moved with the sessions: follow it now
+      resolve(cliAccount.moveMessage(result));
+    });
+  });
+}
+
+// True when Active moved.
+function followCliAccount() {
+  const id = cliAccountId();
+  return id ? setActiveAccount(id) : false;
 }
 
 function enabledAccounts() {
@@ -1946,39 +2018,56 @@ function broadcastStreak() {
 }
 
 // --- Daily digest ---
+// One pending show at a time (after wake, after the widget opens, or waiting for
+// the monitors to settle). The day it was shown is on disk, so the display-scale
+// relaunch does not repeat it minutes later.
 let digestTimer = null;
-let digestShownToday = null; // date string of last shown digest
+let digestShownToday = (readJsonOr(DIGEST_FILE, null) || {}).shown || null;
+
+function scheduleDigest(delayMs) {
+  if (digestTimer) clearTimeout(digestTimer);
+  digestTimer = setTimeout(() => { digestTimer = null; showDailyDigest(); }, delayMs);
+}
 
 function scheduleDailyDigest() {
   // Show 5 minutes after system wake from sleep
   powerMonitor.on('resume', () => {
-    const today = localDateStr(new Date());
-    if (digestShownToday !== today) {
-      if (digestTimer) clearTimeout(digestTimer);
-      digestTimer = setTimeout(() => {
-        digestTimer = null;
-        // Opening the widget in those five minutes may have shown it already.
-        if (digestShownToday === today) return;
-        digestShownToday = today;
-        showDailyDigest();
-      }, 5 * 60 * 1000); // 5 minutes after wake
-    }
+    if (digestShownToday !== localDateStr(new Date()) && !digestTimer) scheduleDigest(5 * 60 * 1000);
   });
 }
 
 // Called when widget is first shown each day
 function tryShowDigestOnOpen() {
-  const today = localDateStr(new Date());
-  if (digestShownToday !== today) {
-    digestShownToday = today;
-    if (digestTimer) { clearTimeout(digestTimer); digestTimer = null; }
-    // Small delay so the widget finishes rendering first
-    setTimeout(showDailyDigest, 3000);
-  }
+  // Small delay so the widget finishes rendering first
+  if (digestShownToday !== localDateStr(new Date())) scheduleDigest(3000);
 }
 
 function showDailyDigest() {
-  requestPopup({ open: openDailyDigest });
+  const today = localDateStr(new Date());
+  if (digestShownToday === today) return;
+  // Born in a monitor change a popup keeps the wrong pixel size, and while the
+  // scale guard waits for its relaunch every window is on borrowed time: wait.
+  const wait = displayScale.quietWait({ now: Date.now(), startedAt: PROCESS_STARTED_AT, lastChangeAt: lastDisplayChangeAt });
+  if (wait > 0 || scaleMismatch()) { scheduleDigest(wait || 30 * 1000); return; }
+  markDigestShown(today);
+  requestPopup({ open: openDailyDigest, digest: true });
+}
+
+function markDigestShown(today) {
+  digestShownToday = today;
+  try { writeJsonAtomic(DIGEST_FILE, { shown: today }); } catch (err) { console.error('[digest] save failed:', err.message); }
+}
+
+// The tray item and the socket: open it again at will, or close it when it is up.
+function toggleDigest(source) {
+  if (alertPopup && !alertPopup.isDestroyed() && popupShowing && popupShowing.digest) {
+    alertPopup.close();
+    return;
+  }
+  if (digestTimer) { clearTimeout(digestTimer); digestTimer = null; }
+  markDigestShown(localDateStr(new Date()));
+  console.log('[digest] opened from ' + source);
+  requestPopup({ open: openDailyDigest, digest: true });
 }
 
 function openDailyDigest() {
@@ -2013,12 +2102,11 @@ function openDailyDigest() {
 
   // Show as a popup
   if (alertPopup && !alertPopup.isDestroyed()) { alertPopup.close(); alertPopup = null; }
-  const display = getWidgetDisplay();
-  const wa = display.workArea; const sw = wa.x + wa.width; const sh = wa.y + wa.height;
   // Height adapts to the number of digest lines so nothing clips and no dead space
   const popH = Math.min(380, 168 + lines.length * 20);
+  alertPopupPlace = () => popupBounds(340, popH);
   alertPopup = new BrowserWindow({
-    width: 340, height: popH, x: sw - 360, y: sh - popH - 20,
+    ...alertPopupPlace(),
     frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true, show: false,
     ...POPUP_GLASS_OPTS_FN(), ...QUIET_POPUP_OPTS,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
@@ -2217,6 +2305,42 @@ const POPUP_GAP_MS = 300;
 let popupQueue = [];
 let popupShowing = null;
 
+// --- Where a popup goes, and again after a display change ---
+// A popup born seconds before GNOME flips the scale keeps the pixel size of the
+// old scale while its content follows the new one: twice the window, half of it
+// empty, spilling onto the next screen (2026-11-11). Every popup remembers how
+// it chose its place; after a display change the place is chosen again and
+// setBounds hands Chromium the size under the scale that applies now.
+let alertPopupPlace = null;
+let lastDisplayChangeAt = 0;
+const replaceTimers = [];
+
+// Bottom-right corner of the widget's screen, inside its work area.
+function popupBounds(width, height) {
+  const wa = getWidgetDisplay().workArea;
+  return { x: wa.x + wa.width - width - 20, y: wa.y + wa.height - height - 20, width, height };
+}
+
+function replaceAlertPopup(why) {
+  if (!alertPopup || alertPopup.isDestroyed() || !alertPopupPlace) return;
+  const b = alertPopupPlace();
+  alertPopup.setBounds(b);
+  if (!alertPopup.isVisible()) alertPopup.showInactive();
+  console.log('[popup] placed again after ' + why + ': ' + JSON.stringify(b));
+}
+
+function watchDisplaysForPopups() {
+  for (const ev of ['display-added', 'display-removed', 'display-metrics-changed']) {
+    screen.on(ev, () => {
+      lastDisplayChangeAt = Date.now();
+      // Once when the change lands and once more when the scale has followed
+      // it (XSETTINGS runs a few seconds behind the monitor layout).
+      while (replaceTimers.length) clearTimeout(replaceTimers.pop());
+      for (const ms of [1500, 8000]) replaceTimers.push(setTimeout(() => replaceAlertPopup(ev), ms));
+    });
+  }
+}
+
 function openQueuedPopup(entry) {
   popupShowing = entry;
   entry.open();
@@ -2271,16 +2395,12 @@ function openReminderPopup(evt, stage) {
     alertPopup = null;
   }
 
-  const display = getWidgetDisplay();
-  const wa = display.workArea;
   const popW = 300;
   const popH = 300;
+  alertPopupPlace = () => popupBounds(popW, popH);
 
   alertPopup = new BrowserWindow({
-    width: popW,
-    height: popH,
-    x: wa.x + wa.width - popW - 20,
-    y: wa.y + wa.height - popH - 20,
+    ...alertPopupPlace(),
     frame: false,
     resizable: false,
     skipTaskbar: true,
@@ -2663,17 +2783,13 @@ function openAlertPopup(label, pct, resetsAt, accountLabel) {
     alertPopup = null;
   }
 
-  const display = getWidgetDisplay();
-  const wa = display.workArea; const sw = wa.x + wa.width; const sh = wa.y + wa.height;
   const popW = 320;
   const popH = 200;
   const severity = pct >= 85 ? 'danger' : 'warning';
+  alertPopupPlace = () => popupBounds(popW, popH);
 
   alertPopup = new BrowserWindow({
-    width: popW,
-    height: popH,
-    x: sw - popW - 20,
-    y: sh - popH - 20,
+    ...alertPopupPlace(),
     frame: false,
     resizable: false,
     skipTaskbar: true,
@@ -3349,6 +3465,8 @@ function buildUsagePayload() {
       login: loginInfoFor(ctx, now, env),
     })),
     activeAccountId: activeAccountId,
+    activeFollowsCli: activeFollowsCli(),
+    cliMove: cliMoveAvailable(),
     cliLauncher: cliLauncherName(),
   };
 }
@@ -3782,6 +3900,7 @@ function buildTrayMenu() {
     { label: 'Dashboard', click: () => openDashboard() },
     { label: 'Tasks', click: () => openTasksWindow() },
     { label: 'Relax now', click: () => relaxNow('tray') },
+    { label: 'Daily digest', click: () => toggleDigest('tray') },
     { type: 'separator' },
     { label: 'Quit', click: () => { if (win && !win.isDestroyed()) win.destroy(); app.quit(); } },
   ]);
@@ -4231,9 +4350,15 @@ function startToggleSocket() {
     try { fs.unlinkSync(sockPath); } catch { /* not there */ }
     const server = net.createServer((c) => {
       c.on('data', (buf) => {
-        // `relax` starts a break (for a keyboard shortcut); anything else toggles.
-        if (String(buf).trim() === 'relax') {
+        // `relax` starts a break, `digest` opens or closes the daily digest (for
+        // keyboard shortcuts); anything else toggles the widget.
+        const cmd = String(buf).trim();
+        if (cmd === 'relax') {
           relaxNow('socket');
+          return;
+        }
+        if (cmd === 'digest') {
+          toggleDigest('socket');
           return;
         }
         if (win && !win.isDestroyed()) {
@@ -6005,6 +6130,12 @@ if (!gotLock) {
 // AppImage rather than the mounted binary, which disappears with the launcher.
 let scaleStart = null;
 let scaleRelaunchAt = displayScale.lastRelaunchFromArgv(process.argv);
+// True while this process runs at a scale other than the one it started at,
+// i.e. until the guard above relaunches it.
+function scaleMismatch() {
+  if (scaleStart == null) return false;
+  return Math.abs(screen.getPrimaryDisplay().scaleFactor - scaleStart) >= 0.01;
+}
 function checkDisplayScale(reason) {
   if (process.platform !== 'linux' || scaleStart == null) return;
   const nowScale = screen.getPrimaryDisplay().scaleFactor;
@@ -6092,6 +6223,7 @@ app.whenReady().then(() => {
   // One line per start, so the journal says which build is running.
   console.log('[app] Claude Meter ' + (APP_VERSION || app.getVersion()) + ' started');
   startDisplayScaleGuard();
+  watchDisplaysForPopups();
   // Ensure data directory exists
   try { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); } catch { /* ignore */ }
 
@@ -6109,6 +6241,8 @@ app.whenReady().then(() => {
   }
   if (extendRepeatingEvents()) saveCalendarEvents();
   updateStreak();
+  // Before the accounts: the active one is where a launcher session is.
+  cliActiveAccount = readCliActiveAccount();
   // Discover/merge accounts, then hydrate each one's cached usage + history
   initAccounts();
   for (const ctx of Object.values(accountCtx)) {
@@ -6205,16 +6339,16 @@ app.whenReady().then(() => {
     if (typeof id !== 'string' || !accountCtx[id]) return { success: false };
     const entry = accountList.find((a) => a.id === id);
     if (!entry || entry.enabled === false) return { success: false };
-    if (activeAccountId !== id) {
-      activeAccountId = id;
-      saveSettings();
-      const ctx = accountCtx[id];
-      updateTrayTooltip();
-      if (ctx.cachedUsage) updateTrayBadge(ctx.cachedUsage);
-      broadcastUsage();
-      syncIfStale(ctx);
-    }
+    // The pages do not offer the choice then; a stale page that still does is told no.
+    if (activeFollowsCli()) return { success: false, activeAccountId };
+    setActiveAccount(id);
     return { success: true, activeAccountId };
+  });
+  ipcMain.handle('move-cli-to-account', (event, id) => {
+    if (!isLocalSender(event)) return { ok: false, text: '', detail: '' };
+    const entry = typeof id === 'string' ? accountList.find((a) => a.id === id) : null;
+    if (!entry || entry.enabled === false || !accountCtx[id]) return { ok: false, text: 'Not moved', detail: '' };
+    return moveCliToAccount(id);
   });
   ipcMain.on('minimize-to-tray', (event) => {
     if (!isLocalSender(event)) return;

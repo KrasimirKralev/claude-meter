@@ -1,6 +1,6 @@
 {
   "name": "claude-usage-widget",
-  "version": "2.17.0",
+  "version": "2.17.3",
   "description": "Desktop widget for Claude usage + a planner (calendar, tasks, notes, habits).",
   "main": "main.js",
   "author": "Krasimir Kralev",
@@ -11,7 +11,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/display-scale.test.js test/usage-limits.test.js test/maps-lib.test.js test/widget-lib.test.js test/maps-view.test.js test/plan-lib.test.js test/notes-view.test.js test/smart-text.test.js test/calendar-lib.test.js test/safe-file.test.js",
+    "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/cli-account.test.js test/display-scale.test.js test/usage-limits.test.js test/maps-lib.test.js test/widget-lib.test.js test/maps-view.test.js test/plan-lib.test.js test/notes-view.test.js test/smart-text.test.js test/calendar-lib.test.js test/safe-file.test.js",
     "bundle:maps": "node scripts/bundle-maps.js",
     "build": "npm run bundle:maps && electron-builder",
     "build:win": "npm run bundle:maps && electron-builder --win",

@@ -34,4 +34,18 @@ function shouldRelaunch({ startScale, nowScale, breakRunning, lastRelaunchAt, no
   return true;
 }
 
-module.exports = { RELAUNCH_ARG, lastRelaunchFromArgv, shouldRelaunch };
+// A popup that can wait (the daily digest) must not be born while the monitors
+// are still changing: a window created seconds before GNOME flips the scale
+// keeps the old pixel size while its content follows the new one (2026-11-11,
+// dock at 18:46: the digest came up twice its size, half empty, across both
+// screens). How long to wait, 0 when it is quiet enough: fifteen seconds after
+// the process started, ten after the last display change.
+const QUIET_AFTER_START_MS = 15 * 1000;
+const QUIET_AFTER_CHANGE_MS = 10 * 1000;
+function quietWait({ now, startedAt, lastChangeAt }) {
+  const sinceStart = now - (startedAt || 0);
+  const sinceChange = lastChangeAt ? now - lastChangeAt : Infinity;
+  return Math.max(0, QUIET_AFTER_START_MS - sinceStart, QUIET_AFTER_CHANGE_MS - sinceChange);
+}
+
+module.exports = { RELAUNCH_ARG, lastRelaunchFromArgv, shouldRelaunch, quietWait };

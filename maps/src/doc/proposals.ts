@@ -298,7 +298,13 @@ export const bindAiProposal = (
   doc: MapDoc,
   ai: AiProposal,
   placeNew: (bubble: Bubble) => Bubble,
-): { proposal: Proposal; bubble?: Bubble; link?: MapDoc['links'][number] } | null => {
+): {
+  proposal: Proposal;
+  bubble?: Bubble;
+  link?: MapDoc['links'][number];
+  /** A waiting AI proposal this one supersedes: the model changed its mind while streaming. */
+  replaces?: Id;
+} | null => {
   const make = (body: Proposal['body']): Proposal => ({
     id: newId(),
     status: 'pending',
@@ -306,6 +312,8 @@ export const bindAiProposal = (
     body,
   });
   const duplicate = (test: (p: Proposal) => boolean): boolean => doc.proposals.some(test);
+  const waitingAi = (test: (p: Proposal) => boolean): Id | undefined =>
+    doc.proposals.find((p) => p.status === 'pending' && p.origin === 'ai' && test(p))?.id;
   switch (ai.kind) {
     case 'map-title':
       if (ai.title === doc.title || duplicate((p) => p.body.kind === 'map-title')) return null;
@@ -316,6 +324,14 @@ export const bindAiProposal = (
     case 'rename': {
       const bubble = liveBubble(doc, ai.bubble);
       if (!bubble || bubble.title === ai.title) return null;
+      const earlier = doc.proposals.find(
+        (p) =>
+          p.status === 'pending' &&
+          p.origin === 'ai' &&
+          p.body.kind === 'rename' &&
+          p.body.bubble === bubble.id,
+      );
+      if (earlier?.body.kind === 'rename' && earlier.body.title === ai.title) return null;
       return {
         proposal: make({
           kind: 'rename',
@@ -323,6 +339,7 @@ export const bindAiProposal = (
           title: ai.title,
           previous: bubble.title,
         }),
+        replaces: earlier?.id,
       };
     }
     case 'rewrite': {
@@ -377,14 +394,27 @@ export const bindAiProposal = (
     case 'label': {
       const link = doc.links.find((l) => l.id === ai.link && l.status !== 'rejected');
       if (!link || link.label === ai.label) return null;
-      if (duplicate((p) => p.status === 'pending' && p.body.kind === 'label' && p.body.link === link.id)) {
-        return null;
-      }
+      const same = (p: Proposal): boolean => p.body.kind === 'label' && p.body.link === link.id;
+      // A name from the local pass, or one the same as the waiting one, stays as it is.
+      const keeps = (p: Proposal): boolean =>
+        p.origin !== 'ai' || (p.body.kind === 'label' && p.body.label === ai.label);
+      if (duplicate((p) => p.status === 'pending' && same(p) && keeps(p))) return null;
       return {
         proposal: make({ kind: 'label', link: link.id, label: ai.label, previous: link.label ?? '' }),
+        replaces: waitingAi(same),
       };
     }
     case 'group': {
+      // Gathering words that are already on the map into a new box would show each of them twice.
+      const onMap = new Set(
+        doc.bubbles
+          .filter((b) => b.status !== 'rejected')
+          .flatMap((b) => [b.title, ...b.items.map((i) => i.text)])
+          .map((text) => text.trim().toLowerCase()),
+      );
+      if (ai.items.length > 0 && ai.items.every((text) => onMap.has(text.trim().toLowerCase()))) {
+        return null;
+      }
       const bubble = placeNew({
         id: newId(),
         kind: 'group',

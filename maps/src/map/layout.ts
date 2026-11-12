@@ -107,17 +107,97 @@ const buildRows = (bubbles: Bubble[]): Row[] => {
   return rows;
 };
 
+/** An arrow as the layout sees it: between two bubbles that stand on their own on the map. */
+export interface LayoutLink {
+  from: Id;
+  to: Id;
+  /** The line of `from` it leaves from. */
+  fromItem?: Id;
+}
+
+/** Room between a bubble and the column its lines point at: the turns, then the arrow's name. */
+export const FAN_GAP = 220;
+const FAN_ROW_GAP = 28;
+
+interface Fan {
+  source: Bubble;
+  /** In the order of the lines they are pointed at from. */
+  targets: Bubble[];
+}
+
+/**
+ * A bubble whose lines point at different things, such as a list of people each with their own
+ * facts, reads best as that list with what each line points at in one column beside it, in line
+ * order. Only things that nothing else claims, and that do not fan out themselves, join a column.
+ */
+const findFans = (free: Bubble[], links: LayoutLink[]): Fan[] => {
+  const byId = new Map(free.map((b) => [b.id, b]));
+  const lineLinks = (source: Bubble): LayoutLink[] =>
+    links.filter(
+      (l) =>
+        l.from === source.id &&
+        l.to !== source.id &&
+        byId.has(l.to) &&
+        source.items.some((i) => i.id === l.fromItem),
+    );
+  const fansOut = (b: Bubble): boolean =>
+    b.kind === 'group' && new Set(lineLinks(b).map((l) => l.fromItem)).size >= 2;
+  const claimed = new Set<Id>();
+  const fans: Fan[] = [];
+  const reading = [...free].sort(
+    (a, b) => sketchCentre(a) - sketchCentre(b) || a.sketch.x - b.sketch.x,
+  );
+  for (const source of reading) {
+    if (claimed.has(source.id) || !fansOut(source)) continue;
+    const line = (l: LayoutLink): number => source.items.findIndex((i) => i.id === l.fromItem);
+    const targets: Bubble[] = [];
+    const ordered = lineLinks(source).sort(
+      (a, b) =>
+        line(a) - line(b) ||
+        sketchCentre(byId.get(a.to) as Bubble) - sketchCentre(byId.get(b.to) as Bubble),
+    );
+    for (const link of ordered) {
+      const target = byId.get(link.to) as Bubble;
+      if (target.pinned || claimed.has(target.id) || fansOut(target) || targets.includes(target)) continue;
+      targets.push(target);
+    }
+    if (targets.length < 2) continue;
+    claimed.add(source.id);
+    targets.forEach((t) => claimed.add(t.id));
+    fans.push({ source, targets });
+  }
+  return fans;
+};
+
 export const layoutBubbles = (
   bubbles: Bubble[],
   heightOf: (bubble: Bubble, width: number) => number,
   childrenOf: ChildrenOf = none,
+  links: LayoutLink[] = [],
 ): Map<Id, Placement> => {
   const placements = new Map<Id, Placement>();
   const free = bubbles.filter((b) => !b.pinned);
   const mapWidth = (bubble: Bubble): number => mapWidthOf(bubble, childrenOf);
-  const rows = buildRows(free);
+  const fans = findFans(free, links);
+  const fanOf = new Map(fans.map((fan) => [fan.source.id, fan]));
+  const inColumn = new Set(fans.flatMap((fan) => fan.targets.map((t) => t.id)));
+  // A fan takes part in the rows as one block: the bubble, the gap, and its column.
+  const columnWidth = (fan: Fan): number => Math.max(...fan.targets.map(mapWidth));
+  const columnHeight = (fan: Fan): number =>
+    fan.targets.reduce((sum, t) => sum + heightOf(t, mapWidth(t)), 0) +
+    FAN_ROW_GAP * (fan.targets.length - 1);
+  const unitWidth = (bubble: Bubble): number => {
+    const fan = fanOf.get(bubble.id);
+    return fan ? mapWidth(bubble) + FAN_GAP + columnWidth(fan) : mapWidth(bubble);
+  };
+  const unitHeight = (bubble: Bubble): number => {
+    const own = heightOf(bubble, mapWidth(bubble));
+    const fan = fanOf.get(bubble.id);
+    return fan ? Math.max(own, columnHeight(fan)) : own;
+  };
+  const rows = buildRows(free.filter((b) => !inColumn.has(b.id)));
   const widths = rows.map((row) =>
-    row.bubbles.reduce((sum, b) => sum + mapWidth(b), (row.bubbles.length - 1) * COLUMN_GAP),
+    row.bubbles.reduce((sum, b) => sum + unitWidth(b), (row.bubbles.length - 1) * COLUMN_GAP),
   );
   const widest = Math.max(0, ...widths);
   // Where across the sketch each bubble was drawn, from 0 at the far left to 1 at the far right.
@@ -138,13 +218,13 @@ export const layoutBubbles = (
       let x = 0;
       for (const bubble of row.bubbles) {
         xs.push(x);
-        x += mapWidth(bubble) + gap;
+        x += unitWidth(bubble) + gap;
       }
     } else {
       // Aim each bubble at its drawn position, then push apart any that would touch.
       let next = 0;
       row.bubbles.forEach((bubble) => {
-        const w = mapWidth(bubble);
+        const w = unitWidth(bubble);
         const aim = across(bubble) * widest - w / 2;
         const x = Math.max(next, Math.min(widest - w, aim));
         xs.push(x);
@@ -153,7 +233,7 @@ export const layoutBubbles = (
       // Pushed past the right edge: walk back from the right, keeping the gaps.
       let limit = widest;
       for (let i = row.bubbles.length - 1; i >= 0; i -= 1) {
-        const w = mapWidth(row.bubbles[i]);
+        const w = unitWidth(row.bubbles[i]);
         xs[i] = Math.max(0, Math.min(xs[i], limit - w));
         limit = xs[i] - COLUMN_GAP;
       }
@@ -161,8 +241,23 @@ export const layoutBubbles = (
     let rowHeight = 0;
     row.bubbles.forEach((bubble, i) => {
       const w = mapWidth(bubble);
-      placements.set(bubble.id, { x: Math.round(xs[i]), y: Math.round(y), w });
-      rowHeight = Math.max(rowHeight, heightOf(bubble, w));
+      const height = unitHeight(bubble);
+      const fan = fanOf.get(bubble.id);
+      if (!fan) {
+        placements.set(bubble.id, { x: Math.round(xs[i]), y: Math.round(y), w });
+      } else {
+        // The list sits level with the middle of its column, so its arrows fan out both ways.
+        const own = heightOf(bubble, w);
+        placements.set(bubble.id, { x: Math.round(xs[i]), y: Math.round(y + (height - own) / 2), w });
+        const columnX = xs[i] + w + FAN_GAP;
+        let ty = y + (height - columnHeight(fan)) / 2;
+        for (const target of fan.targets) {
+          const tw = mapWidth(target);
+          placements.set(target.id, { x: Math.round(columnX), y: Math.round(ty), w: tw });
+          ty += heightOf(target, tw) + FAN_ROW_GAP;
+        }
+      }
+      rowHeight = Math.max(rowHeight, height);
     });
     y += rowHeight + ROW_GAP;
   });

@@ -74,13 +74,16 @@ describe('nested proposals', () => {
     expect(label).toBe('Link: frame one → Untitled');
   });
 
-  it('takes an AI arrow name only for an arrow that exists, once', () => {
+  it('takes an AI arrow name only for an arrow that exists, one waiting name at a time', () => {
     const doc = { ...fixture(), proposals: [] };
     expect(bindAiProposal(doc, { kind: 'label', link: 'nope', label: 'x' }, (b) => b)).toBeNull();
     const bound = bindAiProposal(doc, { kind: 'label', link: 'l', label: 'builds' }, (b) => b);
     expect(bound?.proposal.body).toEqual({ kind: 'label', link: 'l', label: 'builds', previous: '' });
     const twice = { ...doc, proposals: [bound!.proposal] };
-    expect(bindAiProposal(twice, { kind: 'label', link: 'l', label: 'helps' }, (b) => b)).toBeNull();
+    expect(bindAiProposal(twice, { kind: 'label', link: 'l', label: 'builds' }, (b) => b)).toBeNull();
+    expect(bindAiProposal(twice, { kind: 'label', link: 'l', label: 'helps' }, (b) => b)?.replaces).toBe(
+      bound?.proposal.id,
+    );
   });
 
   it('takes an AI arrow from a line only when that line is in that box', () => {

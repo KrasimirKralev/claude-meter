@@ -10,6 +10,8 @@ export interface DigitizeBubble {
   parent?: string;
   /** Pen colour of the drawn shape, when it had one. */
   color?: string;
+  /** Typed with no shape drawn around it: a word or a list standing on its own. */
+  free?: true;
   /** Where it was drawn, on a 0 to 100 grid over the whole sketch, so the model can read layout. */
   at?: { x: number; y: number; w: number; h: number };
 }

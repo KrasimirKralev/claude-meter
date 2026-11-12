@@ -5,6 +5,12 @@ var usageData = null;      // the ACTIVE account's usage — drives planner + ch
 var accountsData = [];     // every enabled account, from the usage-update payload
 var activeAccountId = null;
 var cliLauncherName = 'Claude Code';
+// True while a launcher says where the CLI is: Active follows it, and no row is a button.
+var activeFollowsCli = false;
+// True when a click on a row can ask the launcher to move every session to that account.
+var cliMove = false;
+var cliMoving = false;
+var moveNotice = null;    // { text, detail, error, until }: the answer to a click, where "Synced" stands
 var historyData = [];
 var chartDays = 7;
 var alertThresholds = { session: 80, weekAll: 90, weekSonnet: 90 };
@@ -195,8 +201,17 @@ function buildBoardRow(acc, index) {
     + (state.status === 'limited' || state.status === 'error' || state.status === 'out' ? ' stale-row' : ''));
   var name = acc.name || acc.id;
   row.title = name + (acc.email ? ' · ' + acc.email : '') + (acc.error ? '\n' + acc.error : '');
-  row.setAttribute('tabindex', '0');
-  row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
+  if (cliMove) {
+    row.setAttribute('tabindex', '0');
+    if (chosen) row.setAttribute('aria-current', 'true');
+    row.title += '\nClick: move every ' + cliLauncherName + ' session to this account';
+  } else if (activeFollowsCli) {
+    row.classList.add('fixed');
+    if (chosen) row.setAttribute('aria-current', 'true');
+  } else {
+    row.setAttribute('tabindex', '0');
+    row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
+  }
   row.setAttribute('data-id', acc.id);
 
   var who = el('th');
@@ -207,11 +222,11 @@ function buildBoardRow(acc, index) {
   cell.appendChild(bullet);
   var label = el('div', 'who');
   var nameEl = el('div', 'name', name);
-  if (chosen) nameEl.appendChild(el('em', null, 'Active'));
-  if (acc.cliActive) {
-    var cli = el('em', 'cli', 'CLI');
-    cli.title = cliLauncherName + ' is running on this account';
-    nameEl.appendChild(cli);
+  if (chosen) {
+    // One badge: where the CLI runs IS the active account.
+    var badge = el('em', null, 'Active');
+    if (acc.cliActive) badge.title = cliLauncherName + ' is running on this account';
+    nameEl.appendChild(badge);
   }
   label.appendChild(nameEl);
   var login = acc.login;
@@ -260,15 +275,18 @@ function buildBoardRow(acc, index) {
   boardCells.push({ acc: acc, cell: refill });
 
   var choose = function() {
+    if (cliMove) { moveCli(acc); return; }
     if (acc.id === activeAccountId || !window.dashboardAPI.setActiveAccount) return;
     window.dashboardAPI.setActiveAccount(acc.id);
   };
-  row.addEventListener('click', choose);
-  row.addEventListener('keydown', function(e) {
-    if (e.target !== row || (e.key !== 'Enter' && e.key !== ' ')) return;
-    e.preventDefault();
-    choose();
-  });
+  if (cliMove || !activeFollowsCli) {
+    row.addEventListener('click', choose);
+    row.addEventListener('keydown', function(e) {
+      if (e.target !== row || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      choose();
+    });
+  }
   return row;
 }
 
@@ -440,6 +458,15 @@ function mapButton(map, extraClass) {
   return button;
 }
 
+function mapRow(map) {
+  var button = el('button', 'maprow');
+  button.title = 'Open ' + map.title;
+  button.appendChild(el('b', null, map.title));
+  button.appendChild(el('span', null, WL.editedText(map.updatedAt, Date.now())));
+  button.addEventListener('click', function() { window.dashboardAPI.openMaps({ id: map.id }); });
+  return button;
+}
+
 function renderMaps() {
   document.getElementById('railMaps').hidden = !mapsState.available;
   document.getElementById('overviewMapsPanel').hidden = !mapsState.available;
@@ -450,6 +477,14 @@ function renderMaps() {
     return;
   }
   mapsState.maps.slice(0, 2).forEach(function(map) { overview.appendChild(mapButton(map)); });
+  // Every older map keeps a line of its own: a map must never drop out of sight because two newer ones exist.
+  var older = mapsState.maps.slice(2);
+  if (older.length === 0) return;
+  var rest = el('div', 'maprest');
+  rest.setAttribute('role', 'group');
+  rest.setAttribute('aria-label', 'Older maps');
+  older.forEach(function(map) { rest.appendChild(mapRow(map)); });
+  overview.appendChild(rest);
 }
 
 // The map and notes pages lie over these boxes in their own views, so main needs to know where they are.
@@ -486,8 +521,35 @@ window.dashboardAPI.getMapsState().then(takeMapsState);
 window.dashboardAPI.onMapsUpdate(takeMapsState);
 document.getElementById('overviewNewMap').addEventListener('click', function() { window.dashboardAPI.openMaps({ new: true }); });
 
+// A click on a row: the launcher moves every running session to that account.
+// Active is not set here; it follows the launcher's record when the move lands.
+function moveCli(acc) {
+  if (cliMoving || !window.dashboardAPI.moveCliToAccount) return;
+  cliMoving = true;
+  showMoveNotice({ ok: true, text: 'Moving ' + cliLauncherName + ' to ' + (acc.name || acc.id) + '…' }, 25000);
+  window.dashboardAPI.moveCliToAccount(acc.id).then(function(res) {
+    cliMoving = false;
+    showMoveNotice(res && res.text ? res : { ok: false, text: 'The move did not answer' }, 10000);
+  }, function() {
+    cliMoving = false;
+    showMoveNotice({ ok: false, text: 'The move failed' }, 10000);
+  });
+}
+
+function showMoveNotice(res, ms) {
+  moveNotice = { text: res.text, detail: res.detail || '', error: !res.ok, until: Date.now() + ms };
+  renderSyncText();
+  setTimeout(renderSyncText, ms + 50);
+}
+
 function renderSyncText() {
   var sync = document.getElementById('dashSync');
+  if (moveNotice && Date.now() < moveNotice.until) {
+    sync.textContent = moveNotice.text;
+    sync.title = moveNotice.detail || moveNotice.text;
+    return;
+  }
+  if (moveNotice) { moveNotice = null; sync.title = ''; }
   if (!usageData || !usageData.syncTime) { sync.textContent = ''; return; }
   var ago = Math.round((Date.now() - usageData.syncTime) / 60000);
   sync.textContent = ago < 1 ? 'Synced just now' : 'Synced ' + ago + 'm ago';
@@ -1631,6 +1693,8 @@ window.dashboardAPI.onUsageUpdate(function(payload) {
     if (typeof payload.cliLauncher === 'string' && payload.cliLauncher) {
       cliLauncherName = payload.cliLauncher;
     }
+    activeFollowsCli = payload.activeFollowsCli === true;
+    cliMove = payload.cliMove === true;
     activeAccountId = payload.activeAccountId
       || (accountsData[0] ? accountsData[0].id : null);
     var active = null;

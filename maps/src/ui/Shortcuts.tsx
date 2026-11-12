@@ -13,6 +13,7 @@ const LIST: [string, string][] = [
   ['V  P  E  T  A  L', 'Select, pen, eraser, text, arrow, lasso'],
   ['H', 'Hand: drag to move around, and the wheel scrolls'],
   ['Arrow keys', 'Move around, a screenful with Shift'],
+  ['M', 'Your maps: type to find one, Enter opens it'],
   ['Enter', 'Type where the pointer is'],
   ['D', 'Digitize'],
   ['1  2  3', 'Sketch, Both, Map'],
@@ -86,6 +87,11 @@ const handleKey = (e: KeyboardEvent): void => {
       break;
     case 'KeyH':
       setTool('hand');
+      break;
+    case 'KeyM':
+      // The menu focuses its search box at once, and this letter must not land in it.
+      e.preventDefault();
+      store.setUi({ menu: menu === 'maps' ? null : 'maps' });
       break;
     case 'ArrowLeft':
     case 'ArrowRight':

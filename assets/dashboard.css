@@ -79,6 +79,9 @@ h1 { font-size: 24px; font-weight: 900; color: var(--text); }
 .board tbody tr:focus-visible { outline: 2px solid var(--ink); outline-offset: -3px; }
 .board tbody tr:hover th, .board tbody tr:hover td { background: var(--surface2); }
 .board tbody tr.active th, .board tbody tr.active td { background: var(--yellow); color: var(--on-candy); }
+/* Active follows the CLI: nothing to pick, so a row is not a button. */
+.board tbody tr.fixed { cursor: default; }
+.board tbody tr.fixed:not(.active):hover th, .board tbody tr.fixed:not(.active):hover td { background: none; }
 .account-cell { display: flex; align-items: center; gap: 10px; }
 .bullet {
   width: 26px; height: 26px; display: grid; place-items: center; flex-shrink: 0;
@@ -91,7 +94,6 @@ h1 { font-size: 24px; font-weight: 900; color: var(--text); }
 .who { min-width: 0; }
 .name { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 800; white-space: nowrap; }
 .name em { font-style: normal; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 5px; background: var(--ink); color: var(--surface); }
-.name em.cli, tr.active .name em.cli { background: none; color: inherit; box-shadow: inset 0 0 0 1.5px currentColor; }
 tr.active .name em { background: var(--on-candy); color: #ffffff; }
 .login-line { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 tr.active .login-line, tr.active .tpct small, tr.active .tfable span { color: var(--on-yellow-dim); }
@@ -182,6 +184,13 @@ tr.active .cells.hot u.on { background: #c8232b; }
 .thumb { width: 92px; height: 55px; flex-shrink: 0; border-radius: 8px; }
 .maplist { display: flex; flex-direction: column; gap: 8px; }
 .maps-empty { font-size: 13.5px; color: var(--text-dim); padding: 4px 0; }
+/* Every map past the two newest, one line each. The list scrolls once it is longer than six. */
+.maprest { display: flex; flex-direction: column; max-height: 156px; overflow-y: auto; padding-top: 6px; border-top: 2px solid var(--ink); }
+.maprow { all: unset; box-sizing: border-box; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-height: 26px; padding: 3px 0; cursor: pointer; font-size: 12.5px; color: var(--text-dim); min-width: 0; }
+.maprow b { min-width: 0; color: var(--text); font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.maprow span { flex: none; white-space: nowrap; }
+.maprow:hover b { text-decoration: underline; }
+.maprow:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; border-radius: 6px; }
 
 /* A segmented choice: chart range, alert preset. */
 .seg { display: inline-flex; background: var(--surface); border: 2px solid var(--ink); border-radius: var(--r-sm); overflow: hidden; }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createExampleDoc } from '../doc/example.ts';
 import { NESTED_STROKES, NESTED_TEXTS } from './nested-sketch.fixture.ts';
+import { RELATIONS_STROKES, RELATIONS_TEXTS } from './relations-sketch.fixture.ts';
 import { recognize } from './recognize.ts';
 import type { InStroke, InText } from './recognize.ts';
 
@@ -275,5 +276,110 @@ describe('a heading set to the left', () => {
         .groups[0].title;
     expect(at(20)).toBe('Back end');
     expect(at(32)).toBe('');
+  });
+});
+
+describe('a sketch of people and what each one has: arrows from single names, no circles', () => {
+  const result = recognize(RELATIONS_STROKES, RELATIONS_TEXTS);
+  const people = result.groups.findIndex((g) => g.items.some((i) => i.text === 'Anton'));
+  const nameOf = (index: number): string => {
+    const group = result.groups[index];
+    return group.title || group.items.map((i) => i.text).join(' + ');
+  };
+
+  it('reads the box drawn with three strokes as one box holding the three names', () => {
+    expect(people).toBeGreaterThanOrEqual(0);
+    expect(result.groups[people].items.map((i) => i.text)).toEqual(['Anton', 'Boris', 'Ivan']);
+    expect(result.groups[people].title).toBe('');
+    expect(result.groups[people].strokeIds).toEqual(expect.arrayContaining(['ink1', 'ink2', 'ink5']));
+  });
+
+  it('keeps a line set a little apart above a tight pair as an equal, for the AI to judge', () => {
+    const facts = result.groups.find((g) => g.items.some((i) => i.text === 'Taxi driver'));
+    expect(facts?.title).toBe('');
+    expect(facts?.items.map((i) => i.text)).toEqual(['Secondary school', 'Taxi driver', 'Builder']);
+  });
+
+  it('turns a single word that an arrow points at into an object, not a loose note', () => {
+    expect(result.notes).toHaveLength(0);
+    for (const word of ['Skoda', 'Mercedes', 'Opel Tigra']) {
+      const object = result.groups.find((g) => g.title === word);
+      expect(object?.items).toEqual([]);
+    }
+  });
+
+  it('starts every arrow at the name it was drawn from', () => {
+    const read = result.links.map((l) => {
+      const start = l.fromItem === undefined ? 'box' : result.groups[l.from].items[l.fromItem].text;
+      return `${l.from === people ? '' : '?'}${start} > ${nameOf(l.to)}`;
+    });
+    expect(read.sort()).toEqual([
+      'Anton > Secondary school + Taxi driver + Builder',
+      'Anton > Skoda',
+      'Boris > Mercedes',
+      'Boris > Secondary school + Software engineer',
+      'Ivan > Engineer + Secondary school',
+      'Ivan > Opel Tigra',
+    ]);
+  });
+});
+
+describe('objects and lines as arrow ends', () => {
+  const arrow = (id: string, ...xy: number[]): InStroke => ({ ...line(id, ...xy), arrow: true });
+
+  it('starts an arrow at a typed line inside a box when it leaves from that line', () => {
+    const result = recognize(
+      [rect('box', 0, 0, 300, 200), rect('goal', 600, 0, 200, 120), arrow('a', 150, 112, 598, 60)],
+      [text('t1', 40, 40, 'One'), text('t2', 40, 100, 'Two'), text('t3', 620, 30, 'Goal')],
+    );
+    const box = result.groups.findIndex((g) => g.items.some((i) => i.text === 'Two'));
+    expect(result.links).toEqual([expect.objectContaining({ from: box, fromItem: 1 })]);
+  });
+
+  it('starts an arrow at a circled line when it leaves from the edge of the circle', () => {
+    const result = recognize(
+      [
+        rect('box', 0, 0, 400, 240),
+        rect('ring', 30, 90, 150, 44),
+        rect('goal', 700, 0, 200, 120),
+        arrow('a', 186, 110, 698, 60),
+      ],
+      [text('t1', 40, 40, 'One'), text('t2', 40, 100, 'Two'), text('t3', 720, 30, 'Goal')],
+    );
+    const box = result.groups.findIndex((g) => g.items.some((i) => i.text === 'Two'));
+    const two = result.groups[box].items.findIndex((i) => i.text === 'Two');
+    expect(result.links).toEqual([expect.objectContaining({ from: box, fromItem: two })]);
+  });
+
+  it('starts an arrow at the whole box when it leaves from the edge', () => {
+    const result = recognize(
+      [rect('box', 0, 0, 300, 200), rect('goal', 600, 0, 200, 120), arrow('a', 300, 160, 598, 60)],
+      [text('t1', 40, 40, 'One'), text('t2', 40, 100, 'Two'), text('t3', 620, 30, 'Goal')],
+    );
+    expect(result.links).toHaveLength(1);
+    expect(result.links[0].fromItem).toBeUndefined();
+  });
+
+  it('links two free words with an arrow between them', () => {
+    const result = recognize(
+      [arrow('a', 140, 30, 400, 30)],
+      [text('t1', 0, 20, 'Coffee'), text('t2', 420, 20, 'Energy')],
+    );
+    expect(result.links).toHaveLength(1);
+    const ends = [result.links[0].from, result.links[0].to].map((i) => result.groups[i].title);
+    expect(ends).toEqual(['Coffee', 'Energy']);
+  });
+
+  it('keeps a typed column of names together when the spacing drifts a little', () => {
+    const result = recognize(
+      [],
+      [
+        { id: 'a', x: 404, y: 297, w: 60, h: 23, text: 'Anton' },
+        { id: 'b', x: 413, y: 352, w: 60, h: 23, text: 'Boris' },
+        { id: 'c', x: 417, y: 416, w: 60, h: 23, text: 'Ivan' },
+      ],
+    );
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0].items.map((i) => i.text)).toEqual(['Anton', 'Boris', 'Ivan']);
   });
 });

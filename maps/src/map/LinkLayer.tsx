@@ -2,7 +2,7 @@ import { isShownIn, shownRoot } from '../doc/ops.ts';
 import type { Box, Bubble, InkColor } from '../doc/types.ts';
 import { useStore } from '../state/store.ts';
 import { bubbleBox, lineBox } from './boxes.ts';
-import { routeAnchored } from './links.ts';
+import { assignLanes, routeAnchored } from './links.ts';
 
 /** Arrows drawn in a pen colour keep it, heads included. Each colour gets its own heads. */
 const COLORED: InkColor[] = ['yellow', 'pink', 'aqua', 'peach', 'periwinkle'];
@@ -21,7 +21,7 @@ export const LinkLayer = () => {
   const boxOf = (bubble: Bubble): Box => bubbleBox(bubbles, bubble, key, measured);
   const rootOf = (bubble: Bubble): Bubble => shownRoot(bubbles, bubble, shown);
 
-  const shownLinks = links.flatMap((link) => {
+  const drawn = links.flatMap((link) => {
     if (link.status === 'rejected') return [];
     if (view === 'map' && link.status !== 'accepted') return [];
     const from = bubbles.find((b) => b.id === link.from);
@@ -35,8 +35,24 @@ export const LinkLayer = () => {
       .map(boxOf);
     const fromLine = link.fromItem ? lineBox(bubbles, from, link.fromItem, key, measured) : null;
     const toLine = link.toItem ? lineBox(bubbles, to, link.toItem, key, measured) : null;
-    return [{ link, route: routeAnchored(boxOf(from), boxOf(to), fromLine, toLine, others) }];
+    return [{ link, a: boxOf(from), b: boxOf(to), fromLine, toLine, others }];
   });
+
+  const lanes = assignLanes(
+    drawn.map(({ link, a, b, fromLine, toLine }) => ({
+      id: link.id,
+      from: link.from,
+      a,
+      b,
+      fromLine,
+      toLine,
+    })),
+  );
+
+  const shownLinks = drawn.map(({ link, a, b, fromLine, toLine, others }) => ({
+    link,
+    route: routeAnchored(a, b, fromLine, toLine, others, lanes.get(link.id)),
+  }));
 
   return (
     <>

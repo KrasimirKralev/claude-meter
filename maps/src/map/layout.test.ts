@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Bubble } from '../doc/types.ts';
 import { BUBBLE_W, layoutBubbles, mapWidth, NEST_PAD, NOTE_W, WIDE_W } from './layout.ts';
-import { routeAnchored, routeLink } from './links.ts';
+import { assignLanes, routeAnchored, routeLink } from './links.ts';
 
 const bubble = (id: string, x: number, y: number, extra: Partial<Bubble> = {}): Bubble => ({
   id,
@@ -176,5 +176,99 @@ describe('arrows from one line', () => {
     const { d } = routeAnchored(box(0, 0), box(0, 400), line(60), null);
     expect(d.startsWith('M207 75')).toBe(true);
     expect(d.endsWith('393')).toBe(true);
+  });
+});
+
+describe('a bubble whose lines each point somewhere', () => {
+  const people = bubble('people', 300, 250, {
+    sketch: { x: 300, y: 250, w: 400, h: 300 },
+    items: [
+      { id: 'p1', text: 'Anton' },
+      { id: 'p2', text: 'Boris' },
+      { id: 'p3', text: 'Ivan' },
+    ],
+  });
+  const bubbles = [
+    people,
+    bubble('factsA', 850, 0, { items: [{ id: 'a1', text: 'Taxi driver' }] }),
+    bubble('carA', 1250, 150, { items: [] }),
+    bubble('factsB', 1150, 350, { items: [{ id: 'b1', text: 'Engineer' }] }),
+    bubble('carB', 800, 500, { items: [] }),
+    bubble('carC', 0, 750, { items: [] }),
+    bubble('factsC', 300, 800, { items: [{ id: 'c1', text: 'Builder' }] }),
+    bubble('other', 1200, 1400),
+  ];
+  const links = [
+    { from: 'people', fromItem: 'p1', to: 'factsA' },
+    { from: 'people', fromItem: 'p1', to: 'carA' },
+    { from: 'people', fromItem: 'p2', to: 'factsB' },
+    { from: 'people', fromItem: 'p2', to: 'carB' },
+    { from: 'people', fromItem: 'p3', to: 'carC' },
+    { from: 'people', fromItem: 'p3', to: 'factsC' },
+  ];
+  const height = (b: Bubble): number => (b.items.length === 0 ? 60 : 180);
+  const placed = layoutBubbles(bubbles, height, undefined, links);
+  const targets = ['factsA', 'carA', 'factsB', 'carB', 'carC', 'factsC'];
+
+  it('puts everything its lines point at in one column to its right', () => {
+    const source = placed.get('people')!;
+    const xs = new Set(targets.map((id) => placed.get(id)!.x));
+    expect(xs.size).toBe(1);
+    expect([...xs][0]).toBeGreaterThan(source.x + source.w + 100);
+  });
+
+  it('orders that column by the line each arrow leaves from, without overlaps', () => {
+    const ys = targets.map((id) => placed.get(id)!.y);
+    for (let i = 1; i < ys.length; i += 1) {
+      const above = bubbles.find((b) => b.id === targets[i - 1])!;
+      expect(ys[i]).toBeGreaterThanOrEqual(ys[i - 1] + height(above));
+    }
+  });
+
+  it('places what is not part of it below', () => {
+    const lowest = Math.max(
+      ...targets.map((id) => placed.get(id)!.y + height(bubbles.find((b) => b.id === id)!)),
+    );
+    expect(placed.get('other')!.y).toBeGreaterThanOrEqual(lowest);
+  });
+
+  it('leaves a single arrow from one line to the drawn layout', () => {
+    const one = layoutBubbles(bubbles, height, undefined, links.slice(0, 2));
+    expect(one.get('carC')!.x).toBeLessThan(one.get('factsC')!.x);
+  });
+});
+
+describe('several arrows leaving one side of a bubble', () => {
+  it('turn in their own lanes, so they never run on top of each other', () => {
+    const box = (x: number, y: number) => ({ x, y, w: 200, h: 200 });
+    const line = { x: 0, y: 60, w: 200, h: 30 };
+    const first = routeAnchored(box(0, 0), box(500, 300), line, null, [], 0).d;
+    const second = routeAnchored(box(0, 0), box(500, 600), line, null, [], 1).d;
+    const turn = (d: string): string => d.split('L')[1].split(' ')[0];
+    expect(turn(first)).not.toBe(turn(second));
+    expect(Number(turn(first))).toBeLessThan(Number(turn(second)));
+  });
+});
+
+describe('assignLanes', () => {
+  const box = (x: number, y: number) => ({ x, y, w: 200, h: 100 });
+  const line = { x: 0, y: 140, w: 200, h: 30 };
+  const arrow = (id: string, b: { x: number; y: number; w: number; h: number }) => ({
+    id,
+    from: 'people',
+    a: box(0, 100),
+    b,
+    fromLine: line,
+    toLine: null,
+  });
+
+  it('gives arrows leaving one side of a bubble lanes of their own, the furthest innermost', () => {
+    const lanes = assignLanes([arrow('near', box(500, 60)), arrow('far', box(500, -300))]);
+    expect(lanes.get('far')).toBe(0);
+    expect(lanes.get('near')).toBe(1);
+  });
+
+  it('leaves a lone arrow on its ordinary route', () => {
+    expect(assignLanes([arrow('only', box(500, 300))]).size).toBe(0);
   });
 });

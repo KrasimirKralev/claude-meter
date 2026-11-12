@@ -5,7 +5,7 @@ import { hasRealTitle, isShownIn, shownParent, shownRoot, unionBoxes, visibleBub
 import type { Box, Bubble, InkColor, MapDoc } from '../doc/types.ts';
 import { childrenIn } from '../map/boxes.ts';
 import { childRows, mapWidth, NEST_GAP, noteTail } from '../map/layout.ts';
-import { routeAnchored } from '../map/links.ts';
+import { assignLanes, routeAnchored } from '../map/links.ts';
 import { BUBBLE_INK, MAP_STYLES } from '../map/styles.ts';
 import type { MapStyle } from '../map/styles.ts';
 import { INK_PALETTES } from '../canvas/ink.ts';
@@ -244,7 +244,7 @@ const buildScene = (doc: MapDoc): Scene => {
   roots.filter((b) => b.kind === 'group').forEach(place);
   roots.filter((b) => b.kind === 'note').forEach(place);
 
-  const links = doc.links.flatMap((link) => {
+  const drawnLinks = doc.links.flatMap((link) => {
     if (link.status !== 'accepted') return [];
     const a = boxes.get(link.from);
     const b = boxes.get(link.to);
@@ -260,8 +260,23 @@ const buildScene = (doc: MapDoc): Scene => {
       .flatMap((r) => (boxes.has(r.id) ? [boxes.get(r.id) as Box] : []));
     const fromLine = link.fromItem ? (lineBoxes.get(link.fromItem) ?? null) : null;
     const toLine = link.toItem ? (lineBoxes.get(link.toItem) ?? null) : null;
-    const route = routeAnchored(a, b, fromLine, toLine, others);
-    return [{ d: route.d, label: link.label, mid: route.mid, color: link.color ? pens[link.color] : theme.line }];
+    return [{ link, a, b, fromLine, toLine, others }];
+  });
+  // The same lanes as on screen, so the picture shows the arrows the way the map does.
+  const lanes = assignLanes(
+    drawnLinks.map(({ link, a, b, fromLine, toLine }) => ({
+      id: link.id,
+      from: link.from,
+      a,
+      b,
+      fromLine,
+      toLine,
+    })),
+  );
+  const links = drawnLinks.map(({ link, a, b, fromLine, toLine, others }) => {
+    const route = routeAnchored(a, b, fromLine, toLine, others, lanes.get(link.id));
+    const color = link.color ? pens[link.color] : theme.line;
+    return { d: route.d, label: link.label, mid: route.mid, color };
   });
 
   const body = unionBoxes([...boxes.values()]) ?? { x: 0, y: 0, w: 600, h: 300 };

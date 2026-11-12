@@ -79,5 +79,6 @@ test('dragging with the hand over the sketch leaves no ink', async ({ page }) =>
   await page.mouse.up();
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');
-  expect(await inkPixels(page)).toBe(ink);
+  // The canvas repaints on the next frame, which a busy machine can delay.
+  await expect.poll(() => inkPixels(page)).toBe(ink);
 });
