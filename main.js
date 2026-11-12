@@ -1,6 +1,7 @@
 const {
   app,
   BrowserWindow,
+  WebContentsView,
   dialog,
   globalShortcut,
   Tray,
@@ -9,9 +10,11 @@ const {
   nativeImage,
   screen,
   powerMonitor,
+  powerSaveBlocker,
   shell,
   clipboard,
   Notification,
+  session,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -19,7 +22,7 @@ const http = require('http');
 const https = require('https');
 const os = require('os');
 const url = require('url');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const crypto = require('crypto');
 
 // --- HTML entity escaping (prevent injection in OAuth callback responses) ---
@@ -42,6 +45,8 @@ try {
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 const BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-bounds.json');
+const DIGEST_FILE = path.join(CLAUDE_DIR, 'usage-widget-digest.json'); // the day the digest was last shown
+const PROCESS_STARTED_AT = Date.now();
 const SETTINGS_FILE = path.join(CLAUDE_DIR, 'usage-widget-settings.json');
 const TASKS_FILE = path.join(CLAUDE_DIR, 'usage-widget-tasks.json');
 const TASKS_BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-tasks-bounds.json');
@@ -52,6 +57,17 @@ const NOTES_APP_BOUNDS_FILE = path.join(CLAUDE_DIR, 'usage-widget-notes-app-boun
 const NOTES_ARCHIVE_FILE = path.join(CLAUDE_DIR, 'usage-widget-notes-archive.json');
 const POMO_FILE = path.join(CLAUDE_DIR, 'usage-widget-pomo.json');
 const HABITS_FILE = path.join(CLAUDE_DIR, 'usage-widget-habits.json');
+// Train · Read/Write · Relax are shown. `learning` (Learn, until 2026-09-29) is
+// kept in the file and still accepted from older phone builds, never shown.
+const HABIT_KINDS = ['training', 'reading', 'relax', 'learning'];
+// Relax is never set by hand - not from the widget, the dashboard, the phone or
+// the watch: the app ticks it when the day's last break (4 of 4) completes.
+const AUTO_HABIT = 'relax';
+// Phone/watch sync (claude-meter-hub): the hub drops one op file per change into
+// INBOX_DIR and never writes the files above; see "Phone/watch sync" below.
+const INBOX_DIR = path.join(CLAUDE_DIR, 'usage-widget-inbox');
+const ALIVE_FILE = path.join(CLAUDE_DIR, 'usage-widget-alive.json');
+const CALENDAR_FEED_FILE = path.join(CLAUDE_DIR, 'usage-widget-calendar-feed.json');
 const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const USAGE_API = 'https://api.anthropic.com/api/oauth/usage';
 const BETA_HEADER = 'oauth-2025-04-20';
@@ -66,7 +82,7 @@ let fileWatcher = null;
 let fileChangeTimer = null;
 let dashWin = null;
 let lastAutoSync = 0;
-const MIN_SYNC_INTERVAL = 60000; // don't hit API more than once per minute (was 5min)
+const REMINDER_CHECK_MS = 5 * 60 * 1000;
 // Track all intervals/timers that need cleanup on quit
 const cleanupTimers = [];
 let credsWatchers = [];
@@ -91,7 +107,7 @@ const ALERT_THRESHOLDS = { session: 80, weekAll: 90, weekSonnet: 90 };
 let trayHasAlert = false;
 let tasksWin = null;
 let tasks = [];
-let habits = { training: [], reading: [], learning: [] };
+let habits = emptyHabits();
 let tasksSnapped = 'left';
 let calendarSnapped = 'right';
 let tasksUserHidden = false; // true when user manually closed/hid the tasks window
@@ -105,8 +121,9 @@ let tasksMovedTimer = null;  // debounced snap timer — cleared on hide to prev
 let claudeStatus = null; // { indicator, description, updatedAt }
 let calWin = null;
 let notesWin = null;
+let mapsFeature = null;  // the Maps section's view and server, set up with the rest of the IPC
+let notesView = null;  // the Plan section's Notes page, set up with the rest of the IPC
 let notesAppWin = null; // standalone Notes app window (own taskbar identity)
-let addEventWin = null;
 let calendarEvents = [];
 let reminderTimers = {};
 let streakData = { current: 0, lastDate: null }; // task completion streak
@@ -210,7 +227,6 @@ function broadcastPomo(persistNow) {
   }
 }
 const STREAK_FILE = path.join(CLAUDE_DIR, 'usage-widget-streak.json'); // id → setTimeout handle
-let firedReminders = new Set(); // event IDs whose reminder already fired this session
 
 // --- Secondary account state ---
 // --- Pomodoro popup ---
@@ -239,6 +255,7 @@ function showPomoPopup(type) {
     alwaysOnTop: true,
     show: false,
     ...POPUP_GLASS_OPTS_FN(),
+    ...QUIET_POPUP_OPTS,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -250,7 +267,7 @@ function showPomoPopup(type) {
 
   pomoPopupWin.on('closed', () => { pomoPopupWin = null; });
   pomoPopupWin.once('ready-to-show', () => {
-    if (pomoPopupWin && !pomoPopupWin.isDestroyed()) pomoPopupWin.show();
+    if (pomoPopupWin && !pomoPopupWin.isDestroyed()) pomoPopupWin.showInactive();
   });
   pomoPopupWin.loadFile(path.join(__dirname, 'pomo-popup.html'));
 
@@ -259,6 +276,495 @@ function showPomoPopup(type) {
     pomoPopupWin.webContents.send('pomo-popup-data', { type });
     sendCurrentTheme(pomoPopupWin);
   });
+}
+
+// --- Relax breaks ---
+// Four short breaks a day (usage-widget-relax.json): a 30 s heads-up, then a
+// calm full-screen scene on every display with generated music, GNOME banners
+// held off meanwhile. relax.js has the schedule and the "is he free" checks.
+const relaxLib = require('./relax');
+// Which place a break shows: one of relax-biomes/, random, never one of the last five.
+const relaxBiomes = require('./relax-biomes');
+const RELAX_BIOMES_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-biomes.json');
+const RELAX_CONFIG_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax.json');
+const RELAX_STATE_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-state.json');
+// His own music, if he drops tracks in ~/Music/relax: played instead of the
+// generated lo-fi (config musicSource), shuffled without repeats.
+const relaxMusic = require('./relax-music');
+const displayScale = require('./display-scale');
+const { pathToFileURL } = require('url');
+const { createMapsFeature } = require('./maps-view');
+const { isMapsUrl } = require('./maps-lib');
+const { createNotesView } = require('./notes-view');
+const { readJsonOr, writeJsonAtomic, writeTextAtomic } = require('./safe-file');
+const { parseSmartText } = require('./smart-text');
+const calendarLib = require('./calendar-lib');
+const widgetLib = require('./widget-lib');
+const cliAccount = require('./cli-account');
+const RELAX_MUSIC_DIR = path.join(os.homedir(), 'Music', 'relax');
+const RELAX_MUSIC_FILE = path.join(CLAUDE_DIR, 'usage-widget-relax-music.json');
+const RELAX_TICK_MS = 5000;
+const RELAX_LOCK_POLL_MS = 15000;
+const RELAX_BANNER_RETRY_MS = 60 * 1000;
+const RELAX_EARLY_FADE_MS = 1200;
+const RELAX_HABIT_RETRY_MS = 60 * 1000;
+let relaxConfig = relaxLib.normalizeConfig(null);
+let relaxConfigMtime = -1;
+let relaxState = null;
+let relaxChecking = false;
+let relaxRestoring = false;
+let relaxBannerRetryAt = 0;
+let relaxHabitRetryAt = 0;
+let relaxHeadsUp = null; // { slot, startsAt, timer, win }
+let relaxActive = null;  // { slot, source, startedAt, endsAt, durationMs, windows, blocker, timer, lockTimer, ending }
+
+function relaxLog(msg) { console.log('[relax] ' + msg); }
+
+function relaxToday() { return relaxLib.localDateStr(new Date()); }
+
+function relaxSave() {
+  try {
+    // The hub shows the phone and the watch "Relax 2/4" from this file alone.
+    relaxState.target = relaxLib.dailyTarget(relaxConfig);
+    relaxLib.saveState(RELAX_STATE_FILE, relaxState);
+    return true;
+  } catch (err) {
+    relaxLog('could not save ' + RELAX_STATE_FILE + ': ' + err.message);
+    return false;
+  }
+}
+
+// An edit to the config applies on the next tick, no restart needed.
+function relaxReloadConfig() {
+  let mtime = 0;
+  try { mtime = fs.statSync(RELAX_CONFIG_FILE).mtimeMs; } catch { mtime = 0; }
+  if (mtime === relaxConfigMtime) return;
+  const r = relaxLib.loadConfig(RELAX_CONFIG_FILE);
+  if (r.error) relaxLog(r.error);
+  relaxConfig = r.config;
+  try { relaxConfigMtime = fs.statSync(RELAX_CONFIG_FILE).mtimeMs; } catch { relaxConfigMtime = 0; }
+  relaxLog('config: ' + (relaxConfig.enabled ? relaxConfig.times.join(', ') : 'schedule off')
+    + ', ' + relaxConfig.minutes + ' min');
+  if (!relaxState) return;
+  if (relaxState.target !== relaxLib.dailyTarget(relaxConfig)) relaxSave();
+  broadcastRelax();
+}
+
+function relaxRollover() {
+  const today = relaxToday();
+  if (relaxState && relaxState.date === today) return;
+  relaxState = relaxLib.normalizeState(relaxState, today);
+  relaxSave();
+  broadcastRelax();
+}
+
+function relaxViewNow() {
+  relaxRollover();
+  let extra = null;
+  if (relaxActive) extra = { phase: 'active', endsAt: relaxActive.endsAt };
+  else if (relaxHeadsUp) extra = { phase: 'headsup', startsAt: relaxHeadsUp.startsAt };
+  return relaxLib.relaxView(relaxConfig, relaxState, Date.now(), extra);
+}
+
+function broadcastRelax() {
+  const view = relaxViewNow();
+  if (win && !win.isDestroyed()) win.webContents.send('relax-update', view);
+  // The Habits tab shows today's count on the Relax calendar.
+  if (dashWin && !dashWin.isDestroyed()) dashWin.webContents.send('relax-update', view);
+}
+
+// Relax is ticked for the day once the day's count reaches its target - never on
+// an earlier break, never un-ticked. Asked again every tick, so a habits file
+// that could not be written, or a lowered target, is caught up within seconds.
+function relaxSyncHabit() {
+  if (!relaxState || Date.now() < relaxHabitRetryAt) return;
+  const day = relaxState.date;
+  if (!relaxLib.habitDue(relaxConfig, relaxState, habits[AUTO_HABIT].indexOf(day) >= 0)) return;
+  const progress = relaxState.done + '/' + relaxLib.dailyTarget(relaxConfig);
+  if (setHabitDay(AUTO_HABIT, day, true, true)) {
+    relaxLog('relax habit ticked for ' + day + ' (' + progress + ')');
+  } else {
+    relaxHabitRetryAt = Date.now() + RELAX_HABIT_RETRY_MS;
+    relaxLog('could not tick the relax habit (' + progress + '): habits file not saved; retrying in a minute');
+  }
+}
+
+// -> null when now is a good moment, else why not. Every call asks again: a
+// call or a meeting can start at any time, nothing here is cached.
+async function relaxBusyReason(checkIdle) {
+  const now = Date.now();
+  if (pomoState === 'running') return 'pomodoro focus running';
+  const evt = relaxLib.busyEvent(calendarEvents, now, relaxConfig.minutes * 60 * 1000);
+  if (evt) return 'calendar event at ' + evt.time;
+  const [idleMs, locked, mic] = await Promise.all([
+    checkIdle ? relaxLib.probeIdleMs() : Promise.resolve(null),
+    relaxLib.probeLocked(),
+    relaxLib.probeMic(),
+  ]);
+  if (locked === true) return 'screen locked';
+  if (checkIdle) {
+    let idle = idleMs;
+    // Off GNOME there is no Mutter to ask; Electron's own figure is right there.
+    if (idle === null) idle = powerMonitor.getSystemIdleTime() * 1000;
+    if (idle > relaxLib.IDLE_LIMIT_MS) return 'away (idle ' + Math.round(idle / 60000) + ' min)';
+  }
+  if (mic.captures === null) {
+    if (process.platform === 'linux') relaxLog('microphone check unavailable: ' + mic.error);
+  } else if (mic.captures.length > 0) {
+    return 'microphone in use (' + mic.captures.map((c) => c.app).join(', ') + ')';
+  }
+  return null;
+}
+
+function relaxDefer(slot, reason) {
+  const entry = Object.assign({}, relaxState.slots[slot]);
+  entry.status = 'waiting';
+  entry.nextAt = Date.now() + relaxLib.RETRY_MS;
+  entry.reason = reason;
+  relaxState.slots[slot] = entry;
+  relaxSave();
+  relaxLog('slot ' + slot + ' not now: ' + reason + '; next try '
+    + new Date(entry.nextAt).toTimeString().slice(0, 5));
+  broadcastRelax();
+}
+
+function relaxTick() {
+  relaxRollover();
+  relaxReloadConfig();
+  relaxRetryBannerRestore();
+  relaxSyncHabit();
+  if (relaxActive || relaxHeadsUp || relaxChecking || !relaxConfig.enabled) return;
+  const plan = relaxLib.planSlots(relaxConfig, relaxState, Date.now());
+  if (plan.changed) {
+    relaxSave();
+    broadcastRelax();
+  }
+  if (!plan.due) return;
+  const slot = plan.due;
+  relaxChecking = true;
+  relaxBusyReason(true).then((reason) => {
+    relaxChecking = false;
+    if (relaxActive || relaxHeadsUp) return;
+    if (reason) relaxDefer(slot, reason);
+    else relaxShowHeadsUp(slot);
+  }, (err) => {
+    relaxChecking = false;
+    relaxDefer(slot, 'check failed: ' + (err && err.message));
+  });
+}
+
+function relaxShowHeadsUp(slot) {
+  const startsAt = Date.now() + relaxLib.HEADS_UP_MS;
+  const display = getWidgetDisplay();
+  const wa = display.workArea;
+  const w = 300;
+  const h = 204; // a second row of buttons since Start now
+  // Top centre: the bottom-right corner belongs to Telegram's and GNOME's own
+  // pop-ups, which sit above every normal window (seen covering it in testing).
+  const toast = new BrowserWindow({
+    width: w,
+    height: h,
+    x: Math.round(wa.x + (wa.width - w) / 2),
+    y: wa.y + 16,
+    frame: false,
+    resizable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    ...POPUP_GLASS_OPTS_FN(),
+    ...QUIET_POPUP_OPTS,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'relax-preload.js'),
+    },
+  });
+  applyLinuxPopupTransparency(toast);
+  relaxHeadsUp = { slot, startsAt, win: toast, timer: setTimeout(() => relaxBeginSlot(slot), relaxLib.HEADS_UP_MS) };
+  // Shown without focus: he may be typing, and the keystrokes must stay where they are.
+  toast.once('ready-to-show', () => { if (!toast.isDestroyed()) toast.showInactive(); });
+  toast.loadFile(path.join(__dirname, 'relax-toast.html'));
+  toast.webContents.once('did-finish-load', () => {
+    if (toast.isDestroyed()) return;
+    sendCurrentTheme(toast);
+    toast.webContents.send('relax-toast-data', {
+      startsAt,
+      minutes: relaxConfig.minutes,
+      music: relaxConfig.music,
+      done: relaxState.done,
+      total: relaxLib.dailyTarget(relaxConfig),
+    });
+  });
+  relaxLog('heads-up for ' + slot);
+  broadcastRelax();
+}
+
+function relaxCloseHeadsUp() {
+  const h = relaxHeadsUp;
+  if (!h) return;
+  relaxHeadsUp = null;
+  clearTimeout(h.timer);
+  if (h.win && !h.win.isDestroyed()) h.win.close();
+}
+
+async function relaxBeginSlot(slot) {
+  if (!relaxHeadsUp || relaxHeadsUp.slot !== slot) return;
+  relaxCloseHeadsUp();
+  // Thirty seconds is enough for a call to start or a meeting to be added.
+  let reason;
+  try {
+    reason = await relaxBusyReason(false);
+  } catch (err) {
+    reason = 'check failed: ' + (err && err.message);
+  }
+  if (relaxActive) return;
+  if (reason) relaxDefer(slot, reason);
+  else relaxStartBreak(slot, 'schedule');
+}
+
+// "Relax now" from the widget, the tray or the socket: no checks, he asked.
+function relaxNow(source) {
+  if (relaxActive) return;
+  const slot = relaxHeadsUp ? relaxHeadsUp.slot : null;
+  relaxCloseHeadsUp();
+  relaxStartBreak(slot, source);
+}
+
+function relaxOpenWindow(display, primary) {
+  const b = display.bounds;
+  const w = new BrowserWindow({
+    x: b.x,
+    y: b.y,
+    width: b.width,
+    height: b.height,
+    frame: false,
+    // Must stay resizable: Mutter refuses fullscreen to a fixed-size window
+    // (tested - with resizable:false the top bar stayed over the scene).
+    resizable: true,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreen: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    // Transparent, so the fade in and out shows his own windows through it.
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
+    title: 'Relax',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'relax-preload.js'),
+      autoplayPolicy: 'no-user-gesture-required',
+      backgroundThrottling: false,
+    },
+  });
+  w.setAlwaysOnTop(true, 'screen-saver');
+  w.setVisibleOnAllWorkspaces(true);
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  w.webContents.on('will-navigate', (e) => e.preventDefault());
+  // Alt+F4 or a crashed page ends the break (uncounted) instead of leaving a hole.
+  w.on('close', (e) => {
+    if (relaxActive && relaxActive.windows.indexOf(w) >= 0 && !relaxActive.ending) {
+      e.preventDefault();
+      relaxEndEarly('window closed');
+    }
+  });
+  w.webContents.on('render-process-gone', () => relaxEndEarly('page crashed'));
+  w.once('ready-to-show', () => {
+    if (w.isDestroyed()) return;
+    if (primary) {
+      w.show();
+      w.focus(); // Esc has to reach the page
+    } else {
+      w.showInactive();
+    }
+  });
+  w.loadFile(path.join(__dirname, 'relax.html'));
+  w.webContents.once('did-finish-load', () => {
+    const a = relaxActive;
+    if (w.isDestroyed() || !a || a.windows.indexOf(w) < 0) return;
+    w.webContents.send('relax-start', {
+      endsAt: a.endsAt,
+      durationMs: a.durationMs,
+      fadeMs: relaxLib.FADE_MS,
+      primary,
+      music: relaxConfig.music,
+      musicSource: a.musicSource,
+      breathing: relaxConfig.breathing,
+      display: b,
+      biome: a.biome,
+    });
+  });
+  return w;
+}
+
+async function relaxStartBreak(slot, source) {
+  if (relaxActive) return;
+  relaxReloadConfig();
+  const durationMs = Math.round(relaxConfig.minutes * 60 * 1000);
+  const a = {
+    slot, source, startedAt: 0, endsAt: 0, durationMs, ddterm: null,
+    windows: [], blocker: null, timer: null, lockTimer: null, ending: false,
+  };
+  relaxActive = a;
+  await relaxBannersOff();
+  // Asked before the break takes the keyboard: afterwards it is too late to know.
+  if (process.platform === 'linux') a.ddterm = await relaxLib.ddtermOpen();
+  if (relaxActive !== a || a.ending) return;
+  const displays = screen.getAllDisplays();
+  const primaryId = screen.getPrimaryDisplay().id;
+  a.startedAt = Date.now();
+  a.endsAt = a.startedAt + durationMs;
+  a.biome = relaxBiomes.nextBiome(RELAX_BIOMES_FILE, { log: relaxLog }); // the same place on every screen
+  a.musicSource = relaxConfig.music
+    ? relaxMusic.chooseSource(relaxConfig.musicSource, relaxMusic.listTracks(RELAX_MUSIC_DIR)) : 'off';
+  for (const d of displays) a.windows.push(relaxOpenWindow(d, d.id === primaryId));
+  try {
+    a.blocker = powerSaveBlocker.start('prevent-display-sleep');
+  } catch (err) {
+    relaxLog('could not keep the screen awake: ' + err.message);
+  }
+  a.timer = setTimeout(relaxComplete, durationMs);
+  a.lockTimer = setInterval(() => {
+    relaxLib.probeLocked().then((locked) => { if (locked === true) relaxEndEarly('screen locked'); });
+  }, RELAX_LOCK_POLL_MS);
+  relaxLog('break started (' + source + (slot ? ', slot ' + slot : '') + ', '
+    + relaxConfig.minutes + ' min, ' + displays.length + ' screen' + (displays.length === 1 ? '' : 's') + ', ' + a.biome
+    + ', music ' + a.musicSource + ')');
+  broadcastRelax();
+}
+
+// The countdown reached zero: this is the moment the break counts.
+function relaxComplete() {
+  const a = relaxActive;
+  if (!a || a.ending) return;
+  a.ending = true;
+  relaxRollover();
+  const now = Date.now();
+  relaxState.done += 1;
+  relaxState.lastDoneAt = now;
+  if (a.slot) relaxState.slots[a.slot] = { status: 'done', at: now };
+  relaxSave();
+  relaxLog('break completed: ' + relaxState.done + '/' + relaxLib.dailyTarget(relaxConfig) + ' today');
+  // A completed break is a break: Relax now counts toward the target like a slot.
+  relaxHabitRetryAt = 0;
+  relaxSyncHabit();
+  relaxFinish(a, relaxLib.FADE_MS);
+}
+
+function relaxEndEarly(reason) {
+  const a = relaxActive;
+  if (!a || a.ending) return;
+  a.ending = true;
+  if (a.slot) {
+    relaxState.slots[a.slot] = { status: 'ended', at: Date.now(), reason };
+    relaxSave();
+  }
+  relaxLog('break ended early (' + reason + '), not counted');
+  relaxFinish(a, RELAX_EARLY_FADE_MS);
+}
+
+function relaxFinish(a, fadeMs) {
+  clearTimeout(a.timer);
+  clearInterval(a.lockTimer);
+  for (const w of a.windows) {
+    if (!w.isDestroyed()) w.webContents.send('relax-fade-out', { ms: fadeMs });
+  }
+  broadcastRelax();
+  setTimeout(() => {
+    for (const w of a.windows) {
+      if (!w.isDestroyed()) w.close();
+    }
+    if (a.blocker !== null && powerSaveBlocker.isStarted(a.blocker)) powerSaveBlocker.stop(a.blocker);
+    if (relaxActive === a) relaxActive = null;
+    relaxBannersRestore().then(() => broadcastRelax());
+    relaxReturnDdterm(a);
+  }, fadeMs + 150);
+}
+
+// Mutter hands the keyboard back to the window he was in, unless that was
+// ddterm, which hid itself when the break took focus: open it again.
+async function relaxReturnDdterm(a) {
+  if (a.ddterm !== true) return;
+  if (await relaxLib.ddtermOpen() !== false) return;
+  relaxLog(await relaxLib.ddtermActivate() ? 'ddterm was open before the break: shown again' : 'could not show ddterm again');
+}
+
+// GNOME banners off for the break. The value to restore is saved BEFORE the
+// change, so a crash mid-break is repaired on the next start.
+async function relaxBannersOff() {
+  if (process.platform !== 'linux') return;
+  const current = await relaxLib.getBanners();
+  if (current !== true) {
+    relaxLog('notification banners ' + (current === false ? 'already off' : 'unreadable') + ', left alone');
+    return;
+  }
+  relaxState.bannersRestore = true;
+  if (!relaxSave()) {
+    relaxLog('banners left on: the value to restore could not be saved');
+    relaxState.bannersRestore = null;
+    return;
+  }
+  relaxLog(await relaxLib.setBanners(false) ? 'notification banners off' : 'could not turn notification banners off');
+}
+
+async function relaxBannersRestore() {
+  if (typeof relaxState.bannersRestore !== 'boolean' || relaxRestoring) return;
+  relaxRestoring = true;
+  try {
+    const want = relaxState.bannersRestore;
+    if (await relaxLib.setBanners(want)) {
+      relaxState.bannersRestore = null;
+      relaxSave();
+      relaxLog('notification banners restored to ' + want);
+    } else {
+      relaxBannerRetryAt = Date.now() + RELAX_BANNER_RETRY_MS;
+      relaxLog('could not restore notification banners; retrying in a minute');
+    }
+  } finally {
+    relaxRestoring = false;
+  }
+}
+
+function relaxRetryBannerRestore() {
+  if (relaxActive || typeof relaxState.bannersRestore !== 'boolean' || Date.now() < relaxBannerRetryAt) return;
+  relaxBannersRestore();
+}
+
+function relaxInit() {
+  relaxReloadConfig();
+  relaxState = relaxLib.loadState(RELAX_STATE_FILE, relaxToday());
+  relaxSave();
+  // Still set from a break the app never finished (it crashed or was killed).
+  if (typeof relaxState.bannersRestore === 'boolean') {
+    relaxLog('restoring notification banners left off by an unfinished break');
+    relaxBannersRestore();
+  }
+}
+
+// On quit nothing async survives: close the break and put the banners back now.
+function relaxShutdown() {
+  relaxCloseHeadsUp();
+  const a = relaxActive;
+  if (a) {
+    a.ending = true;
+    clearTimeout(a.timer);
+    clearInterval(a.lockTimer);
+    for (const w of a.windows) { if (!w.isDestroyed()) w.destroy(); }
+    if (a.blocker !== null && powerSaveBlocker.isStarted(a.blocker)) powerSaveBlocker.stop(a.blocker);
+    relaxActive = null;
+  }
+  if (relaxState && typeof relaxState.bannersRestore === 'boolean') {
+    if (relaxLib.setBannersSync(relaxState.bannersRestore)) {
+      relaxState.bannersRestore = null;
+      relaxSave();
+    }
+  }
 }
 
 const SYNC_TIMEOUT_MS = 15000; // force-reset syncing flag after 15s
@@ -603,6 +1109,10 @@ function initAccounts() {
       || accountList[0];
     activeAccountId = preferred ? preferred.id : null;
   }
+  // Where a launcher session is wins over the stored choice. Only the id here:
+  // the callers redraw when the accounts' signature (it holds the id) changed.
+  const cliId = cliAccountId();
+  if (cliId) activeAccountId = cliId;
 }
 
 // --- Live account discovery ---
@@ -691,11 +1201,14 @@ function cliLauncherName() {
 // Re-read the marker; broadcast only when what we display actually changed.
 function refreshCliActiveAccount() {
   const next = readCliActiveAccount();
-  const beforeEmail = normalizeEmail(cliActiveAccount && cliActiveAccount.email);
+  const before = cliAccountId();
   const beforeLauncher = cliLauncherName();
-  const afterEmail = normalizeEmail(next && next.email);
+  const beforeManaged = !!cliActiveAccount;
   cliActiveAccount = next;
-  if (beforeEmail !== afterEmail || beforeLauncher !== cliLauncherName()) {
+  // Every read, not only when the e-mail moves: a session opening on the account
+  // a headless run had claimed changes nothing in the record but `session_dir`.
+  if (followCliAccount()) return; // it redrew everything
+  if (before !== cliAccountId() || beforeLauncher !== cliLauncherName() || beforeManaged !== !!cliActiveAccount) {
     updateTrayTooltip();
     broadcastUsage();
   }
@@ -719,10 +1232,72 @@ function startCliMarkerWatcher() {
   cleanupTimers.push(poll);
 }
 
+// The account a launcher session is on, or null. Headless runs rewrite the same
+// record without a session and are not followed (cli-account.js).
+function cliAccountId() {
+  return cliAccount.cliAccountId(cliActiveAccount, enabledAccounts());
+}
+
 function isCliActive(ctx) {
-  const marker = normalizeEmail(cliActiveAccount && cliActiveAccount.email);
-  if (!marker) return false;
-  return normalizeEmail(ctx.email) === marker;
+  return !!ctx && ctx.id === cliAccountId();
+}
+
+// One marker, not two: Active is where the CLI is. With a launcher on this
+// machine nobody picks the active account by hand; without one (no record at
+// all) a click on a row still does.
+function activeFollowsCli() {
+  return !!cliActiveAccount;
+}
+
+function setActiveAccount(id) {
+  if (activeAccountId === id || !accountCtx[id]) return false;
+  activeAccountId = id;
+  saveSettings();
+  const ctx = accountCtx[id];
+  updateTrayTooltip();
+  if (ctx.cachedUsage) updateTrayBadge(ctx.cachedUsage);
+  broadcastUsage();
+  syncIfStale(ctx);
+  return true;
+}
+
+// A click on an account asks the launcher to move every running session there.
+// The launcher's own helper does it (it imports the launcher: its lock, its
+// records, its log); the meter only runs it and shows the answer. Active is not
+// touched here - it moves when the launcher's record does.
+const CLI_MOVE_HELPER = path.join(os.homedir(), '.local', 'bin', 'clx-move');
+const CLI_MOVE_TIMEOUT_MS = 20 * 1000;
+let cliMoveBusy = false;
+
+function cliMoveAvailable() {
+  if (!activeFollowsCli()) return false;
+  try { return fs.statSync(CLI_MOVE_HELPER).isFile(); } catch { return false; }
+}
+
+function moveCliToAccount(id) {
+  const ctx = accountCtx[id];
+  const key = ctx ? cliAccount.launcherAccountKey(ctx.dir) : null;
+  if (!key || !cliMoveAvailable()) {
+    return Promise.resolve({ ok: false, text: 'Not moved: the launcher cannot be asked', detail: '' });
+  }
+  if (cliMoveBusy) return Promise.resolve({ ok: false, text: 'A move is already running', detail: '' });
+  cliMoveBusy = true;
+  return new Promise((resolve) => {
+    // No shell, a fixed program, one argument taken from a directory name.
+    execFile(CLI_MOVE_HELPER, [key], { timeout: CLI_MOVE_TIMEOUT_MS, maxBuffer: 256 * 1024 }, (err, stdout) => {
+      cliMoveBusy = false;
+      const result = cliAccount.readMoveResult(stdout);
+      if (!result && err) console.log('[cli-move] ' + (err.killed ? 'timed out' : String(err.message).slice(0, 200)));
+      refreshCliActiveAccount(); // the record moved with the sessions: follow it now
+      resolve(cliAccount.moveMessage(result));
+    });
+  });
+}
+
+// True when Active moved.
+function followCliAccount() {
+  const id = cliAccountId();
+  return id ? setActiveAccount(id) : false;
 }
 
 function enabledAccounts() {
@@ -758,46 +1333,43 @@ function activeHistory() {
 // our backoff, or every launch would spend a request on a throttled token.
 function loadAccountState(ctx) {
   try {
-    if (fs.existsSync(ctx.dataFile)) {
-      const data = JSON.parse(fs.readFileSync(ctx.dataFile, 'utf-8'));
-      ctx.cachedUsage = data.usage || null;
+    const data = readJsonOr(ctx.dataFile, null);
+    if (data) {
+      ctx.cachedUsage = usageLib.normalizeCached(data.usage || null);
       const until = Number(data.rateLimitUntil);
       if (Number.isFinite(until) && until > Date.now()) ctx.rateLimitUntil = until;
+      if (data.lastAlertedStep && typeof data.lastAlertedStep === 'object') {
+        for (const key of Object.keys(ctx.lastAlertedStep)) {
+          if (Number.isInteger(data.lastAlertedStep[key])) ctx.lastAlertedStep[key] = data.lastAlertedStep[key];
+        }
+      }
     }
   } catch { /* ignore */ }
 }
 
 function saveCachedUsage(ctx) {
   try {
-    fs.writeFileSync(ctx.dataFile, JSON.stringify({
+    writeJsonAtomic(ctx.dataFile, {
       lastSync: Date.now(),
       usage: ctx.cachedUsage,
       rateLimitUntil: ctx.rateLimitUntil || 0,
-    }, null, 2));
-  } catch { /* ignore */ }
+      // An alert already shown stays shown across a restart.
+      lastAlertedStep: ctx.lastAlertedStep,
+    });
+  } catch (err) { console.error('[usage] save failed:', err.message); }
 }
 
 // --- Usage history (per account) ---
 
 function loadHistory(ctx) {
-  try {
-    if (fs.existsSync(ctx.historyFile)) {
-      const data = JSON.parse(fs.readFileSync(ctx.historyFile, 'utf-8'));
-      if (data.version === 1 && Array.isArray(data.points)) {
-        return data.points;
-      }
-    }
-  } catch { /* ignore */ }
-  return [];
+  const data = readJsonOr(ctx.historyFile, null);
+  return data && data.version === 1 && Array.isArray(data.points) ? data.points : [];
 }
 
 function saveHistory(ctx) {
   try {
-    fs.writeFileSync(ctx.historyFile, JSON.stringify({
-      version: 1,
-      points: ctx.history,
-    }, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(ctx.historyFile, { version: 1, points: ctx.history });
+  } catch (err) { console.error('[history] save failed:', err.message); }
 }
 
 function appendHistory(ctx) {
@@ -805,9 +1377,11 @@ function appendHistory(ctx) {
   if (!usage) return;
   const point = {
     ts: Date.now(),
-    session: usage.session.pct,
-    weekAll: usage.weekAll.pct,
-    weekSonnet: usage.weekSonnet.pct,
+    // null = this plan has no such limit (Ultra has no 5-hour session); the
+    // charts draw a gap for it, never a 0 %.
+    session: usage.session ? usage.session.pct : null,
+    weekAll: usage.weekAll ? usage.weekAll.pct : null,
+    weekSonnet: usage.weekSonnet ? usage.weekSonnet.pct : null,
   };
 
   // Deduplicate: skip if values unchanged from last point
@@ -835,8 +1409,8 @@ const SAFE_HOTKEY_RE = /^(Ctrl|Alt|Shift|Super|Cmd|Command)(\+(Ctrl|Alt|Shift|Su
 
 function loadSettings() {
   try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+    const data = readJsonOr(SETTINGS_FILE, null);
+    if (data) {
       if (data.hotkey && typeof data.hotkey === 'string'
         && data.hotkey.length <= 50 && SAFE_HOTKEY_RE.test(data.hotkey)) {
         currentHotkey = data.hotkey;
@@ -852,6 +1426,7 @@ function loadSettings() {
           ALERT_THRESHOLDS.weekSonnet = data.alertThresholds.weekSonnet;
         }
       }
+      if (data.calendarMigrated) calendarMigrated = true;
       if (data.theme && THEMES[data.theme]) {
         currentTheme = data.theme;
       }
@@ -887,9 +1462,8 @@ function saveSettings() {
         weekSonnet: ALERT_THRESHOLDS.weekSonnet,
       },
     };
-    if (currentTheme && currentTheme !== 'dark') {
-      obj.theme = currentTheme;
-    }
+    if (currentTheme) obj.theme = currentTheme;
+    if (calendarMigrated) obj.calendarMigrated = true;
     if (accountList.length > 0) {
       obj.accounts = accountList.map((a) => ({
         id: a.id, name: a.name, autoName: a.autoName, dir: a.dir, enabled: a.enabled !== false,
@@ -897,7 +1471,7 @@ function saveSettings() {
       obj.activeAccountId = activeAccountId;
     }
     if (primaryAccountName) obj.primaryAccount = primaryAccountName;
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(obj, null, 2));
+    writeJsonAtomic(SETTINGS_FILE, obj);
   } catch (err) { console.error('[settings] Save failed:', err.message); }
 }
 
@@ -905,8 +1479,8 @@ function saveSettings() {
 
 function loadTasks() {
   try {
-    if (fs.existsSync(TASKS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8'));
+    const data = readJsonOr(TASKS_FILE, null);
+    if (data) {
       return Array.isArray(data.tasks) ? data.tasks : [];
     }
   } catch { /* ignore */ }
@@ -915,30 +1489,40 @@ function loadTasks() {
 
 function saveTasks() {
   try {
-    fs.writeFileSync(TASKS_FILE, JSON.stringify({ tasks }, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(TASKS_FILE, { tasks });
+  } catch (err) { console.error('[tasks] save failed:', err.message); }
 }
 
 // --- Habits persistence ---
 
-function loadHabits() {
-  try {
-    if (fs.existsSync(HABITS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(HABITS_FILE, 'utf-8'));
-      return {
-        training: Array.isArray(data.training) ? data.training : [],
-        reading: Array.isArray(data.reading) ? data.reading : [],
-        learning: Array.isArray(data.learning) ? data.learning : [],
-      };
-    }
-  } catch { /* ignore */ }
-  return { training: [], reading: [], learning: [] };
+function emptyHabits() {
+  const out = {};
+  for (const kind of HABIT_KINDS) out[kind] = [];
+  return out;
 }
 
+function loadHabits() {
+  const out = emptyHabits();
+  try {
+    const data = readJsonOr(HABITS_FILE, null);
+    if (data) {
+      for (const kind of HABIT_KINDS) {
+        if (Array.isArray(data[kind])) out[kind] = data[kind];
+      }
+    }
+  } catch { /* ignore */ }
+  return out;
+}
+
+// -> false when the file could not be written: the change is only in memory.
 function saveHabits() {
   try {
-    fs.writeFileSync(HABITS_FILE, JSON.stringify(habits, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(HABITS_FILE, habits);
+    return true;
+  } catch (err) {
+    console.error('[habits] save failed:', err.message);
+    return false;
+  }
 }
 
 function broadcastHabits() {
@@ -948,6 +1532,32 @@ function broadcastHabits() {
   if (win && !win.isDestroyed()) {
     win.webContents.send('habits-update', habits);
   }
+}
+
+// One day of one habit. `done` undefined toggles (the widget's badge click, via
+// habits-toggle-day); true/false sets it (the phone: a retried or doubled request
+// must not flip it back). -> false when kind or date is not valid, when it is
+// Relax and the app itself (`byApp`, the 4th break) is not the one setting it,
+// or when the change could not be saved.
+function setHabitDay(kind, dateStr, done, byApp) {
+  if (HABIT_KINDS.indexOf(kind) < 0) return false;
+  if (kind === AUTO_HABIT && byApp !== true) return false;
+  if (!isValidDateStr(dateStr)) return false;
+  const arr = habits[kind];
+  const idx = arr.indexOf(dateStr);
+  const want = done === undefined ? idx === -1 : done === true;
+  if (want === (idx !== -1)) return true; // already so: nothing to save
+  if (want) arr.push(dateStr);
+  else arr.splice(idx, 1);
+  if (!saveHabits()) {
+    // Keep memory equal to the file: otherwise a retry would find "already so"
+    // and report a save that never happened.
+    if (want) arr.splice(arr.lastIndexOf(dateStr), 1);
+    else arr.splice(idx, 0, dateStr);
+    return false;
+  }
+  broadcastHabits();
+  return true;
 }
 
 function isValidDateStr(s) {
@@ -981,8 +1591,8 @@ function broadcastTasks() {
 
 function loadCalendarEvents() {
   try {
-    if (fs.existsSync(CALENDAR_FILE)) {
-      const data = JSON.parse(fs.readFileSync(CALENDAR_FILE, 'utf-8'));
+    const data = readJsonOr(CALENDAR_FILE, null);
+    if (data) {
       if (data.version === 1 && Array.isArray(data.events)) {
         return data.events;
       }
@@ -993,19 +1603,19 @@ function loadCalendarEvents() {
 
 function saveCalendarEvents() {
   try {
-    fs.writeFileSync(CALENDAR_FILE, JSON.stringify({
-      version: 1,
-      events: calendarEvents,
-    }, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(CALENDAR_FILE, { version: 1, events: calendarEvents });
+  } catch (err) { console.error('[calendar] save failed:', err.message); }
+  // Every local change and every Google sync comes through here: keep the
+  // phone hub's view of the calendar in step.
+  writeCalendarFeed();
 }
 
 // --- Google Calendar: config persistence ---
 
 function loadGcalConfig() {
   try {
-    if (fs.existsSync(GCAL_CONFIG_FILE)) {
-      const data = JSON.parse(fs.readFileSync(GCAL_CONFIG_FILE, 'utf-8'));
+    const data = readJsonOr(GCAL_CONFIG_FILE, null);
+    if (data) {
       if (Array.isArray(data.accounts)) return data.accounts;
     }
   } catch { /* ignore */ }
@@ -1014,15 +1624,16 @@ function loadGcalConfig() {
 
 function saveGcalConfig() {
   try {
-    fs.writeFileSync(GCAL_CONFIG_FILE, JSON.stringify({
+    // It holds login tokens, so only its owner may read it.
+    writeJsonAtomic(GCAL_CONFIG_FILE, {
       accounts: gcalAccounts.map((a) => ({
         email: a.email,
         accessToken: a.accessToken,
         refreshToken: a.refreshToken,
         expiresAt: a.expiresAt,
       })),
-    }, null, 2));
-  } catch { /* ignore */ }
+    });
+  } catch (err) { console.error('[gcal] save failed:', err.message); }
 }
 
 // --- Google Calendar: OAuth2 flow ---
@@ -1170,7 +1781,8 @@ function fetchGcalUserEmail(accessToken) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: 'www.googleapis.com',
-      path: '/oauth2/v2/userinfo?fields=email',
+      // The calendar scope can't read the profile, but the main calendar's id is the address.
+      path: '/calendar/v3/calendars/primary?fields=id',
       method: 'GET',
       headers: { 'Authorization': 'Bearer ' + accessToken },
     }, (res) => {
@@ -1179,7 +1791,9 @@ function fetchGcalUserEmail(accessToken) {
       res.on('end', () => {
         try {
           const data = JSON.parse(body);
-          resolve(data.email || 'Unknown');
+          // A rejection gives the account a numbered name, so a second one can't replace it.
+          if (res.statusCode === 200 && data.id) resolve(data.id);
+          else reject(new Error('Failed to get email'));
         } catch { reject(new Error('Failed to get email')); }
       });
     });
@@ -1282,41 +1896,8 @@ async function fetchGcalEvents(account, retryCount) {
         }
         try {
           var data = JSON.parse(body);
-          var events = (data.items || []).map(function (item) {
-            var startDate, startTime = null, duration = null;
-            if (item.start.dateTime) {
-              // Convert to local time using Date object (handles timezone offsets)
-              var localStart = new Date(item.start.dateTime);
-              startDate = localStart.getFullYear() + '-'
-                + String(localStart.getMonth() + 1).padStart(2, '0') + '-'
-                + String(localStart.getDate()).padStart(2, '0');
-              startTime = String(localStart.getHours()).padStart(2, '0') + ':'
-                + String(localStart.getMinutes()).padStart(2, '0');
-              if (item.end && item.end.dateTime) {
-                var localEnd = new Date(item.end.dateTime);
-                duration = Math.round((localEnd.getTime() - localStart.getTime()) / 60000);
-              }
-            } else {
-              // All-day event — date only
-              startDate = (item.start.date || '').slice(0, 10);
-            }
-            return {
-              id: 'gcal:' + account.email + ':' + item.id,
-              title: item.summary || '(No title)',
-              date: startDate,
-              time: startTime,
-              duration: duration,
-              color: item.colorId ? googleColorMap(item.colorId) : '#4285f4',
-              reminder: true,
-              recurrence: null,
-              recurringParentId: null,
-              googleEventId: item.id,
-              googleAccount: account.email,
-              googleLink: item.htmlLink || null,
-              meetLink: extractMeetLink(item),
-              createdAt: Date.now(),
-              isGoogleEvent: true,
-            };
+          var events = (data.items || []).flatMap(function (item) {
+            return calendarLib.mapGoogleItem(item, account.email);
           });
           resolve(events);
         } catch (_e) { reject(new Error('Invalid Calendar response')); }
@@ -1328,46 +1909,33 @@ async function fetchGcalEvents(account, retryCount) {
   });
 }
 
-// Extract the joinable meeting URL from a Google Calendar event:
-// Meet's hangoutLink → conferenceData video entry point → known-provider URL in location/description
-function extractMeetLink(item) {
-  if (item.hangoutLink) return item.hangoutLink;
-  const eps = item.conferenceData && item.conferenceData.entryPoints;
-  if (Array.isArray(eps)) {
-    const video = eps.find((e) => e && e.entryPointType === 'video' && e.uri);
-    if (video) return video.uri;
-  }
-  const RX = /https:\/\/[^\s<>"']*(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|teams\.live\.com|webex\.com|whereby\.com|meet\.jit\.si)[^\s<>"']*/i;
-  for (const field of [item.location, item.description]) {
-    if (typeof field === 'string') {
-      const m = field.match(RX);
-      if (m) return m[0];
-    }
-  }
-  return null;
-}
-
 // Any https URL in free text (lets local events carry a pasted meeting link in the title)
 function firstUrlInText(s) {
   const m = typeof s === 'string' && s.match(/https:\/\/[^\s<>"']+/);
   return m ? m[0] : null;
 }
 
+// Anyone can send an invite, so an address in a synced title is only words.
 function eventJoinLink(evt) {
-  return (evt && (evt.meetLink || firstUrlInText(evt.title))) || null;
-}
-
-function googleColorMap(colorId) {
-  // Google Calendar event color IDs → hex
-  const colors = {
-    '1': '#7986cb', '2': '#33b679', '3': '#8e24aa', '4': '#e67c73',
-    '5': '#f6bf26', '6': '#f4511e', '7': '#039be5', '8': '#616161',
-    '9': '#3f51b5', '10': '#0b8043', '11': '#d50000',
-  };
-  return colors[colorId] || '#4285f4';
+  if (!evt) return null;
+  return evt.meetLink || (evt.isGoogleEvent ? null : firstUrlInText(evt.title));
 }
 
 // --- Google Calendar: sync logic ---
+
+// Accounts added before the address could be read are all called Unknown, so a second one would
+// replace the first. This puts the real address on them.
+async function nameUnknownGoogleAccount(account) {
+  if (account.email !== 'Unknown') return;
+  try {
+    if (account.expiresAt && account.expiresAt < Date.now()) await refreshGcalToken(account);
+    const email = await fetchGcalUserEmail(account.accessToken);
+    if (!gcalAccounts.some((a) => a.email === email)) {
+      account.email = email;
+      saveGcalConfig();
+    }
+  } catch { /* it keeps the old name, and the next sync tries again */ }
+}
 
 async function syncGoogleCalendars() {
   if (gcalAccounts.length === 0) return;
@@ -1377,6 +1945,7 @@ async function syncGoogleCalendars() {
 
   for (const account of gcalAccounts) {
     try {
+      await nameUnknownGoogleAccount(account);
       const events = await fetchGcalEvents(account);
       allGoogleEvents = allGoogleEvents.concat(events);
     } catch (err) {
@@ -1384,11 +1953,8 @@ async function syncGoogleCalendars() {
     }
   }
 
-  // Remove old Google events from local calendar
-  calendarEvents = calendarEvents.filter((e) => !e.isGoogleEvent);
-
-  // Add fresh Google events
-  calendarEvents = calendarEvents.concat(allGoogleEvents);
+  // An account that failed keeps its events: a dropped connection must not empty the calendar.
+  calendarEvents = calendarLib.mergeGoogleEvents(calendarEvents, allGoogleEvents, errors.map((e) => e.email));
 
   saveCalendarEvents();
   gcalLastSync = Date.now();
@@ -1414,42 +1980,32 @@ function startGcalSyncTimer() {
 
 // --- Streak tracking ---
 function loadStreak() {
-  try {
-    if (fs.existsSync(STREAK_FILE)) {
-      return JSON.parse(fs.readFileSync(STREAK_FILE, 'utf-8'));
-    }
-  } catch { /* ignore */ }
-  return { current: 0, lastDate: null };
+  const data = readJsonOr(STREAK_FILE, null);
+  return data && typeof data === 'object' && !Array.isArray(data) ? data : { current: 0, lastDate: null };
 }
 
 function saveStreak() {
   try {
-    fs.writeFileSync(STREAK_FILE, JSON.stringify(streakData, null, 2));
-  } catch { /* ignore */ }
+    writeJsonAtomic(STREAK_FILE, streakData);
+  } catch (err) { console.error('[streak] save failed:', err.message); }
 }
 
+// Days in a row with at least one task finished.
 function updateStreak() {
-  const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-
-  // Check if all active tasks were completed today
-  const activeTasks = tasks.filter((t) => !t.done);
-  const completedToday = tasks.filter((t) => t.done && t.completedAt
-    && new Date(t.completedAt).toISOString().slice(0, 10) === today);
-
-  if (completedToday.length > 0 && activeTasks.length === 0) {
-    // All tasks done today
-    if (streakData.lastDate === yesterday || streakData.lastDate === today) {
-      if (streakData.lastDate !== today) streakData.current++;
-    } else {
-      streakData.current = 1;
-    }
+  const now = new Date();
+  const today = localDateStr(now);
+  const yesterday = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12));
+  const doneToday = tasks.some((t) => t.done && t.completedAt && localDateStr(new Date(t.completedAt)) === today);
+  const before = streakData.current;
+  if (doneToday && streakData.lastDate !== today) {
+    streakData.current = streakData.lastDate === yesterday ? streakData.current + 1 : 1;
     streakData.lastDate = today;
-  } else if (streakData.lastDate && streakData.lastDate !== today && streakData.lastDate !== yesterday) {
-    // Streak broken
+  } else if (!doneToday && streakData.lastDate && streakData.lastDate !== today && streakData.lastDate !== yesterday) {
     streakData.current = 0;
+  } else if (before === streakData.current) {
+    broadcastStreak();
+    return;
   }
-
   saveStreak();
   broadcastStreak();
 }
@@ -1462,35 +2018,60 @@ function broadcastStreak() {
 }
 
 // --- Daily digest ---
+// One pending show at a time (after wake, after the widget opens, or waiting for
+// the monitors to settle). The day it was shown is on disk, so the display-scale
+// relaunch does not repeat it minutes later.
 let digestTimer = null;
-let digestShownToday = null; // date string of last shown digest
+let digestShownToday = (readJsonOr(DIGEST_FILE, null) || {}).shown || null;
+
+function scheduleDigest(delayMs) {
+  if (digestTimer) clearTimeout(digestTimer);
+  digestTimer = setTimeout(() => { digestTimer = null; showDailyDigest(); }, delayMs);
+}
 
 function scheduleDailyDigest() {
   // Show 5 minutes after system wake from sleep
   powerMonitor.on('resume', () => {
-    const today = new Date().toISOString().slice(0, 10);
-    if (digestShownToday !== today) {
-      if (digestTimer) clearTimeout(digestTimer);
-      digestTimer = setTimeout(() => {
-        digestShownToday = today;
-        showDailyDigest();
-      }, 5 * 60 * 1000); // 5 minutes after wake
-    }
+    if (digestShownToday !== localDateStr(new Date()) && !digestTimer) scheduleDigest(5 * 60 * 1000);
   });
 }
 
 // Called when widget is first shown each day
 function tryShowDigestOnOpen() {
-  const today = new Date().toISOString().slice(0, 10);
-  if (digestShownToday !== today) {
-    digestShownToday = today;
-    // Small delay so the widget finishes rendering first
-    setTimeout(showDailyDigest, 3000);
-  }
+  // Small delay so the widget finishes rendering first
+  if (digestShownToday !== localDateStr(new Date())) scheduleDigest(3000);
 }
 
 function showDailyDigest() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateStr(new Date());
+  if (digestShownToday === today) return;
+  // Born in a monitor change a popup keeps the wrong pixel size, and while the
+  // scale guard waits for its relaunch every window is on borrowed time: wait.
+  const wait = displayScale.quietWait({ now: Date.now(), startedAt: PROCESS_STARTED_AT, lastChangeAt: lastDisplayChangeAt });
+  if (wait > 0 || scaleMismatch()) { scheduleDigest(wait || 30 * 1000); return; }
+  markDigestShown(today);
+  requestPopup({ open: openDailyDigest, digest: true });
+}
+
+function markDigestShown(today) {
+  digestShownToday = today;
+  try { writeJsonAtomic(DIGEST_FILE, { shown: today }); } catch (err) { console.error('[digest] save failed:', err.message); }
+}
+
+// The tray item and the socket: open it again at will, or close it when it is up.
+function toggleDigest(source) {
+  if (alertPopup && !alertPopup.isDestroyed() && popupShowing && popupShowing.digest) {
+    alertPopup.close();
+    return;
+  }
+  if (digestTimer) { clearTimeout(digestTimer); digestTimer = null; }
+  markDigestShown(localDateStr(new Date()));
+  console.log('[digest] opened from ' + source);
+  requestPopup({ open: openDailyDigest, digest: true });
+}
+
+function openDailyDigest() {
+  const today = localDateStr(new Date());
   const todayEvents = calendarEvents.filter((e) => e.date === today);
   const pendingTasks = tasks.filter((t) => !t.done);
   const highPriority = pendingTasks.filter((t) => t.priority === 'high');
@@ -1514,25 +2095,25 @@ function showDailyDigest() {
   lines.push(taskLine);
   const digestUsage = activeUsage();
   if (digestUsage) {
-    lines.push('Session ' + digestUsage.session.pct + '% \u00b7 Week ' + digestUsage.weekAll.pct + '%');
+    const usageLine = usageLib.summaryLine(digestUsage);
+    if (usageLine) lines.push('Usage ' + usageLine);
   }
   const summary = lines.join('\n');
 
   // Show as a popup
   if (alertPopup && !alertPopup.isDestroyed()) { alertPopup.close(); alertPopup = null; }
-  const display = getWidgetDisplay();
-  const wa = display.workArea; const sw = wa.x + wa.width; const sh = wa.y + wa.height;
   // Height adapts to the number of digest lines so nothing clips and no dead space
   const popH = Math.min(380, 168 + lines.length * 20);
+  alertPopupPlace = () => popupBounds(340, popH);
   alertPopup = new BrowserWindow({
-    width: 340, height: popH, x: sw - 360, y: sh - popH - 20,
+    ...alertPopupPlace(),
     frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true, show: false,
-    ...POPUP_GLASS_OPTS_FN(),
+    ...POPUP_GLASS_OPTS_FN(), ...QUIET_POPUP_OPTS,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
       preload: path.join(__dirname, 'popup-preload.js') },
   });
   applyLinuxPopupTransparency(alertPopup);
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); ref.webContents.on('render-process-gone', () => { if (!ref.isDestroyed()) ref.destroy(); }); }
   alertPopup.once('ready-to-show', () => { if (alertPopup && !alertPopup.isDestroyed()) alertPopup.showInactive(); });
   alertPopup.loadFile(path.join(__dirname, 'popup.html'));
   alertPopup.webContents.once('did-finish-load', () => {
@@ -1547,16 +2128,17 @@ function showDailyDigest() {
 }
 
 // --- Theme system ---
+let calendarMigrated = false; // events from older versions were brought in line once
 let currentTheme = 'brutal'; // 'brutal', 'karchx', 'dark', 'light', 'nord', 'dracula'
 const THEMES = {
   // brutal — pop brutalism: bone paper, ink borders, candy pink/teal/yellow
-  brutal: { bg: '#f0ede4', winBg: '#f0ede4', surface: '#ffffff', surface2: '#f7f3ea', border: '#111111', text: '#111111', textDim: '#6f6a5e', accent: '#ff90e8', green: '#23a094', red: '#e5484d', yellow: '#ffc900', barBg: '#ffffff' },
+  brutal: { bg: '#f0ede4', winBg: '#f0ede4', surface: '#ffffff', surface2: '#f7f3ea', border: '#111111', text: '#111111', textDim: '#5f5a4f', accent: '#ff90e8', green: '#23a094', red: '#e5484d', yellow: '#ffc900', barBg: '#ffffff', line: '#111111', shadow: '#111111', onAccent: '#111111', critText: '#c8232b' },
   // karchx — warm cream paper, deep aubergine accent (based on karchx.com)
-  karchx: { bg: '#ece4d6', winBg: '#ece4d6', surface: '#f3ecde', surface2: '#ebe2cf', border: '#d4c8b3', text: '#1f1c18', textDim: '#6b5f54', accent: '#3b2a3a', green: '#4a7a4a', red: '#a83b3b', yellow: '#b88a2e', barBg: '#d9ccb3' },
-  dark: { bg: 'rgba(12,12,18,0.85)', winBg: '#0c0c12', surface: '#13131d', surface2: '#1b1b28', border: '#2a2a3d', text: '#e2e2f0', textDim: '#7e7e98', accent: '#d4845a', green: '#4ade80', red: '#f87171', yellow: '#facc15', barBg: '#252538' },
-  light: { bg: 'rgba(250,250,252,0.94)', winBg: '#fafafc', surface: '#ffffff', surface2: '#f3f4f6', border: '#d1d5db', text: '#111827', textDim: '#6b7280', accent: '#b45e35', green: '#16a34a', red: '#dc2626', yellow: '#ca8a04', barBg: '#e5e7eb' },
-  nord: { bg: 'rgba(46,52,64,0.88)', winBg: '#2e3440', surface: '#3b4252', surface2: '#434c5e', border: '#4c566a', text: '#eceff4', textDim: '#8892a8', accent: '#88c0d0', green: '#a3be8c', red: '#bf616a', yellow: '#ebcb8b', barBg: '#2e3440' },
-  dracula: { bg: 'rgba(40,42,54,0.88)', winBg: '#282a36', surface: '#44475a', surface2: '#50526a', border: '#6272a4', text: '#f8f8f2', textDim: '#9898b0', accent: '#bd93f9', green: '#50fa7b', red: '#ff5555', yellow: '#f1fa8c', barBg: '#282a36' },
+  karchx: { bg: '#ece4d6', winBg: '#ece4d6', surface: '#f3ecde', surface2: '#ebe2cf', border: '#d4c8b3', text: '#1f1c18', textDim: '#6b5f54', accent: '#3b2a3a', green: '#4a7a4a', red: '#a83b3b', yellow: '#b88a2e', barBg: '#d9ccb3', line: '#1f1c18', shadow: '#1f1c18', onAccent: '#ffffff', critText: '#a83b3b' },
+  dark: { bg: 'rgba(12,12,18,0.85)', winBg: '#0c0c12', surface: '#13131d', surface2: '#1b1b28', border: '#2a2a3d', text: '#e2e2f0', textDim: '#8f8fa8', accent: '#d4845a', green: '#4ade80', red: '#f87171', yellow: '#facc15', barBg: '#252538', line: '#8c8ca3', shadow: '#34344a', onAccent: '#111111', critText: '#f87171' },
+  light: { bg: 'rgba(250,250,252,0.94)', winBg: '#fafafc', surface: '#ffffff', surface2: '#f3f4f6', border: '#d1d5db', text: '#111827', textDim: '#6b7280', accent: '#b45e35', green: '#16a34a', red: '#dc2626', yellow: '#ca8a04', barBg: '#e5e7eb', line: '#111827', shadow: '#111827', onAccent: '#ffffff', critText: '#dc2626' },
+  nord: { bg: 'rgba(46,52,64,0.88)', winBg: '#2e3440', surface: '#3b4252', surface2: '#434c5e', border: '#4c566a', text: '#eceff4', textDim: '#c0c8d6', accent: '#88c0d0', green: '#a3be8c', red: '#bf616a', yellow: '#ebcb8b', barBg: '#2e3440', line: '#a3adc2', shadow: '#20252f', onAccent: '#111111', critText: '#f2a7ae' },
+  dracula: { bg: 'rgba(40,42,54,0.88)', winBg: '#282a36', surface: '#44475a', surface2: '#50526a', border: '#6272a4', text: '#f8f8f2', textDim: '#d0d0e0', accent: '#bd93f9', green: '#50fa7b', red: '#ff5555', yellow: '#f1fa8c', barBg: '#282a36', line: '#9aa5d1', shadow: '#1c1d26', onAccent: '#111111', critText: '#ff9e9e' },
 };
 
 // Send the currently-selected theme to a single window. Use on did-finish-load
@@ -1572,207 +2154,21 @@ function sendCurrentTheme(targetWin) {
 function broadcastTheme() {
   const theme = THEMES[currentTheme] || THEMES.dark;
   const payload = { name: currentTheme, ...theme };
-  const allWins = [win, tasksWin, calWin, notesWin, notesAppWin, dashWin, alertPopup, pomoPopupWin, addEventWin];
+  const allWins = [win, tasksWin, calWin, notesWin, notesAppWin, dashWin, alertPopup, pomoPopupWin, captureWin, relaxHeadsUp && relaxHeadsUp.win];
   for (const w of allWins) {
     if (w && !w.isDestroyed()) {
       try { w.webContents.send('theme-update', payload); } catch { /* ignore */ }
     }
   }
-}
-
-// --- Smart text parser: "Meeting with John tomorrow 3pm 1h" → { title, date, time, duration, priority } ---
-function parseSmartText(input) {
-  let text = input;
-  let date = null;
-  let time = null;
-  let duration = null;
-  let priority = 'medium';
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-  function fmtDate(d) {
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-  }
-
-  // Priority keywords
-  if (/\b(urgent|important|asap|critical|!{2,})\b/i.test(text)) {
-    priority = 'high';
-    text = text.replace(/\b(urgent|important|asap|critical)\b/gi, '').replace(/!{2,}/g, '');
-  }
-
-  // Relative dates: today, tomorrow, day after tomorrow
-  if (/\btoday\b/i.test(text)) {
-    date = fmtDate(today);
-    text = text.replace(/\btoday\b/gi, '');
-  } else if (/\btomorrow\b/i.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 1);
-    date = fmtDate(d);
-    text = text.replace(/\btomorrow\b/gi, '');
-  } else if (/\bday after tomorrow\b/i.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 2);
-    date = fmtDate(d);
-    text = text.replace(/\bday after tomorrow\b/gi, '');
-  }
-
-  // Bulgarian relative dates (no \b — doesn't work with Cyrillic)
-  if (!date && /(?:^|\s)днес(?:\s|$|,)/i.test(text)) {
-    date = fmtDate(today);
-    text = text.replace(/днес/gi, '');
-  } else if (!date && /(?:^|\s)утре(?:\s|$|,)/i.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 1);
-    date = fmtDate(d);
-    text = text.replace(/утре/gi, '');
-  } else if (!date && /(?:^|\s)вдругиден(?:\s|$|,)/i.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 2);
-    date = fmtDate(d);
-    text = text.replace(/вдругиден/gi, '');
-  }
-
-  // Day names: monday, tuesday... / понеделник, вторник...
-  const dayNamesEN = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const dayNamesBG = ['неделя', 'понеделник', 'вторник', 'сряда', 'четвъртък', 'петък', 'събота'];
-
-  if (!date) {
-    for (let di = 0; di < 7; di++) {
-      const reEN = new RegExp('\\b(next\\s+)?' + dayNamesEN[di] + '\\b', 'i');
-      const reBG = new RegExp('(?:^|\\s)(следващ[а-яА-Я]*\\s+)?' + dayNamesBG[di] + '(?:\\s|$|,)', 'i');
-      const matchEN = text.match(reEN);
-      const matchBG = text.match(reBG);
-      if (matchEN || matchBG) {
-        const isNext = (matchEN && matchEN[1]) || (matchBG && matchBG[1]);
-        const d = new Date(today);
-        let daysAhead = (di - d.getDay() + 7) % 7;
-        if (daysAhead === 0) daysAhead = 7;
-        if (isNext && daysAhead <= 7) daysAhead += 7;
-        d.setDate(d.getDate() + daysAhead);
-        date = fmtDate(d);
-        text = text.replace(matchEN ? matchEN[0] : matchBG[0], ' ');
-        break;
-      }
-    }
-  }
-
-  // "in X days/weeks"
-  if (!date) {
-    const inMatch = text.match(/\bin\s+(\d+)\s+(day|days|week|weeks)\b/i);
-    if (inMatch) {
-      const d = new Date(today);
-      const n = parseInt(inMatch[1], 10);
-      if (/week/i.test(inMatch[2])) d.setDate(d.getDate() + n * 7);
-      else d.setDate(d.getDate() + n);
-      date = fmtDate(d);
-      text = text.replace(inMatch[0], '');
-    }
-  }
-
-  // Explicit date: "March 25", "25 March", "3/25", "25.03", "2026-03-25"
-  if (!date) {
-    const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
-    const monthMatch = text.match(new RegExp('\\b(' + monthNames.join('|') + ')\\s+(\\d{1,2})\\b', 'i'));
-    const monthMatch2 = text.match(new RegExp('\\b(\\d{1,2})\\s+(' + monthNames.join('|') + ')\\b', 'i'));
-    const slashMatch = text.match(/\b(\d{1,2})[\/\.](\d{1,2})(?:[\/\.](\d{2,4}))?\b/);
-    const isoMatch = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
-
-    if (isoMatch) {
-      date = isoMatch[0];
-      text = text.replace(isoMatch[0], '');
-    } else if (monthMatch) {
-      const mi = monthNames.indexOf(monthMatch[1].toLowerCase());
-      const d = new Date(now.getFullYear(), mi, parseInt(monthMatch[2], 10));
-      if (d < today) d.setFullYear(d.getFullYear() + 1);
-      date = fmtDate(d);
-      text = text.replace(monthMatch[0], '');
-    } else if (monthMatch2) {
-      const mi = monthNames.indexOf(monthMatch2[2].toLowerCase());
-      const d = new Date(now.getFullYear(), mi, parseInt(monthMatch2[1], 10));
-      if (d < today) d.setFullYear(d.getFullYear() + 1);
-      date = fmtDate(d);
-      text = text.replace(monthMatch2[0], '');
-    } else if (slashMatch) {
-      const a = parseInt(slashMatch[1], 10);
-      const b = parseInt(slashMatch[2], 10);
-      const y = slashMatch[3] ? (slashMatch[3].length === 2 ? 2000 + parseInt(slashMatch[3], 10) : parseInt(slashMatch[3], 10)) : now.getFullYear();
-      // Detect DD/MM vs MM/DD: if first > 12, it's DD/MM
-      const d = a > 12 ? new Date(y, b - 1, a) : new Date(y, a - 1, b);
-      date = fmtDate(d);
-      text = text.replace(slashMatch[0], '');
-    }
-  }
-
-  // Time: "3pm", "3:30pm", "15:00", "at 3", "в 15:00", "в 10:00"
-  // Try explicit HH:MM first (most reliable)
-  const time24Match = text.match(/(?:^|\s)(?:at\s+|[вВ]\s+)?(\d{1,2}):(\d{2})(?:\s*(am|pm))?(?:\s|$|,)/i);
-  const time12Match = !time24Match ? text.match(/(?:^|\s)(?:at\s+|[вВ]\s+)?(\d{1,2})\s*(am|pm)(?:\s|$|,)/i) : null;
-  const timeM = time24Match || time12Match;
-  if (timeM) {
-    let h = parseInt(timeM[1], 10);
-    const m = time24Match ? parseInt(timeM[2], 10) : 0;
-    const ampm = time24Match ? (timeM[3] || '').toLowerCase() : timeM[2].toLowerCase();
-    if (ampm === 'pm' && h !== 12) h += 12;
-    if (ampm === 'am' && h === 12) h = 0;
-    if (h >= 0 && h <= 23) {
-      time = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
-      text = text.replace(timeM[0], ' ');
-    }
-  }
-
-  // Duration: "1h", "30m", "2 hours", "1.5h"
-  const durMatch = text.match(/(?:^|\s)(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minutes|час[а]?|мин)(?:\s|$|,)/i);
-  if (durMatch) {
-    const val = parseFloat(durMatch[1]);
-    const unit = durMatch[2].toLowerCase();
-    if (unit.charAt(0) === 'h' || unit.startsWith('час')) duration = Math.round(val * 60);
-    else duration = Math.round(val);
-    text = text.replace(durMatch[0], '');
-  }
-
-  // Clean up title — remove leftover prepositions
-  text = text.replace(/\bat\b/gi, '').replace(/\bon\b/gi, '');
-  text = text.replace(/(?:^|\s)в(?:\s|$)/gi, ' '); // Bulgarian "в" only as standalone word
-  text = text.replace(/^[\s,\-:]+|[\s,\-:]+$/g, '').replace(/\s{2,}/g, ' ').trim();
-
-  return { title: text || input.trim(), date, time, duration, priority };
-}
-
-function generateRecurringEvents(baseEvt) {
-  // Generate instances for the next 90 days
-  const startDate = new Date(baseEvt.date + 'T12:00');
-  const endDate = new Date(startDate.getTime() + 90 * 24 * 60 * 60 * 1000);
-  let current = new Date(startDate);
-  const increment = { daily: 1, weekly: 7, biweekly: 14, monthly: 0 };
-
-  while (true) {
-    if (baseEvt.recurrence === 'monthly') {
-      current.setMonth(current.getMonth() + 1);
-    } else {
-      current.setDate(current.getDate() + (increment[baseEvt.recurrence] || 7));
-    }
-    if (current > endDate) break;
-
-    const dateStr = current.getFullYear() + '-'
-      + String(current.getMonth() + 1).padStart(2, '0') + '-'
-      + String(current.getDate()).padStart(2, '0');
-    calendarEvents.push({
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      title: baseEvt.title,
-      date: dateStr,
-      time: baseEvt.time,
-      duration: baseEvt.duration,
-      color: baseEvt.color,
-      reminder: baseEvt.reminder,
-      recurrence: null, // instances don't recurse
-      recurringParentId: baseEvt.id,
-      googleEventId: null,
-      createdAt: Date.now(),
-    });
-  }
+  if (mapsFeature) mapsFeature.themeChanged();
+  if (notesView) notesView.themeChanged();
 }
 
 // Prune recurring instances older than 30 days to prevent unbounded growth
 function pruneOldRecurringEvents() {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const cutoffStr = localDateStr(cutoff);
   const before = calendarEvents.length;
   calendarEvents = calendarEvents.filter((e) =>
     !(e.recurringParentId && e.date < cutoffStr && !e.done)
@@ -1793,7 +2189,7 @@ function broadcastCalendar() {
     calWin.webContents.send('calendar-update', payload);
   }
   // Calendar badge: events today
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateStr(new Date());
   const todayCount = calendarEvents.filter((e) => e.date === today).length;
   if (win && !win.isDestroyed()) {
     win.webContents.send('badge-update', { calendar: todayCount });
@@ -1807,81 +2203,50 @@ function clearReminderTimers() {
   reminderTimers = {};
 }
 
-// Track which reminder stages have fired: { eventId: Set('15m', '5m', '0m', 'overdue') }
+// Which reminder stages have fired: { eventId: Set('15m', '10m', '0m', 'overdue') }
 let firedStages = {};
 
 function scheduleReminders() {
   clearReminderTimers();
   const now = Date.now();
+  const today = localDateStr(new Date(now));
 
-  // Prune fired reminders/stages for past events
-  for (const id of firedReminders) {
+  for (const id of Object.keys(firedStages)) {
     const evt = calendarEvents.find((e) => e.id === id);
-    if (!evt || new Date(evt.date + 'T23:59').getTime() < now) {
-      firedReminders.delete(id);
-      delete firedStages[id];
-    }
+    // Kept through yesterday, or an event late last night would seem new and remind again after midnight.
+    if (!evt || evt.date < calendarLib.addDays(today, -1)) delete firedStages[id];
   }
-  const maxAhead = 24 * 60 * 60 * 1000;
 
   for (const evt of calendarEvents) {
-    if (evt.done) continue;
-    if (!evt.date) continue;
+    const fired = firedStages[evt.id] || new Set();
+    const plan = calendarLib.planReminders(evt, now, fired);
+    for (const key of plan.forget) fired.add(key);
 
-    let eventTime;
-    if (evt.time) {
-      eventTime = new Date(evt.date + 'T' + evt.time).getTime();
-    } else {
-      eventTime = new Date(evt.date + 'T09:00').getTime();
-    }
-    if (isNaN(eventTime)) continue;
-    if (eventTime - now > maxAhead) continue;
-
-    // Escalating reminder stages (minutes before event)
-    const stages = [
-      { key: '15m', minsBefore: 15, body: 'In 15 minutes', silent: false, autoDismiss: 8000 },
-      { key: '10m', minsBefore: 10, body: 'In 10 minutes', silent: false, autoDismiss: 0 },  // stays open with countdown
-      { key: '0m',  minsBefore: 0,  body: 'Starting NOW', silent: false, autoDismiss: 0 },  // 0 = no auto-dismiss
-    ];
-
-    if (!firedStages[evt.id]) firedStages[evt.id] = new Set();
-    const fired = firedStages[evt.id];
-
-    for (const stage of stages) {
-      if (fired.has(stage.key)) continue;
-      const fireAt = eventTime - (stage.minsBefore * 60 * 1000);
-      const delay = fireAt - now;
-
-      if (delay < 0) {
-        // Should have fired already — fire now if event is within 30 min
-        if (now - eventTime < 30 * 60 * 1000) {
-          fired.add(stage.key);
-          fireReminder(evt, stage);
-        }
-        continue;
-      }
-
-      reminderTimers[evt.id + ':' + stage.key] = setTimeout(() => {
+    for (const { stage, delay } of plan.later) {
+      const timerKey = evt.id + ':' + stage.key;
+      reminderTimers[timerKey] = setTimeout(() => {
         fired.add(stage.key);
-        delete reminderTimers[evt.id + ':' + stage.key];
+        delete reminderTimers[timerKey];
         fireReminder(evt, stage);
       }, delay);
     }
-
-    // Overdue stage: fires 5 min after event time, sends banner to widget
-    if (!fired.has('overdue') && now > eventTime + 5 * 60 * 1000 && now - eventTime < 60 * 60 * 1000) {
+    if (plan.fireNow) {
+      fired.add(plan.fireNow.key);
+      fireReminder(evt, plan.fireNow);
+    } else if (plan.overdue) {
       fired.add('overdue');
-      // Send overdue banner to widget (even if hidden — it shows when opened)
+      // Send overdue banner to widget (even if hidden: it shows when opened)
       if (win && !win.isDestroyed()) {
         win.webContents.send('event-overdue', { id: evt.id, title: evt.title, time: evt.time });
       }
       new Notification({
         title: '\u26A0 OVERDUE: ' + evt.title,
-        body: 'Event was at ' + (evt.time || 'today') + ' — don\'t forget!',
+        body: 'Event was at ' + evt.time + ', don\'t forget!',
         silent: false,
         urgency: 'critical',
       }).show();
     }
+    if (fired.size > 0 || plan.later.length > 0) firedStages[evt.id] = fired;
   }
 }
 
@@ -1890,7 +2255,7 @@ function fireReminder(evt, stage) {
   const isUrgent = stage.key === '0m' || stage.key === '5m';
   new Notification({
     title: evt.title,
-    body: stage.body + (evt.time ? ' \u2014 ' + evt.time : ''),
+    body: stage.body + (evt.time ? ', ' + evt.time : ''),
     silent: !isUrgent,
     urgency: stage.key === '0m' ? 'critical' : 'normal',
   }).show();
@@ -1909,7 +2274,7 @@ function fireReminder(evt, stage) {
   }
 
   // 2. Popup window
-  showReminderPopup(evt, stage.autoDismiss, stage);
+  showReminderPopup(evt, stage);
 
   // 3. Flash tray icon
   if (tray) {
@@ -1933,28 +2298,116 @@ function fireReminder(evt, stage) {
   }
 }
 
-function showReminderPopup(evt, autoDismissMs, stage) {
+// One popup shows at a time. A new one waits its turn instead of closing a meeting someone hasn't seen,
+// and two usage alerts from the same sync no longer cancel each other.
+const POPUP_QUEUE_MAX = 6;
+const POPUP_GAP_MS = 300;
+let popupQueue = [];
+let popupShowing = null;
+
+// --- Where a popup goes, and again after a display change ---
+// A popup born seconds before GNOME flips the scale keeps the pixel size of the
+// old scale while its content follows the new one: twice the window, half of it
+// empty, spilling onto the next screen (2026-11-11). Every popup remembers how
+// it chose its place; after a display change the place is chosen again and
+// setBounds hands Chromium the size under the scale that applies now.
+let alertPopupPlace = null;
+let lastDisplayChangeAt = 0;
+const replaceTimers = [];
+
+// Bottom-right corner of the widget's screen, inside its work area.
+function popupBounds(width, height) {
+  const wa = getWidgetDisplay().workArea;
+  return { x: wa.x + wa.width - width - 20, y: wa.y + wa.height - height - 20, width, height };
+}
+
+function replaceAlertPopup(why) {
+  if (!alertPopup || alertPopup.isDestroyed() || !alertPopupPlace) return;
+  const b = alertPopupPlace();
+  alertPopup.setBounds(b);
+  if (!alertPopup.isVisible()) alertPopup.showInactive();
+  console.log('[popup] placed again after ' + why + ': ' + JSON.stringify(b));
+}
+
+function watchDisplaysForPopups() {
+  for (const ev of ['display-added', 'display-removed', 'display-metrics-changed']) {
+    screen.on(ev, () => {
+      lastDisplayChangeAt = Date.now();
+      // Once when the change lands and once more when the scale has followed
+      // it (XSETTINGS runs a few seconds behind the monitor layout).
+      while (replaceTimers.length) clearTimeout(replaceTimers.pop());
+      for (const ms of [1500, 8000]) replaceTimers.push(setTimeout(() => replaceAlertPopup(ev), ms));
+    });
+  }
+}
+
+function openQueuedPopup(entry) {
+  popupShowing = entry;
+  entry.open();
+}
+
+function requestPopup(entry) {
+  const open = alertPopup && !alertPopup.isDestroyed();
+  if (!open) {
+    openQueuedPopup(entry);
+    return;
+  }
+  const sameMeeting = entry.eventId && popupShowing && popupShowing.eventId === entry.eventId;
+  if (sameMeeting) {
+    openQueuedPopup(entry);
+    return;
+  }
+  // A meeting starting now is the one thing that goes in front, and what it displaces comes back after.
+  if (entry.sticky && !(popupShowing && popupShowing.sticky)) {
+    if (popupShowing) popupQueue.unshift(popupShowing);
+    openQueuedPopup(entry);
+    return;
+  }
+  if (popupQueue.length < POPUP_QUEUE_MAX) popupQueue.push(entry);
+}
+
+function popupClosed() {
+  popupShowing = null;
+  setTimeout(() => {
+    if (alertPopup && !alertPopup.isDestroyed()) return; // something else opened in the gap
+    popupQueue = popupQueue.filter((entry) => !entry.stillWanted || entry.stillWanted());
+    const next = popupQueue.shift();
+    if (next) openQueuedPopup(next);
+  }, POPUP_GAP_MS);
+}
+
+function showReminderPopup(evt, stage) {
+  requestPopup({
+    eventId: evt.id,
+    // These stay open until dismissed, so nothing else may take their place.
+    sticky: stage.key === '0m' || stage.key === '10m' || stage.key === '5m',
+    stillWanted: () => {
+      const current = calendarEvents.find((e) => e.id === evt.id);
+      return Boolean(current) && calendarLib.stillCurrent(current, Date.now());
+    },
+    open: () => openReminderPopup(evt, stage),
+  });
+}
+
+function openReminderPopup(evt, stage) {
   if (alertPopup && !alertPopup.isDestroyed()) {
     alertPopup.close();
     alertPopup = null;
   }
 
-  const display = getWidgetDisplay();
-  const wa = display.workArea;
   const popW = 300;
   const popH = 300;
+  alertPopupPlace = () => popupBounds(popW, popH);
 
   alertPopup = new BrowserWindow({
-    width: popW,
-    height: popH,
-    x: wa.x + wa.width - popW - 20,
-    y: wa.y + wa.height - popH - 20,
+    ...alertPopupPlace(),
     frame: false,
     resizable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
     show: false,
     ...POPUP_GLASS_OPTS_FN(),
+    ...QUIET_POPUP_OPTS,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1964,9 +2417,10 @@ function showReminderPopup(evt, autoDismissMs, stage) {
   });
   applyLinuxPopupTransparency(alertPopup);
 
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); ref.webContents.on('render-process-gone', () => { if (!ref.isDestroyed()) ref.destroy(); }); }
   alertPopup.once('ready-to-show', () => {
-    if (alertPopup && !alertPopup.isDestroyed()) alertPopup.show();
+    // Without taking the keyboard: someone may be typing, and the keys must stay where they are.
+    if (alertPopup && !alertPopup.isDestroyed()) alertPopup.showInactive();
   });
   alertPopup.loadFile(path.join(__dirname, 'meeting-popup.html'));
 
@@ -1999,43 +2453,316 @@ function showReminderPopup(evt, autoDismissMs, stage) {
   });
 }
 
-function addTask(text, priority) {
-  if (typeof text !== 'string') return;
+// Task, calendar and sticky-note mutations. The IPC handlers and the phone inbox
+// (applyInboxOp) both call these, so validation, saving and the live window
+// updates are the same whichever side made the change.
+
+// `id`: a phone's or the watch's own id for a task made there (hub 1.6 sync), so the task has
+// one id everywhere; ignored when malformed or taken.
+function addTask(text, priority, id) {
+  if (typeof text !== 'string') return null;
   const clean = text.trim().slice(0, 200);
-  if (!clean) return;
+  if (!clean) return null;
   const validPriority = ['high', 'medium', 'low'].indexOf(priority) >= 0 ? priority : 'medium';
-  tasks.push({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+  const ownId = typeof id === 'string' && /^[a-z0-9]{4,20}$/.test(id) && !tasks.some((t) => t.id === id);
+  const task = {
+    id: ownId ? id : Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     text: clean,
     done: false,
     priority: validPriority,
     order: tasks.length,
     createdAt: Date.now(),
     completedAt: null,
-  });
+  };
+  tasks.push(task);
   saveTasks();
   broadcastTasks();
+  return task;
 }
 
 function toggleTask(id) {
   const task = tasks.find((t) => t.id === id);
-  if (!task) return;
+  if (!task) return null;
   task.done = !task.done;
   task.completedAt = task.done ? Date.now() : null;
   saveTasks();
   broadcastTasks();
+  // A task's calendar event finishes with it, or its reminders would keep coming.
+  const linked = calendarEvents.filter((e) => e.linkedTaskId === id && Boolean(e.done) !== task.done);
+  if (linked.length > 0) {
+    for (const evt of linked) evt.done = task.done;
+    saveCalendarEvents();
+    broadcastCalendar();
+    scheduleReminders();
+  }
+  return task;
 }
 
 function deleteTask(id) {
   tasks = tasks.filter((t) => t.id !== id);
   saveTasks();
   broadcastTasks();
+  if (calendarEvents.some((e) => e.linkedTaskId === id)) {
+    calendarEvents = calendarEvents.filter((e) => e.linkedTaskId !== id);
+    saveCalendarEvents();
+    broadcastCalendar();
+    scheduleReminders();
+  }
 }
 
 function clearCompletedTasks() {
   tasks = tasks.filter((t) => !t.done);
   saveTasks();
   broadcastTasks();
+}
+
+function setTaskPriority(id, priority) {
+  if (typeof id !== 'string' || id.length >= 20) return null;
+  const task = tasks.find((t) => t.id === id);
+  if (!task) return null;
+  if (['high', 'medium', 'low'].indexOf(priority) >= 0) {
+    task.priority = priority;
+    saveTasks();
+    broadcastTasks();
+    return task;
+  }
+  return null;
+}
+
+// The desktop has no rename; the phone does. Same text rule as addTask.
+function renameTask(id, text) {
+  const task = tasks.find((t) => t.id === id);
+  if (!task || typeof text !== 'string') return null;
+  const clean = text.trim().slice(0, 200);
+  if (!clean) return null;
+  task.text = clean;
+  saveTasks();
+  broadcastTasks();
+  return task;
+}
+
+const REPEATS = ['daily', 'weekly', 'biweekly', 'monthly'];
+const EVENT_COLOR_NAMES = ['blue', 'green', 'orange', 'red', 'purple'];
+// How far ahead a repeating event's dates exist.
+const REPEAT_HORIZON_DAYS = 90;
+
+// Tops up every repeating event's dates. A date someone removed or moved away is in its skipDates.
+function extendRepeatingEvents() {
+  const today = localDateStr(new Date());
+  const until = calendarLib.addDays(today, REPEAT_HORIZON_DAYS);
+  let added = false;
+  for (const parent of calendarEvents.filter((e) => e.recurrence && !e.isGoogleEvent && !e.ended)) {
+    const pattern = parent.template || parent;
+    const taken = new Set(calendarEvents.filter((e) => e.recurringParentId === parent.id).map((e) => e.date));
+    for (const date of parent.skipDates || []) taken.add(date);
+    for (const date of calendarLib.occurrences(parent.anchor || parent.date, parent.recurrence, today, until)) {
+      if (taken.has(date)) continue;
+      calendarEvents.push({
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        title: pattern.title,
+        date,
+        time: pattern.time,
+        duration: pattern.duration,
+        color: pattern.color,
+        reminder: pattern.reminder,
+        recurrence: null, // instances don't recurse
+        recurringParentId: parent.id,
+        googleEventId: null,
+        createdAt: Date.now(),
+      });
+      added = true;
+    }
+  }
+  return added;
+}
+
+function seriesOf(evt) {
+  const rootId = evt.recurringParentId || evt.id;
+  return calendarEvents.filter((e) => e.id === rootId || e.recurringParentId === rootId);
+}
+
+function addCalendarEvent(data) {
+  if (!data || typeof data.title !== 'string' || !data.title.trim() || !isRealDate(data.date)) return { success: false };
+  let reminder = null;
+  if (data.reminder === undefined) reminder = calendarLib.DEFAULT_REMINDER;
+  else if (typeof data.reminder === 'number') reminder = data.reminder;
+  const evt = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    title: data.title.trim().slice(0, 100),
+    date: data.date,
+    time: typeof data.time === 'string' && TIME_RE.test(data.time) ? data.time : null,
+    duration: typeof data.duration === 'number' && data.duration > 0 ? data.duration : null,
+    color: EVENT_COLOR_NAMES.indexOf(data.color) >= 0 ? data.color : 'blue',
+    reminder,
+    recurrence: REPEATS.indexOf(data.recurrence) >= 0 ? data.recurrence : null,
+    done: false,
+    googleEventId: null,
+    createdAt: Date.now(),
+  };
+  calendarEvents.push(evt);
+  if (evt.recurrence) extendRepeatingEvents();
+  saveCalendarEvents();
+  broadcastCalendar();
+  scheduleReminders();
+  return { success: true, event: evt };
+}
+
+function updateCalendarEvent(data) {
+  if (!data || !data.id) return { success: false };
+  const evt = calendarEvents.find((e) => e.id === data.id);
+  if (!evt) return { success: false };
+  if (data.date !== undefined && !isRealDate(data.date)) return { success: false };
+  const oldDate = evt.date;
+  const oldTime = evt.time;
+  // The first date also holds what new dates copy. Changing only that date mustn't change them.
+  if (evt.recurrence && !data.wholeSeries && !evt.template) {
+    evt.template = { title: evt.title, time: evt.time, duration: evt.duration, color: evt.color, reminder: evt.reminder };
+  }
+  if (data.title !== undefined) evt.title = String(data.title).trim().slice(0, 100);
+  if (data.date !== undefined) evt.date = data.date;
+  if (data.time !== undefined) evt.time = typeof data.time === 'string' && TIME_RE.test(data.time) ? data.time : null;
+  if (data.duration !== undefined) evt.duration = typeof data.duration === 'number' && data.duration > 0 ? data.duration : null;
+  if (data.color !== undefined && EVENT_COLOR_NAMES.indexOf(data.color) >= 0) evt.color = data.color;
+  if (data.reminder !== undefined) evt.reminder = typeof data.reminder === 'number' ? data.reminder : null;
+
+  // A new moment means the reminders haven't happened yet.
+  if (evt.date !== oldDate || evt.time !== oldTime) delete firedStages[evt.id];
+
+  if (evt.date !== oldDate) repeatingEventMoved(evt, oldDate);
+  if (data.wholeSeries) {
+    const today = localDateStr(new Date());
+    const rootId = evt.recurringParentId || evt.id;
+    for (const other of seriesOf(evt)) {
+      // The first date always follows, however long ago it was, because new dates copy it.
+      if (other.id === rootId) delete other.template;
+      if (other === evt || (other.id !== rootId && (other.done || other.date < today))) continue;
+      other.title = evt.title;
+      other.time = evt.time;
+      other.duration = evt.duration;
+      other.color = evt.color;
+      other.reminder = evt.reminder;
+      delete firedStages[other.id];
+    }
+  }
+  saveCalendarEvents();
+  broadcastCalendar();
+  scheduleReminders();
+  return { success: true };
+}
+
+// One date of a series moved: the old date mustn't grow back. The first date moved: the pattern starts
+// over from there, so its upcoming dates are remade.
+function repeatingEventMoved(evt, oldDate) {
+  if (evt.recurringParentId) {
+    const parent = calendarEvents.find((e) => e.id === evt.recurringParentId);
+    if (parent) parent.skipDates = (parent.skipDates || []).concat(oldDate);
+  } else if (evt.recurrence) {
+    const today = localDateStr(new Date());
+    calendarEvents = calendarEvents.filter((e) => !(e.recurringParentId === evt.id && !e.done && e.date >= today));
+    evt.skipDates = [];
+    delete evt.anchor;
+    extendRepeatingEvents();
+  }
+}
+
+function toggleCalendarEvent(data) {
+  if (!data || !data.id) return { success: false };
+  const evt = calendarEvents.find((e) => e.id === data.id);
+  if (!evt) return { success: false };
+  evt.done = !evt.done;
+  saveCalendarEvents();
+  broadcastCalendar();
+  scheduleReminders(); // a finished event's pending reminders stop here
+  return { success: true };
+}
+
+// `series`: every date of a repeating event. Otherwise just this one, which doesn't grow back.
+function deleteCalendarEvent(data) {
+  if (!data || !data.id) return { success: false };
+  const evt = calendarEvents.find((e) => e.id === data.id);
+  if (!evt) return { success: false };
+  if (data.series) {
+    const gone = new Set(seriesOf(evt));
+    calendarEvents = calendarEvents.filter((e) => !gone.has(e));
+    for (const e of gone) delete firedStages[e.id];
+  } else {
+    if (evt.recurringParentId) {
+      const parent = calendarEvents.find((e) => e.id === evt.recurringParentId);
+      if (parent) parent.skipDates = (parent.skipDates || []).concat(evt.date);
+    } else if (evt.recurrence) {
+      // The first date holds the pattern, so the next one takes over from it.
+      const rest = seriesOf(evt).filter((e) => e !== evt).sort((a, b) => a.date.localeCompare(b.date));
+      if (rest.length > 0) {
+        const next = rest[0];
+        next.recurrence = evt.recurrence;
+        next.recurringParentId = null;
+        next.skipDates = evt.skipDates || [];
+        // The pattern still counts from where it began, not from this date.
+        next.anchor = evt.anchor || evt.date;
+        if (evt.template) next.template = evt.template;
+        for (const other of rest.slice(1)) other.recurringParentId = next.id;
+      }
+    }
+    calendarEvents = calendarEvents.filter((e) => e !== evt);
+    delete firedStages[evt.id];
+  }
+  saveCalendarEvents();
+  broadcastCalendar();
+  scheduleReminders();
+  return { success: true };
+}
+
+function readStickyNotes() {
+  return readJsonOr(STICKY_NOTES_FILE, null);
+}
+
+// Validate and cap, write, then tell every notes window except the one that
+// sent the notes (senderContents null = a change from outside: tell them all).
+function saveStickyNotes(notes, senderContents) {
+  const clean = notes.slice(0, 50).map((n) => ({
+    id: typeof n.id === 'string' ? n.id.slice(0, 20) : '',
+    title: typeof n.title === 'string' ? n.title.slice(0, 30) : '',
+    text: typeof n.text === 'string' ? n.text.slice(0, 100000) : '',
+    color: typeof n.color === 'string' ? n.color.slice(0, 10) : 'default',
+    createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
+  }));
+  try { writeJsonAtomic(STICKY_NOTES_FILE, clean); } catch (err) { console.error('[notes] save failed:', err.message); }
+  // Keep the other notes pages (panel, app, Plan section) in sync
+  const pages = [notesWin, notesAppWin]
+    .filter((w) => w && !w.isDestroyed())
+    .map((w) => w.webContents);
+  const inPlan = notesView && notesView.contents();
+  if (inPlan && !inPlan.isDestroyed()) pages.push(inPlan);
+  for (const page of pages) {
+    if (page !== senderContents) {
+      try { page.send('sticky-notes-updated', clean); } catch { /* ignore */ }
+    }
+  }
+  return clean;
+}
+
+function readNotesArchive() {
+  const archive = readJsonOr(NOTES_ARCHIVE_FILE, []);
+  return Array.isArray(archive) ? archive : [];
+}
+
+function archiveAddNote(note) {
+  if (!note || typeof note.id !== 'string') return;
+  try {
+    let archive = readNotesArchive();
+    note.archivedAt = Date.now();
+    archive.unshift(note);
+    // Keep last 50 archived notes
+    if (archive.length > 50) archive = archive.slice(0, 50);
+    writeJsonAtomic(NOTES_ARCHIVE_FILE, archive);
+  } catch (err) { console.error('[notes] archive failed:', err.message); }
+}
+
+function archiveRemoveNote(noteId) {
+  if (typeof noteId !== 'string') return;
+  try {
+    writeJsonAtomic(NOTES_ARCHIVE_FILE, readNotesArchive().filter((n) => n.id !== noteId));
+  } catch (err) { console.error('[notes] archive failed:', err.message); }
 }
 
 // --- Alert popup ---
@@ -2047,28 +2774,29 @@ function getAlertStep(pct, threshold) {
 }
 
 function showAlertPopup(label, pct, resetsAt, accountLabel) {
+  requestPopup({ open: () => openAlertPopup(label, pct, resetsAt, accountLabel) });
+}
+
+function openAlertPopup(label, pct, resetsAt, accountLabel) {
   if (alertPopup && !alertPopup.isDestroyed()) {
     alertPopup.close();
     alertPopup = null;
   }
 
-  const display = getWidgetDisplay();
-  const wa = display.workArea; const sw = wa.x + wa.width; const sh = wa.y + wa.height;
   const popW = 320;
   const popH = 200;
   const severity = pct >= 85 ? 'danger' : 'warning';
+  alertPopupPlace = () => popupBounds(popW, popH);
 
   alertPopup = new BrowserWindow({
-    width: popW,
-    height: popH,
-    x: sw - popW - 20,
-    y: sh - popH - 20,
+    ...alertPopupPlace(),
     frame: false,
     resizable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
     show: false,
     ...POPUP_GLASS_OPTS_FN(),
+    ...QUIET_POPUP_OPTS,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -2078,7 +2806,7 @@ function showAlertPopup(label, pct, resetsAt, accountLabel) {
   });
   applyLinuxPopupTransparency(alertPopup);
 
-  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) alertPopup = null; }); }
+  { const ref = alertPopup; alertPopup.on('closed', () => { if (alertPopup === ref) { alertPopup = null; popupClosed(); } }); ref.webContents.on('render-process-gone', () => { if (!ref.isDestroyed()) ref.destroy(); }); }
 
   alertPopup.once('ready-to-show', () => {
     if (alertPopup && !alertPopup.isDestroyed()) {
@@ -2094,11 +2822,7 @@ function showAlertPopup(label, pct, resetsAt, accountLabel) {
     let resetText = '';
     if (resetsAt) {
       const diff = new Date(resetsAt).getTime() - Date.now();
-      if (diff > 0) {
-        const hours = Math.floor(diff / 3600000);
-        const mins = Math.floor((diff % 3600000) / 60000);
-        resetText = hours > 0 ? `Resets in ${hours}h ${mins}m` : `Resets in ${mins}m`;
-      }
+      if (diff > 0) resetText = 'Refills ' + widgetLib.refillText(resetsAt, Date.now());
     }
 
     alertPopup.webContents.send('popup-data', { severity, label, pct, resetText, accountLabel: accountLabel || 'Me' });
@@ -2109,16 +2833,21 @@ function showAlertPopup(label, pct, resetsAt, accountLabel) {
 function checkAndNotify(ctx) {
   const usage = ctx && ctx.cachedUsage;
   if (!usage) return;
-  const checks = [
-    { key: 'session', pct: usage.session.pct, label: 'Session', resetsAt: usage.session.resetsAt },
-    { key: 'weekAll', pct: usage.weekAll.pct, label: 'Weekly (all)', resetsAt: usage.weekAll.resetsAt },
-    { key: 'weekSonnet', pct: usage.weekSonnet.pct, label: 'Weekly (Fable)', resetsAt: usage.weekSonnet.resetsAt },
-  ];
+  // Only the limits this plan has; the scoped cap is named after its model.
+  const checks = usageLib.METER_KEYS.filter((key) => usage[key]).map((key) => ({
+    key,
+    pct: usage[key].pct,
+    label: key === 'session' ? 'Session'
+      : key === 'weekAll' ? 'Weekly (all)'
+      : 'Weekly (' + (usage[key].model || 'model') + ')',
+    resetsAt: usage[key].resetsAt,
+  }));
 
   for (const check of checks) {
     const step = getAlertStep(check.pct, ALERT_THRESHOLDS[check.key]);
     if (step >= 0 && step !== ctx.lastAlertedStep[check.key]) {
       ctx.lastAlertedStep[check.key] = step;
+      saveCachedUsage(ctx);
       showAlertPopup(check.label, check.pct, check.resetsAt, ctx.name || 'Me');
     }
     // Reset tracking when usage drops below threshold
@@ -2143,9 +2872,9 @@ function getAlertTrayIcon() {
 
 function updateTrayBadge(usage) {
   if (!tray) return;
-  const hasAlert = usage.session.pct >= ALERT_THRESHOLDS.session
-    || usage.weekAll.pct >= ALERT_THRESHOLDS.weekAll
-    || usage.weekSonnet.pct >= ALERT_THRESHOLDS.weekSonnet;
+  // A used-up limit the server grades critical (a scoped Fable cap) counts too.
+  const hasAlert = usageLib.METER_KEYS.some((key) => usage[key]
+    && (usage[key].pct >= ALERT_THRESHOLDS[key] || usage[key].severity === 'critical'));
 
   if (hasAlert !== trayHasAlert) {
     trayHasAlert = hasAlert;
@@ -2187,7 +2916,7 @@ function isNewerVersion(latest, current) {
 
 function checkForUpdates() {
   return new Promise((resolve) => {
-    const url = new URL('https://api.github.com/repos/SpitOnYourFace/claude-usage-widget/releases/latest');
+    const url = new URL('https://api.github.com/repos/KrasimirKralev/claude-meter/releases/latest');
     const req = https.request({
       hostname: url.hostname,
       path: url.pathname,
@@ -2427,6 +3156,9 @@ function getAccessToken(ctx, forceRefresh) {
 // other account records needsLogin so the accounts strip can flag it quietly.
 function reportAuthExpired(ctx) {
   ctx.needsLogin = true;
+  // The login line stays red only while this exact credentials file is in
+  // place; a new login (a new file) clears it at the next minute check.
+  ctx.needsLoginMtime = credsMtime(ctx.credsFile);
   ctx.lastError = 'OAuth session expired — please re-authenticate';
   if (ctx.id !== activeAccountId) { broadcastUsage(); return; }
   if (win && !win.isDestroyed()) {
@@ -2441,18 +3173,36 @@ function reportAuthExpired(ctx) {
 // Called by doSync on 401/403 — force a refresh and retry.
 // Only escalates to a user-visible re-auth prompt when no refresh token is available;
 // the refresh endpoint itself will surface a sign-in prompt if the refresh token is rejected.
+function retryAuthSync(ctx, delay) {
+  if (ctx.authRetryTimer) clearTimeout(ctx.authRetryTimer);
+  ctx.authRetryTimer = setTimeout(() => {
+    ctx.authRetryTimer = null;
+    doSync(ctx);
+  }, delay);
+}
+
 function handleAuthFailure(ctx) {
   ctx.cachedToken = null;
   ctx.tokenLastRead = 0;
+  if (ctx.signedOut) return;
   const oauth = readOauthCreds(ctx);
   if (oauth && oauth.refreshToken) {
+    // One retry waits at a time, each longer than the last. Past the limit the regular polls and a new
+    // login are what bring it back: every refresh here rotates the login's token.
+    ctx.authAttempts = (ctx.authAttempts || 0) + 1;
+    if (ctx.authAttempts > AUTH_MAX_ATTEMPTS) {
+      ctx.lastError = ctx.lastError || 'This login keeps being refused.';
+      broadcastUsage();
+      return;
+    }
+    const wait = Math.min(AUTH_RETRY_MAX_MS, AUTH_RETRY_BASE_MS * Math.pow(2, ctx.authAttempts - 1));
     if (!ctx.isRefreshing) {
       refreshAccessToken(ctx, oauth.refreshToken, () => {
-        setTimeout(() => doSync(ctx), 500);
+        retryAuthSync(ctx, ctx.authAttempts === 1 ? 500 : wait);
       });
     } else {
-      // Refresh already in progress — retry sync after it likely completes
-      setTimeout(() => doSync(ctx), 5000);
+      // Refresh already in progress: retry sync after it likely completes
+      retryAuthSync(ctx, wait);
     }
     return;
   }
@@ -2462,7 +3212,11 @@ function handleAuthFailure(ctx) {
 }
 
 function refreshAccessToken(ctx, refreshToken, onSuccess) {
-  if (!ctx || ctx.isRefreshing) return;
+  if (!ctx || ctx.isRefreshing || ctx.signedOut) return;
+  // A refresh token the endpoint already rejected stays rejected until the
+  // creds file carries a different one (a re-login); every token read used to
+  // retry it, which hammered the endpoint ~100 times a minute.
+  if (ctx.rejectedRefreshToken && ctx.rejectedRefreshToken === refreshToken) return;
   ctx.isRefreshing = true;
   const credsFile = ctx.credsFile;
   const postData = JSON.stringify({
@@ -2498,6 +3252,7 @@ function refreshAccessToken(ctx, refreshToken, onSuccess) {
             ctx.tokenLastRead = Date.now();
             ctx.refreshRetryCount = 0;
             ctx.needsLogin = false;
+            ctx.rejectedRefreshToken = null;
             if (ctx.refreshRetryTimer) { clearTimeout(ctx.refreshRetryTimer); ctx.refreshRetryTimer = null; }
             if (typeof onSuccess === 'function') onSuccess();
           }
@@ -2506,9 +3261,12 @@ function refreshAccessToken(ctx, refreshToken, onSuccess) {
         // Throttled, not rejected — back off and try the same refresh token again.
         console.error('[token-refresh] Rate limited for account', ctx.id, '— backing off');
         scheduleRefreshRetry(ctx, refreshToken);
-      } else if (res.statusCode === 401 || res.statusCode === 403) {
-        // Refresh token revoked or expired (they live ~30 days)
+      } else if (res.statusCode === 400 || res.statusCode === 401 || res.statusCode === 403) {
+        // Refresh token revoked, expired (they live ~30 days) or, on 400
+        // (invalid_grant), rotated away by another client that logged in with
+        // the same account. Retrying the same token can never succeed.
         console.error('[token-refresh] Refresh rejected for account', ctx.id, 'status', res.statusCode);
+        ctx.rejectedRefreshToken = refreshToken;
         reportAuthExpired(ctx);
       } else {
         console.error('[token-refresh] Unexpected status', res.statusCode, 'for account', ctx.id);
@@ -2546,6 +3304,11 @@ function scheduleRefreshRetry(ctx, refreshToken) {
 // Rate limits are per access token. A 429 on one account must never shorten
 // another's polling, and must never be retried faster than these floors.
 const MIN_TOKEN_POLL_MS = 3 * 60 * 1000;
+// The regular round comes every 3 minutes on the dot, so a hair less must not make it skip a turn.
+const POLL_SLACK_MS = 5000;
+const AUTH_RETRY_BASE_MS = 5000;
+const AUTH_RETRY_MAX_MS = 5 * 60 * 1000;
+const AUTH_MAX_ATTEMPTS = 6;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
 
 function resetSyncIfStale(ctx) {
@@ -2573,6 +3336,7 @@ function fetchUsage(ctx) {
     }
     ctx.syncing = true;
     ctx.syncStartedAt = Date.now();
+    ctx.lastRequestAt = ctx.syncStartedAt;
 
     const token = getAccessToken(ctx);
     if (!token) {
@@ -2671,84 +3435,18 @@ function fetchUsage(ctx) {
   });
 }
 
-function clampPct(val) {
-  const n = Number(val) || 0;
-  return Math.min(100, Math.max(0, Math.round(n)));
-}
-
+// The usage body -> meters mapping lives in usage-limits.js (tested without
+// Electron). A meter the plan does not have is null, never { pct: 0 }.
 function buildUsage(data) {
-  const usage = {
-    session: { pct: 0, resetsAt: null, label: 'Current session' },
-    weekAll: { pct: 0, resetsAt: null, label: 'Current week (all models)' },
-    weekSonnet: { pct: 0, resetsAt: null, label: 'Current week (Fable only)' },
-    extraUsage: { enabled: false },
-    syncTime: Date.now(),
-  };
-
-  if (data.five_hour) {
-    usage.session = {
-      pct: clampPct(data.five_hour.utilization),
-      resetsAt: data.five_hour.resets_at,
-      label: 'Current session',
-    };
-  }
-  if (data.seven_day) {
-    usage.weekAll = {
-      pct: clampPct(data.seven_day.utilization),
-      resetsAt: data.seven_day.resets_at,
-      label: 'Current week (all models)',
-    };
-  }
-  // Model-scoped weekly limit. The old fixed seven_day_sonnet field is null on
-  // current plans; the API now reports per-model caps in the `limits` array as
-  // kind "weekly_scoped" with the model name attached (currently Fable).
-  // Internal key stays `weekSonnet` for history/settings compatibility.
-  const scoped = Array.isArray(data.limits)
-    ? data.limits.find((l) => l && l.kind === 'weekly_scoped' && l.scope && l.scope.model)
-    : null;
-  if (scoped) {
-    const modelName = scoped.scope.model.display_name || 'model';
-    usage.weekSonnet = {
-      pct: clampPct(scoped.percent),
-      resetsAt: scoped.resets_at,
-      label: 'Current week (' + modelName + ' only)',
-      model: modelName,
-    };
-  } else if (data.seven_day_sonnet) {
-    // Legacy fallback for accounts still reporting the fixed Sonnet bucket
-    usage.weekSonnet = {
-      pct: clampPct(data.seven_day_sonnet.utilization),
-      resetsAt: data.seven_day_sonnet.resets_at,
-      label: 'Current week (Sonnet only)',
-      model: 'Sonnet',
-    };
-  }
-  if (data.extra_usage) {
-    const eu = data.extra_usage;
-    const util = Number(eu.utilization);
-    const dec = Number.isFinite(Number(eu.decimal_places)) ? Number(eu.decimal_places) : 2;
-    usage.extraUsage = {
-      enabled: !!eu.is_enabled,
-      utilization: Number.isFinite(util) ? util : null,
-      usedMinor: Number.isFinite(Number(eu.used_credits)) ? Number(eu.used_credits) : null,
-      limitMinor: Number.isFinite(Number(eu.monthly_limit)) ? Number(eu.monthly_limit) : null,
-      currency: typeof eu.currency === 'string' ? eu.currency : 'USD',
-      decimals: dec,
-    };
-    // Prefer the precise percent/severity from the spend object when present
-    if (data.spend && typeof data.spend.percent === 'number') {
-      usage.extraUsage.percent = data.spend.percent;
-      usage.extraUsage.severity = data.spend.severity || null;
-    }
-  }
-
-  return usage;
+  return usageLib.buildUsage(data, Date.now());
 }
 
 // The usage-update payload every renderer receives: one entry per enabled
 // account plus which one is active. Renderers pick the active entry for the
 // main meters and may render the rest alongside.
 function buildUsagePayload() {
+  const now = Date.now();
+  const env = currentLoginEnv(now);
   return {
     accounts: enabledAccounts().map((ctx) => ({
       id: ctx.id,
@@ -2763,14 +3461,19 @@ function buildUsagePayload() {
       cliActive: isCliActive(ctx),
       error: ctx.lastError,
       needsLogin: !!ctx.needsLogin,
+      // When this login runs out, as token-free display strings.
+      login: loginInfoFor(ctx, now, env),
     })),
     activeAccountId: activeAccountId,
+    activeFollowsCli: activeFollowsCli(),
+    cliMove: cliMoveAvailable(),
     cliLauncher: cliLauncherName(),
   };
 }
 
 function broadcastUsage() {
   const payload = buildUsagePayload();
+  lastLoginSig = loginLib.loginSignature(payload.accounts.map((a) => a.login));
   if (win && !win.isDestroyed()) {
     win.webContents.send('usage-update', payload);
     // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
@@ -2779,6 +3482,72 @@ function broadcastUsage() {
     dashWin.webContents.send('usage-update', payload);
     dashWin.webContents.send('history-update', activeHistory());
   }
+}
+
+// --- Login expiry ---
+// A login lives until its refresh token's hard expiry (~30 days after the
+// login; a refresh never extends it). Every payload carries one token-free line
+// per account, read from its credentials file, and checkLogins() re-reads them
+// once a minute so a new day, an amber/red turn or a fresh login shows up
+// without waiting for the next sync.
+const loginLib = require('./login-expiry');
+const usageLib = require('./usage-limits');
+// Written by the clx launcher, when installed: its per-account `auth` verdict.
+const CLX_USAGE_CACHE_FILE = path.join(CLAUDE_DIR, 'cc-usage-cache.json');
+const LOGIN_ENV_TTL_MS = 30 * 1000;
+let loginEnv = { at: 0, cmLogin: false, clx: null };
+let lastLoginSig = '';
+
+function credsMtime(file) {
+  try { return fs.statSync(file).mtimeMs; } catch { return 0; }
+}
+
+// Re-probed every 30 s rather than once: cm-login or clx can appear (or go)
+// while the app runs.
+function currentLoginEnv(now) {
+  if (now - loginEnv.at < LOGIN_ENV_TTL_MS) return loginEnv;
+  let clx = null;
+  try {
+    clx = JSON.parse(fs.readFileSync(CLX_USAGE_CACHE_FILE, 'utf-8'));
+  } catch { /* optional - without clx the credentials file alone decides */ }
+  loginEnv = { at: now, cmLogin: loginLib.findCmLogin(process.env.PATH, os.homedir()), clx };
+  return loginEnv;
+}
+
+function loginInfoFor(ctx, now, env) {
+  const read = loginLib.readCredsFacts(ctx.credsFile);
+  let rejected = null;
+  if (ctx.signedOut) {
+    rejected = 'signed out';
+  } else if (ctx.needsLogin && (!ctx.needsLoginMtime || ctx.needsLoginMtime === read.mtimeMs)) {
+    // The server refused this login and no new one has landed since.
+    rejected = 'sign-in rejected';
+  } else {
+    rejected = loginLib.clxVerdict(env.clx, ctx.dir, read.mtimeMs);
+  }
+  return loginLib.describeLogin(read, now, {
+    rejected,
+    command: loginLib.loginCommand({ dir: ctx.dir, email: ctx.email, cmLogin: env.cmLogin }),
+  });
+}
+
+function checkLogins() {
+  const now = Date.now();
+  for (const ctx of enabledAccounts()) {
+    // A new login landed on an account flagged as needing one: sync it now so
+    // the flag clears together with the line, not at the next 3-minute round.
+    if (!ctx.needsLogin || ctx.signedOut) continue;
+    const mtime = credsMtime(ctx.credsFile);
+    if (!mtime || mtime === ctx.needsLoginMtime || mtime === ctx.loginKickMtime) continue;
+    ctx.loginKickMtime = mtime; // one kick per new file
+    ctx.authAttempts = 0;
+    ctx.cachedToken = null;
+    ctx.tokenLastRead = 0;
+    doSync(ctx);
+  }
+  const env = currentLoginEnv(now);
+  const sig = loginLib.loginSignature(enabledAccounts().map((ctx) => loginInfoFor(ctx, now, env)));
+  if (sig !== lastLoginSig) broadcastUsage();
 }
 
 // --- Claude official status page ---
@@ -2882,7 +3651,8 @@ function scheduleNetworkRetry(ctx) {
 // Smart sync — only hits API if data is stale
 function syncIfStale(ctx) {
   if (!ctx) return;
-  if (Date.now() - ctx.lastSuccessfulSync < MIN_SYNC_INTERVAL) {
+  const lastTouched = Math.max(ctx.lastSuccessfulSync || 0, ctx.lastRequestAt || 0);
+  if (Date.now() - lastTouched < MIN_TOKEN_POLL_MS - POLL_SLACK_MS) {
     // Data is fresh — just broadcast cached data
     broadcastUsage();
     return;
@@ -2915,7 +3685,7 @@ function syncAllAccounts(force) {
 }
 
 async function doSync(ctx) {
-  if (!ctx) return;
+  if (!ctx || ctx.signedOut) return;
   // Force-clear stale sync lock
   resetSyncIfStale(ctx);
   const isActive = ctx.id === activeAccountId;
@@ -2929,16 +3699,11 @@ async function doSync(ctx) {
 
     // Guard: don't overwrite good cached data with all-zero response (treat as bad response)
     const cached = ctx.cachedUsage;
-    const allZero = newUsage.session.pct === 0
-      && newUsage.weekAll.pct === 0
-      && newUsage.weekSonnet.pct === 0;
-    const hasResetTimes = newUsage.session.resetsAt || newUsage.weekAll.resetsAt || newUsage.weekSonnet.resetsAt;
-    if (allZero && cached && !hasResetTimes
-      && (cached.session.pct > 0 || cached.weekAll.pct > 0 || cached.weekSonnet.pct > 0)) {
-      // Bad response — keep cached data, schedule retry, don't mark as successful sync
+    if (usageLib.looksEmpty(newUsage) && cached && usageLib.anyUsage(cached)) {
+      // Bad response: keep cached data, don't mark as a successful sync. The next regular round tries
+      // again, because quick retries would break the limit of one request every 3 minutes per token.
       broadcastUsage();
       updateTrayTooltip();
-      scheduleNetworkRetry(ctx);
       return;
     }
 
@@ -2946,6 +3711,7 @@ async function doSync(ctx) {
     ctx.lastSuccessfulSync = Date.now();
     ctx.lastError = null;
     ctx.needsLogin = false;
+    ctx.authAttempts = 0;
     clearRetryTimer(ctx); // sync succeeded — stop retrying
     saveCachedUsage(ctx);
     appendHistory(ctx);
@@ -3047,7 +3813,7 @@ function updateTrayTooltip() {
     if (ctx.needsLogin) {
       lines.push(`${ctx.name}${cliTag} — sign-in needed`);
     } else if (ctx.cachedUsage) {
-      let line = `${ctx.name}${cliTag} 5h ${ctx.cachedUsage.session.pct}% · 7d ${ctx.cachedUsage.weekAll.pct}%`;
+      let line = `${ctx.name}${cliTag} ${usageLib.summaryLine(ctx.cachedUsage) || 'no limits reported'}`;
       if (limitedMin) line += ` (rate limited, retrying in ${limitedMin}m)`;
       lines.push(line);
     } else if (limitedMin) {
@@ -3133,6 +3899,8 @@ function buildTrayMenu() {
     { label: 'Show  (' + currentHotkey + ')', click: () => toggleWindow() },
     { label: 'Dashboard', click: () => openDashboard() },
     { label: 'Tasks', click: () => openTasksWindow() },
+    { label: 'Relax now', click: () => relaxNow('tray') },
+    { label: 'Daily digest', click: () => toggleDigest('tray') },
     { type: 'separator' },
     { label: 'Quit', click: () => { if (win && !win.isDestroyed()) win.destroy(); app.quit(); } },
   ]);
@@ -3184,10 +3952,6 @@ function createWindow() {
   });
 
   // Navigation guards — block external URLs and new windows
-  win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) e.preventDefault();
-  });
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   win.on('close', (e) => {
     e.preventDefault();
@@ -3418,12 +4182,12 @@ function toggleWindow() {
         // Offset by widget position delta (in case widget moved)
         const dx = widgetBounds.x - (saved ? saved.x : widgetBounds.x);
         const dy = widgetBounds.y - (saved ? saved.y : widgetBounds.y);
-        tasksWin.setBounds({
+        tasksWin.setBounds(clampToWorkArea({
           x: savedTasksBounds.x + dx,
           y: savedTasksBounds.y + dy,
           width: savedTasksBounds.width,
           height: savedTasksBounds.height,
-        });
+        }));
       } else if (tasksSnapped) {
         const sb = getSnappedTasksBounds(tasksSnapped);
         if (sb) tasksWin.setBounds(sb);
@@ -3436,12 +4200,12 @@ function toggleWindow() {
       if (savedCalBounds) {
         const dx = widgetBounds.x - (saved ? saved.x : widgetBounds.x);
         const dy = widgetBounds.y - (saved ? saved.y : widgetBounds.y);
-        calWin.setBounds({
+        calWin.setBounds(clampToWorkArea({
           x: savedCalBounds.x + dx,
           y: savedCalBounds.y + dy,
           width: savedCalBounds.width,
           height: savedCalBounds.height,
-        });
+        }));
       } else if (calendarSnapped) {
         const cb = getSnappedCalendarBounds(calendarSnapped);
         if (cb) calWin.setBounds(cb);
@@ -3453,12 +4217,12 @@ function toggleWindow() {
       if (savedNotesBounds) {
         const dx = widgetBounds.x - (saved ? saved.x : widgetBounds.x);
         const dy = widgetBounds.y - (saved ? saved.y : widgetBounds.y);
-        notesWin.setBounds({
+        notesWin.setBounds(clampToWorkArea({
           x: savedNotesBounds.x + dx,
           y: savedNotesBounds.y + dy,
           width: savedNotesBounds.width,
           height: savedNotesBounds.height,
-        });
+        }));
       }
       setTimeout(() => { if (notesWin && !notesWin.isDestroyed()) notesWin.show(); }, showDelay);
     }
@@ -3469,7 +4233,7 @@ function toggleWindow() {
       // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
       win.webContents.send('pomo-update', { state: pomoState, seconds: pomoSeconds, total: pomoTotal });
     }
-    // Sync on open — hits API if data is >60s old (MIN_SYNC_INTERVAL)
+    // Sync on open: hits the API only if this token's last request is 3 minutes old
     syncAllAccounts(false);
     tryShowDigestOnOpen();
     if (trayHasAlert) {
@@ -3501,7 +4265,7 @@ function openDashboard(tab) {
   const wb = win && !win.isDestroyed() ? win.getBounds() : null;
   const display = wb ? screen.getDisplayMatching(wb) : getWidgetDisplay();
   const wa = display.workArea;
-  const dW = 900, dH = 650;
+  const dW = Math.min(1100, wa.width), dH = Math.min(780, wa.height);
   let dX, dY;
   if (wb) {
     // Try to center on screen but shift if it would overlap the widget
@@ -3520,8 +4284,8 @@ function openDashboard(tab) {
     height: dH,
     x: dX,
     y: dY,
-    minWidth: 700,
-    minHeight: 500,
+    minWidth: 900,
+    minHeight: 560,
     frame: false,
     ...POPUP_GLASS_OPTS_FN(),
     icon: getWindowIcon(),
@@ -3535,12 +4299,10 @@ function openDashboard(tab) {
   });
 
   applyLinuxPopupTransparency(dashWin);
+  // The default menu's Ctrl+Q would quit the widget too, and its Ctrl+R would reload around an open map.
+  dashWin.setMenu(null);
   dashWin.loadFile('dashboard.html');
 
-  dashWin.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) e.preventDefault();
-  });
-  dashWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   dashWin.webContents.on('did-finish-load', () => {
     dashWin.webContents.send('usage-update', buildUsagePayload());
@@ -3559,7 +4321,11 @@ function openDashboard(tab) {
     }
   });
 
-  dashWin.on('closed', () => { dashWin = null; });
+  dashWin.on('closed', () => {
+    dashWin = null;
+    if (mapsFeature) mapsFeature.dashboardClosed();
+    if (notesView) notesView.dashboardClosed();
+  });
 }
 
 // --- Glass morphism: mica/acrylic on Windows 11 ---
@@ -3583,7 +4349,18 @@ function startToggleSocket() {
     const sockPath = path.join(os.tmpdir(), 'claude-meter-' + (process.getuid ? process.getuid() : 0) + '.sock');
     try { fs.unlinkSync(sockPath); } catch { /* not there */ }
     const server = net.createServer((c) => {
-      c.on('data', () => {
+      c.on('data', (buf) => {
+        // `relax` starts a break, `digest` opens or closes the daily digest (for
+        // keyboard shortcuts); anything else toggles the widget.
+        const cmd = String(buf).trim();
+        if (cmd === 'relax') {
+          relaxNow('socket');
+          return;
+        }
+        if (cmd === 'digest') {
+          toggleDigest('socket');
+          return;
+        }
         if (win && !win.isDestroyed()) {
           const wasVisible = win.isVisible();
           toggleWindow();
@@ -3608,12 +4385,12 @@ const LINUX_WIN_RADIUS = '12px';
 
 // Documents whose own markup already paints a rounded, opaque card (.popup)
 // filling the window. Only the body behind it has to be cleared.
-const LINUX_CARD_DOCS = new Set(['popup', 'pomo-popup', 'meeting-popup']);
+const LINUX_CARD_DOCS = new Set(['popup', 'pomo-popup', 'meeting-popup', 'relax-toast']);
 
 // Documents where BODY itself is the visual surface: there is no outer card,
 // every one of them declares `body { background: var(--bg) }`.
 const LINUX_SURFACE_DOCS = new Set([
-  'index', 'dashboard', 'calendar', 'tasks', 'notes', 'capture', 'add-event',
+  'index', 'dashboard', 'calendar', 'tasks', 'notes', 'capture',
 ]);
 
 // Clearing the body background is not enough for the surface documents:
@@ -3626,7 +4403,7 @@ const LINUX_SURFACE_DOCS = new Set([
 //    and would square the window off again. body has to CLIP them, and it only
 //    can once html stops propagating body's overflow to the viewport: while the
 //    root is `overflow: visible` the used value on body becomes visible too.
-//  - Specificity. dashboard/calendar/tasks/add-event carry a late
+//  - Specificity. dashboard/calendar/tasks carry a late
 //    `body { background: var(--bg) !important }` theme override, so `body` on
 //    its own is not enough to beat it - `html body` is.
 // The fixed pseudo-element escapes body's clip (body is no containing block for
@@ -3673,6 +4450,10 @@ function applyLinuxPopupTransparency(win) {
     } catch (e) { console.log('[linux-shape] threw ' + e); }
   });
 }
+
+// A plain window that opens without focus makes GNOME announce it with a "… is ready" banner, which is
+// noise on top of the popup itself. This kind of window opens quietly and still takes clicks.
+const QUIET_POPUP_OPTS = process.platform === 'linux' ? { type: 'toolbar' } : {};
 
 function POPUP_GLASS_OPTS_FN() {
   if (process.platform !== 'linux') return GLASS_OPTS_FN();
@@ -4471,42 +5252,6 @@ function resolveOverlaps() {
 
 let currentNoteTaskId = null; // track which task note is open
 
-function openAddEventWindow(selectedDate) {
-  if (addEventWin && !addEventWin.isDestroyed()) {
-    addEventWin.focus();
-    if (selectedDate) addEventWin.webContents.send('set-date', selectedDate);
-    return;
-  }
-
-  const display = getWidgetDisplay();
-  const wa = display.workArea;
-  const eW = 320;
-  const eH = 480;
-
-  addEventWin = new BrowserWindow({
-    width: eW, height: eH,
-    x: Math.round(wa.x + (wa.width - eW) / 2),
-    y: Math.round(wa.y + (wa.height - eH) / 2),
-    frame: false, resizable: false,
-    skipTaskbar: true, alwaysOnTop: true,
-    ...POPUP_GLASS_OPTS_FN(),
-    show: false, icon: getWindowIcon(),
-    webPreferences: {
-      preload: path.join(__dirname, 'add-event-preload.js'),
-      contextIsolation: true, nodeIntegration: false, sandbox: true,
-    },
-  });
-  applyLinuxPopupTransparency(addEventWin);
-  addEventWin.loadFile('add-event.html');
-  addEventWin.once('ready-to-show', () => {
-    if (addEventWin && !addEventWin.isDestroyed()) addEventWin.show();
-    const theme = THEMES[currentTheme] || THEMES.dark;
-    addEventWin.webContents.send('theme-update', { name: currentTheme, ...theme });
-    if (selectedDate) addEventWin.webContents.send('set-date', selectedDate);
-  });
-  addEventWin.on('closed', () => { addEventWin = null; });
-}
-
 function openNotesWindow(taskId, taskText) {
   if (notesWin && !notesWin.isDestroyed()) {
     if (taskId) {
@@ -4638,6 +5383,24 @@ function saveNotesAppBounds() {
   }, 400);
 }
 
+// Spellcheck suggestions on right-click.
+function addSpellMenu(contents, getWindow) {
+  contents.on('context-menu', (_event, params) => {
+    if (!params.misspelledWord) return;
+    const items = params.dictionarySuggestions.slice(0, 5).map((suggestion) => ({
+      label: suggestion,
+      click: () => contents.replaceMisspelling(suggestion),
+    }));
+    if (items.length > 0) items.push({ type: 'separator' });
+    items.push({
+      label: 'Add to dictionary',
+      click: () => contents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+    });
+    const window = typeof getWindow === 'function' ? getWindow() : getWindow;
+    Menu.buildFromTemplate(items).popup(window ? { window } : {});
+  });
+}
+
 function openNotesAppWindow() {
   if (notesAppWin && !notesAppWin.isDestroyed()) {
     // Toggle like the other widget panels: second click closes
@@ -4690,24 +5453,7 @@ function openNotesAppWindow() {
     notesAppWin.webContents.send('theme-update', { name: currentTheme, ...theme });
   });
 
-  // Spellcheck context menu (same UX as the panel)
-  notesAppWin.webContents.on('context-menu', (event, params) => {
-    if (params.misspelledWord) {
-      const menuItems = [];
-      for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
-        menuItems.push({
-          label: suggestion,
-          click: () => notesAppWin.webContents.replaceMisspelling(suggestion),
-        });
-      }
-      if (menuItems.length > 0) menuItems.push({ type: 'separator' });
-      menuItems.push({
-        label: 'Add to dictionary',
-        click: () => notesAppWin.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
-      });
-      Menu.buildFromTemplate(menuItems).popup({ window: notesAppWin });
-    }
-  });
+  addSpellMenu(notesAppWin.webContents, notesAppWin);
 
   notesAppWin.on('moved', saveNotesAppBounds);
   notesAppWin.on('resized', saveNotesAppBounds);
@@ -4736,6 +5482,7 @@ function openQuickTaskCapture() {
   });
   applyLinuxPopupTransparency(captureWin);
   captureWin.loadFile('capture.html');
+  captureWin.webContents.once('did-finish-load', () => sendCurrentTheme(captureWin));
   captureWin.once('ready-to-show', () => {
     if (captureWin && !captureWin.isDestroyed()) { captureWin.show(); captureWin.focus(); }
   });
@@ -4890,10 +5637,6 @@ function openTasksWindow() {
   });
   tasksWin.loadFile('tasks.html');
 
-  tasksWin.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) e.preventDefault();
-  });
-  tasksWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   const initWidgetBounds = win && !win.isDestroyed() ? win.getBounds() : null;
   tasksWin.once('ready-to-show', () => {
@@ -4920,8 +5663,16 @@ function openTasksWindow() {
   });
 }
 
+ipcMain.on('calendar-window-close', (event) => {
+  if (!isLocalSender(event)) return;
+  if (calWin && !calWin.isDestroyed()) {
+    calWin.hide();
+    calWasVisible = false;
+  }
+});
+
 ipcMain.on('tasks-window-close', (event) => {
-  try { if (!event.senderFrame || !event.senderFrame.url.startsWith('file://')) return; } catch { return; }
+  if (!isLocalSender(event)) return;
   if (tasksMovedTimer) { clearTimeout(tasksMovedTimer); tasksMovedTimer = null; }
   if (tasksWin && !tasksWin.isDestroyed()) {
     tasksUserHidden = true;
@@ -4980,9 +5731,380 @@ function startFileWatcher() {
   } catch { /* ignore */ }
 }
 
+// --- Phone/watch sync: op inbox, heartbeat, calendar feed ---
+// claude-meter-hub (~/claude-meter/hub, contract: mobile-briefs/SYNC-API.md v1.1)
+// serves the phone and the watch. It never edits our files: tasks and calendar
+// live in memory here and every change overwrites the files, so an outside write
+// would be lost on the next save. The hub drops one op file per change into
+// INBOX_DIR instead; we claim it by rename, apply it through the same functions
+// the IPC handlers use (so every open window updates live) and leave a result
+// file for the hub. ALIVE_FILE tells the hub someone is here to apply ops.
+
+const INBOX_OP_RE = /^([A-Za-z0-9_-]{8,64})\.op\.json$/;
+const INBOX_CLAIMED_RE = /^([A-Za-z0-9_-]{8,64})\.claimed\.json$/;
+const INBOX_RESULT_TTL_MS = 24 * 60 * 60 * 1000;   // results nobody collected (queued ops)
+const HEARTBEAT_MS = 15000;
+const NOTES_MAX = 50;                                // saveStickyNotes keeps the first 50
+const NOTE_COLORS = ['yellow', 'pink', 'green', 'blue', 'purple', 'default'];
+const EVENT_COLORS = ['blue', 'green', 'orange', 'red', 'purple'];
+const TASK_PRIORITIES = ['high', 'medium', 'low'];
+const INBOX_ID_RE = /^[a-z0-9]{4,20}$/;              // task / note / local event ids
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+let inboxWatcher = null;
+let inboxDebounce = null;
+let inboxBusy = false;
+let inboxAgain = false;
+let feedDate = null;
+
+function localDateStr(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function isRealDate(s) {
+  if (!isValidDateStr(s)) return false;
+  const d = new Date(s + 'T12:00');
+  return !isNaN(d.getTime()) && localDateStr(d) === s;
+}
+
+// The notes window's noteTitle(): first "# heading", else the title field, else
+// the first line. The archive panel stores and shows this, so we do too.
+function noteDisplayTitle(note) {
+  const text = note.text || '';
+  const mh = text.match(/^#\s+(.+)$/m);
+  if (mh) return mh[1].trim().slice(0, 46);
+  if (note.title) return note.title.slice(0, 46);
+  const first = text.split('\n').map((s) => s.trim()).filter(Boolean)[0];
+  return first ? first.replace(/^[#>\-*\s]+/, '').slice(0, 46) : 'Untitled';
+}
+
+// Append a captured line to the "# Inbox" note, creating it (yellow, first on
+// the board) on first use. This is what Ctrl+] did before it switched to adding
+// tasks (5eb531c); Ctrl+] still adds tasks, and the phone's quick capture keeps
+// this. Goes through saveStickyNotes so the caps and live update match a save.
+function appendToInbox(text) {
+  let notes = readStickyNotes();
+  if (!Array.isArray(notes)) notes = [];
+  const line = '- ' + String(text).slice(0, 500);
+  let inbox = notes.find((n) => n && typeof n.text === 'string' && /^#\s*Inbox\b/i.test(n.text.trim()));
+  if (inbox) {
+    inbox.text = inbox.text.replace(/\s+$/, '') + '\n' + line;
+  } else {
+    if (notes.length >= NOTES_MAX) return null; // a new first note would push the last one off
+    inbox = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      title: '', text: '# Inbox\n\n' + line, color: 'yellow', createdAt: Date.now(),
+    };
+    notes.unshift(inbox);
+  }
+  const clean = saveStickyNotes(notes, null);
+  return clean.find((n) => n.id === inbox.id) || null;
+}
+
+function inboxOk(result) { return Object.assign({ ok: true, status: 200 }, result || {}); }
+function inboxFail(status, error, message) { return { ok: false, status, error, message }; }
+const NOTES_FULL = 'The desktop keeps at most 50 notes - archive one first.';
+
+// One op from the hub -> the same calls a desktop window would make. The hub
+// validates too; this is the check that counts.
+function applyInboxOp(op) {
+  if (!op || op.v !== 1 || typeof op.op !== 'string') return inboxFail(400, 'bad_request', 'Malformed op.');
+  const a = op.args && typeof op.args === 'object' ? op.args : {};
+  const str = (v) => typeof v === 'string';
+  switch (op.op) {
+    case 'tasks.add': {
+      if (!str(a.text) || !a.text.trim()) return inboxFail(400, 'bad_request', '`text` is required.');
+      if (a.priority !== undefined && TASK_PRIORITIES.indexOf(a.priority) < 0) return inboxFail(400, 'bad_request', 'Bad `priority`.');
+      // The same add sent again (sync replays what it is not sure landed): it is there already.
+      if (str(a.id) && tasks.some((t) => t.id === a.id)) return inboxOk({ task: tasks.find((t) => t.id === a.id) });
+      const task = addTask(a.text, a.priority, a.id); // tasks-add-with-priority
+      return task ? inboxOk({ task }) : inboxFail(400, 'bad_request', '`text` is required.');
+    }
+    case 'tasks.update': {
+      const task = str(a.id) ? tasks.find((t) => t.id === a.id) : null;
+      if (!task) return inboxFail(404, 'not_found', 'No such task.');
+      if (a.text !== undefined && (!str(a.text) || !a.text.trim())) return inboxFail(400, 'bad_request', 'Bad `text`.');
+      if (a.priority !== undefined && TASK_PRIORITIES.indexOf(a.priority) < 0) return inboxFail(400, 'bad_request', 'Bad `priority`.');
+      if (a.done !== undefined && typeof a.done !== 'boolean') return inboxFail(400, 'bad_request', 'Bad `done`.');
+      if (a.text !== undefined && a.text.trim().slice(0, 200) !== task.text) renameTask(task.id, a.text);
+      if (a.priority !== undefined && a.priority !== task.priority) setTaskPriority(task.id, a.priority); // tasks-set-priority
+      if (a.done !== undefined && a.done !== !!task.done) toggleTask(task.id);                         // tasks-toggle
+      return inboxOk({ task: tasks.find((t) => t.id === task.id) });
+    }
+    case 'tasks.delete': {
+      if (!str(a.id) || !tasks.some((t) => t.id === a.id)) return inboxFail(404, 'not_found', 'No such task.');
+      deleteTask(a.id); // tasks-delete
+      return inboxOk();
+    }
+    case 'tasks.clearCompleted': {
+      const before = tasks.length;
+      clearCompletedTasks(); // tasks-clear-completed
+      return inboxOk({ removed: before - tasks.length });
+    }
+    case 'calendar.add': {
+      if (!str(a.title) || !a.title.trim()) return inboxFail(400, 'bad_request', '`title` is required.');
+      if (!isRealDate(a.date)) return inboxFail(400, 'bad_request', '`date` must be YYYY-MM-DD.');
+      if (a.time !== undefined && a.time !== null && !(str(a.time) && TIME_RE.test(a.time))) return inboxFail(400, 'bad_request', '`time` must be HH:MM.');
+      if (a.duration !== undefined && a.duration !== null && !(Number.isInteger(a.duration) && a.duration > 0)) return inboxFail(400, 'bad_request', 'Bad `duration`.');
+      if (a.color !== undefined && EVENT_COLORS.indexOf(a.color) < 0) return inboxFail(400, 'bad_request', 'Bad `color`.');
+      const r = addCalendarEvent({ title: a.title, date: a.date, time: a.time || null, duration: a.duration, color: a.color }); // calendar-add-event
+      return r.success ? inboxOk({ event: r.event }) : inboxFail(400, 'bad_request', 'The desktop refused this event.');
+    }
+    case 'calendar.update': {
+      const evt = str(a.id) ? calendarEvents.find((e) => e.id === a.id) : null;
+      if (!evt) return inboxFail(404, 'not_found', 'No such event.');
+      if (evt.isGoogleEvent) return inboxFail(409, 'read_only', 'Google Calendar events are read-only here.');
+      if (a.title !== undefined && (!str(a.title) || !a.title.trim())) return inboxFail(400, 'bad_request', 'Bad `title`.');
+      if (a.date !== undefined && !isRealDate(a.date)) return inboxFail(400, 'bad_request', '`date` must be YYYY-MM-DD.');
+      if (a.time !== undefined && a.time !== null && !(str(a.time) && TIME_RE.test(a.time))) return inboxFail(400, 'bad_request', '`time` must be HH:MM.');
+      if (a.color !== undefined && EVENT_COLORS.indexOf(a.color) < 0) return inboxFail(400, 'bad_request', 'Bad `color`.');
+      if (a.done !== undefined && typeof a.done !== 'boolean') return inboxFail(400, 'bad_request', 'Bad `done`.');
+      const data = { id: evt.id };
+      for (const k of ['title', 'date', 'time', 'color']) if (a[k] !== undefined) data[k] = a[k];
+      if (Object.keys(data).length > 1) updateCalendarEvent(data);             // calendar-update-event
+      if (a.done !== undefined && a.done !== !!evt.done) toggleCalendarEvent({ id: evt.id }); // calendar-toggle-event
+      return inboxOk({ event: calendarEvents.find((e) => e.id === evt.id) });
+    }
+    case 'calendar.delete': {
+      const evt = str(a.id) ? calendarEvents.find((e) => e.id === a.id) : null;
+      if (!evt) return inboxFail(404, 'not_found', 'No such event.');
+      if (evt.isGoogleEvent) return inboxFail(409, 'read_only', 'Google Calendar events are read-only here.');
+      deleteCalendarEvent({ id: evt.id }); // calendar-delete-event
+      return inboxOk();
+    }
+    case 'notes.add': {
+      if (!str(a.title) || !str(a.text)) return inboxFail(400, 'bad_request', '`title` and `text` are required.');
+      if (a.color !== undefined && NOTE_COLORS.indexOf(a.color) < 0) return inboxFail(400, 'bad_request', 'Bad `color`.');
+      let notes = readStickyNotes();
+      if (!Array.isArray(notes)) notes = [];
+      // A phone's or the watch's own id (hub 1.6 sync): one id everywhere, and a resent add finds it made.
+      const same = str(a.id) ? notes.find((n) => n && n.id === a.id) : null;
+      if (same) return inboxOk({ note: same });
+      if (notes.length >= NOTES_MAX) return inboxFail(400, 'bad_request', NOTES_FULL);
+      const archived = readNotesArchive();
+      const ownId = str(a.id) && INBOX_ID_RE.test(a.id) && !(Array.isArray(archived) && archived.some((n) => n && n.id === a.id));
+      // The notes window's addNote(): a new note goes at the end of the board
+      const note = {
+        id: ownId ? a.id : Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        title: a.title, text: a.text, color: a.color || 'default', createdAt: Date.now(),
+      };
+      notes.push(note);
+      const clean = saveStickyNotes(notes, null); // sticky-notes-save
+      return inboxOk({ note: clean.find((n) => n.id === note.id) });
+    }
+    case 'notes.update': {
+      let notes = readStickyNotes();
+      if (!Array.isArray(notes)) notes = [];
+      const note = str(a.id) ? notes.find((n) => n && n.id === a.id) : null;
+      if (!note) return inboxFail(404, 'not_found', 'No such note.');
+      if (a.title !== undefined && !str(a.title)) return inboxFail(400, 'bad_request', 'Bad `title`.');
+      if (a.text !== undefined && !str(a.text)) return inboxFail(400, 'bad_request', 'Bad `text`.');
+      if (a.color !== undefined && NOTE_COLORS.indexOf(a.color) < 0) return inboxFail(400, 'bad_request', 'Bad `color`.');
+      for (const k of ['title', 'text', 'color']) if (a[k] !== undefined) note[k] = a[k];
+      const clean = saveStickyNotes(notes, null); // sticky-notes-save
+      return inboxOk({ note: clean.find((n) => n.id === note.id) });
+    }
+    case 'notes.archive': {
+      let notes = readStickyNotes();
+      if (!Array.isArray(notes)) notes = [];
+      const note = str(a.id) ? notes.find((n) => n && n.id === a.id) : null;
+      if (!note) return inboxFail(404, 'not_found', 'No such note.');
+      // The notes window's archiveNote(): archive a copy, then drop it from the board
+      archiveAddNote({ id: note.id, title: noteDisplayTitle(note), text: note.text, color: note.color, createdAt: note.createdAt });
+      saveStickyNotes(notes.filter((n) => n !== note), null);
+      return inboxOk();
+    }
+    case 'notes.restore': {
+      const archive = readNotesArchive();
+      const entry = str(a.id) && Array.isArray(archive) ? archive.find((n) => n && n.id === a.id) : null;
+      if (!entry) return inboxFail(404, 'not_found', 'No such archived note.');
+      let notes = readStickyNotes();
+      if (!Array.isArray(notes)) notes = [];
+      if (!notes.some((n) => n && n.id === entry.id)) {
+        if (notes.length >= NOTES_MAX) return inboxFail(400, 'bad_request', NOTES_FULL);
+        // The archive panel's Restore: back at the end of the board, off the archive
+        notes.push({ id: entry.id, title: entry.title, text: entry.text, color: entry.color, createdAt: entry.createdAt });
+      }
+      archiveRemoveNote(entry.id);
+      const clean = saveStickyNotes(notes, null);
+      return inboxOk({ note: clean.find((n) => n.id === entry.id) });
+    }
+    case 'notes.inbox': {
+      if (!str(a.text) || !a.text.trim()) return inboxFail(400, 'bad_request', '`text` is required.');
+      const note = appendToInbox(a.text.trim());
+      return note ? inboxOk({ note }) : inboxFail(400, 'bad_request', NOTES_FULL);
+    }
+    case 'habits.set': {
+      // `learning` still comes from phone builds older than v1.4: accepted, not shown.
+      if (HABIT_KINDS.indexOf(a.kind) < 0) return inboxFail(400, 'bad_request', '`kind` must be training or reading.');
+      if (a.kind === AUTO_HABIT) {
+        return inboxFail(409, 'relax_is_automatic', 'Relax ticks itself when the day\'s '
+          + relaxLib.dailyTarget(relaxConfig) + ' breaks are done; it cannot be set by hand.');
+      }
+      if (!isRealDate(a.date)) return inboxFail(400, 'bad_request', '`date` must be YYYY-MM-DD.');
+      if (a.date > localDateStr(new Date())) return inboxFail(400, 'bad_request', '`date` is in the future.');
+      if (typeof a.done !== 'boolean') return inboxFail(400, 'bad_request', '`done` must be true or false.');
+      if (!setHabitDay(a.kind, a.date, a.done)) { // habits-toggle-day's function, as a set
+        return inboxFail(500, 'internal', 'The desktop could not save the habit.');
+      }
+      return inboxOk({ habit: { kind: a.kind, dates: habits[a.kind].slice() } });
+    }
+    default:
+      return inboxFail(400, 'bad_request', 'Unknown op.');
+  }
+}
+
+function processInbox() {
+  if (inboxBusy) { inboxAgain = true; return; }
+  inboxBusy = true;
+  try {
+    let names;
+    try { names = fs.readdirSync(INBOX_DIR); } catch { return; }
+    // opIds start with a zero-padded ms timestamp: name order is arrival order
+    for (const name of names.filter((n) => INBOX_OP_RE.test(n)).sort()) {
+      const opId = name.match(INBOX_OP_RE)[1];
+      const claimed = path.join(INBOX_DIR, opId + '.claimed.json');
+      try { fs.renameSync(path.join(INBOX_DIR, name), claimed); } catch { continue; } // gone or taken
+      let op = null;
+      try { op = JSON.parse(fs.readFileSync(claimed, 'utf-8')); } catch { op = null; }
+      let result;
+      try {
+        result = op ? applyInboxOp(op) : inboxFail(400, 'bad_request', 'Unreadable op.');
+      } catch (err) {
+        console.error('[inbox] op ' + opId + ' failed:', err && err.message);
+        result = inboxFail(500, 'internal', 'The desktop app failed to apply this change.');
+      }
+      try {
+        writeJsonAtomic(path.join(INBOX_DIR, opId + '.result.json'), Object.assign({ v: 1, opId, at: Date.now() }, result));
+      } catch { /* the hub times out and says so */ }
+      try { fs.unlinkSync(claimed); } catch { /* ignore */ }
+    }
+  } finally {
+    inboxBusy = false;
+    if (inboxAgain) { inboxAgain = false; setImmediate(processInbox); }
+  }
+}
+
+// At startup: a claim with no result means we died mid-op. The change may or may
+// not have landed and replaying it could duplicate it, so report it, never replay.
+// Results nobody collected (ops the phone was told were queued) age out.
+function recoverInbox() {
+  let names;
+  try { names = fs.readdirSync(INBOX_DIR); } catch { return; }
+  const now = Date.now();
+  for (const name of names) {
+    const full = path.join(INBOX_DIR, name);
+    const claimed = name.match(INBOX_CLAIMED_RE);
+    if (claimed) {
+      try {
+        writeJsonAtomic(path.join(INBOX_DIR, claimed[1] + '.result.json'), Object.assign(
+          { v: 1, opId: claimed[1], at: now },
+          inboxFail(500, 'interrupted', 'The desktop app stopped while applying this change; check before retrying.')));
+        fs.unlinkSync(full);
+      } catch { /* ignore */ }
+      continue;
+    }
+    if (/\.result\.json$/.test(name) || /\.tmp-\d+$/.test(name)) {
+      try { if (now - fs.statSync(full).mtimeMs > INBOX_RESULT_TTL_MS) fs.unlinkSync(full); } catch { /* ignore */ }
+    }
+  }
+}
+
+// One calendar event as the hub serves it (SYNC-API v1.1 Event)
+function feedEvent(e) {
+  const google = !!e.isGoogleEvent;
+  return {
+    id: e.id,
+    title: e.title,
+    date: e.date,
+    time: e.time || null,
+    duration: typeof e.duration === 'number' && e.duration > 0 ? e.duration : null,
+    color: e.color || 'blue',
+    done: !!e.done,
+    source: google ? 'google' : 'local',
+    account: google ? (e.googleAccount || null) : null,
+    meetLink: eventJoinLink(e),
+    linkedTaskId: e.linkedTaskId || null,
+    recurrence: e.recurrence || null,
+    recurringParentId: e.recurringParentId || null,
+  };
+}
+
+// Local + Google events for [-31 days, +62 days], as this app holds them
+// (recurring instances are already expanded into calendarEvents). No tokens.
+// The phone asks from two weeks back, so the window reaches past "yesterday".
+function writeCalendarFeed() {
+  try {
+    const now = new Date();
+    const from = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 31));
+    const to = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 62));
+    const events = calendarEvents
+      .filter((e) => e && isValidDateStr(e.date) && e.date >= from && e.date <= to)
+      .map(feedEvent);
+    writeJsonAtomic(CALENDAR_FEED_FILE, { version: 1, generatedAt: Date.now(), from, to, events });
+    feedDate = localDateStr(now);
+  } catch { /* ignore */ }
+}
+
+function writeHeartbeat() {
+  try { writeJsonAtomic(ALIVE_FILE, { pid: process.pid, at: Date.now() }); } catch { /* ignore */ }
+  // A new day moves the feed's window even when nothing changed
+  if (feedDate !== localDateStr(new Date())) writeCalendarFeed();
+}
+
+function startPhoneSync() {
+  try {
+    fs.mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 });
+    fs.chmodSync(INBOX_DIR, 0o700);
+  } catch { /* ignore */ }
+  recoverInbox();
+  writeCalendarFeed();
+  writeHeartbeat();
+  cleanupTimers.push(setInterval(writeHeartbeat, HEARTBEAT_MS));
+  try {
+    inboxWatcher = fs.watch(INBOX_DIR, (_, filename) => {
+      if (filename && !INBOX_OP_RE.test(filename)) return;
+      if (inboxDebounce) clearTimeout(inboxDebounce);
+      inboxDebounce = setTimeout(() => { inboxDebounce = null; processInbox(); }, 25);
+    });
+  } catch { /* watch unavailable — the poll below still applies ops */ }
+  // fs.watch can miss events and dies with its directory: poll as a safety net
+  cleanupTimers.push(setInterval(processInbox, 2000));
+  processInbox(); // ops queued while the app was not running
+}
+
+function stopPhoneSync() {
+  if (inboxWatcher) { try { inboxWatcher.close(); } catch { /* ignore */ } inboxWatcher = null; }
+  if (inboxDebounce) { clearTimeout(inboxDebounce); inboxDebounce = null; }
+  // Tell the hub at once that nobody is left to apply ops
+  try {
+    const beat = JSON.parse(fs.readFileSync(ALIVE_FILE, 'utf-8'));
+    if (beat && beat.pid === process.pid) fs.unlinkSync(ALIVE_FILE);
+  } catch { /* ignore */ }
+}
+
 // --- App lifecycle ---
 
 // Single instance lock - prevent multiple instances
+// Only this app's own pages count as local. A file from anywhere else on the disk is a stranger.
+const APP_PAGE_PREFIX = pathToFileURL(__dirname).href + '/';
+
+function isLocalSender(event) {
+  try {
+    return Boolean(event.senderFrame) && event.senderFrame.url.startsWith(APP_PAGE_PREFIX);
+  } catch {
+    return false;
+  }
+}
+
+// No page of this app ever goes anywhere. Without this, a link or a file dropped on a window replaces its
+// page, and the new page keeps that window's bridge to everything the app holds.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-navigate', (event, url) => {
+    if (!(isMapsUrl(url) && isMapsUrl(contents.getURL()))) event.preventDefault();
+  });
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+});
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -5000,8 +6122,108 @@ if (!gotLock) {
   });
 }
 
+// --- Display-scale guard (Linux under XWayland) ---
+// Chromium follows GNOME's XSETTINGS scale live, but windows created before a
+// change keep their pixel size, so a 2x start leaves every window twice as big
+// once the 1x monitors take over (see display-scale.js). Comparing the scale
+// now with the scale at start catches it; the cure is a relaunch, through the
+// AppImage rather than the mounted binary, which disappears with the launcher.
+let scaleStart = null;
+let scaleRelaunchAt = displayScale.lastRelaunchFromArgv(process.argv);
+// True while this process runs at a scale other than the one it started at,
+// i.e. until the guard above relaunches it.
+function scaleMismatch() {
+  if (scaleStart == null) return false;
+  return Math.abs(screen.getPrimaryDisplay().scaleFactor - scaleStart) >= 0.01;
+}
+function checkDisplayScale(reason) {
+  if (process.platform !== 'linux' || scaleStart == null) return;
+  const nowScale = screen.getPrimaryDisplay().scaleFactor;
+  if (Math.abs(nowScale - scaleStart) < 0.01) return;
+  const go = displayScale.shouldRelaunch({
+    startScale: scaleStart, nowScale, breakRunning: !!relaxActive,
+    lastRelaunchAt: scaleRelaunchAt, now: Date.now(),
+  });
+  console.log('[scale] display is ' + nowScale + 'x but this process started at ' + scaleStart + 'x (' + reason + ')' +
+    (go ? ' - relaunching' : ' - holding (break running or restarted recently)'));
+  if (!go) return;
+  const exe = process.env.APPIMAGE || (process.execPath.includes('/.mount_') ? null : process.execPath);
+  if (!exe) { console.log('[scale] no stable executable to relaunch from - staying as is'); return; }
+  scaleRelaunchAt = Date.now();
+  const args = process.argv.slice(1).filter((a) => !a.startsWith(displayScale.RELAUNCH_ARG))
+    .concat([displayScale.RELAUNCH_ARG + scaleRelaunchAt]);
+  // Not app.relaunch(): its helper is the binary inside the AppImage mount,
+  // which is gone by the time this process has exited (tested 2026-10-26: the
+  // app simply vanished). A detached shell waits for the single-instance lock
+  // to be free and starts the AppImage itself; inherited stdio keeps the new
+  // process's log in the journal.
+  try {
+    restartDetached(exe, args);
+  } catch (e) {
+    console.log('[scale] relaunch failed to start: ' + e.message + ' - staying as is');
+    return;
+  }
+  app.exit(0);
+}
+// Starts this program again a moment after this process has gone, with nothing of its own left behind.
+function restartDetached(exe, args) {
+  // cwd outside the mount and none of the AppImage runtime's variables (they
+  // point into this mount: LD_LIBRARY_PATH would make the new process load
+  // its libraries from here, and the old launcher could never unmount).
+  const env = { ...process.env };
+  for (const k of ['APPDIR', 'APPIMAGE', 'ARGV0', 'OWD', 'LD_LIBRARY_PATH', 'CLAUDE_METER_FAKE_START_SCALE']) delete env[k];
+  // Chromium leaves descriptors without close-on-exec (its own binary among
+  // them); closed here, or the new process would pin the old mount too.
+  // bash, because dash reads `exec 10>&-` as "run the program 10" and dies;
+  // without bash only descriptors 3-9 can be closed.
+  const script = 'for fd in $(ls /proc/$$/fd); do case $fd in 0|1|2) ;; ?) eval "exec $fd>&-" ;; ' +
+    '*) [ -n "$BASH" ] && eval "exec $fd>&-" ;; esac; done; sleep 3; exec "$0" "$@"';
+  const shell = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
+  const child = spawn(shell, ['-c', script, exe, ...args],
+    { detached: true, stdio: 'inherit', cwd: os.homedir(), env });
+  child.unref();
+}
+
+function startDisplayScaleGuard() {
+  if (process.platform !== 'linux') return;
+  scaleStart = screen.getPrimaryDisplay().scaleFactor;
+  // Test hook: pretend the process came up at another scale, so the relaunch
+  // path can be exercised without a reboot (CLAUDE_METER_FAKE_START_SCALE=2).
+  const fake = parseFloat(process.env.CLAUDE_METER_FAKE_START_SCALE || '');
+  if (Number.isFinite(fake) && fake > 0) scaleStart = fake;
+  console.log('[scale] process started at ' + scaleStart + 'x');
+  cleanupTimers.push(setTimeout(() => checkDisplayScale('startup'), 15 * 1000));
+  // The boot race lasts a minute or two: keep looking for the first ten minutes.
+  let bootChecks = 0;
+  const bootInterval = setInterval(() => {
+    if (++bootChecks > 10) { clearInterval(bootInterval); return; }
+    checkDisplayScale('boot');
+  }, 60 * 1000);
+  cleanupTimers.push(bootInterval);
+  let debounce = null;
+  for (const ev of ['display-added', 'display-removed', 'display-metrics-changed']) {
+    screen.on(ev, (event, display, metrics) => {
+      // One line per change, so the journal shows what the next boot did.
+      console.log('[scale] ' + ev + (metrics ? ' ' + metrics.join(',') : '') +
+        (display ? ' display ' + display.id + ' at ' + display.scaleFactor + 'x' : ''));
+      clearTimeout(debounce);
+      debounce = setTimeout(() => checkDisplayScale(ev), 5 * 1000);
+    });
+  }
+}
+
 app.whenReady().then(() => {
+  // The second copy is on its way out. Starting up would repeat reminders and take phone edits.
+  if (!gotLock) return;
+  // Only the instance that owns the single-instance lock may own the socket: a
+  // second instance quits right after whenReady, and if it had unlinked and
+  // re-listened on the path, its exit would take the primary's socket with it
+  // (2026-10-02: Ctrl+\ went dead that way).
   startToggleSocket();
+  // One line per start, so the journal says which build is running.
+  console.log('[app] Claude Meter ' + (APP_VERSION || app.getVersion()) + ' started');
+  startDisplayScaleGuard();
+  watchDisplaysForPopups();
   // Ensure data directory exists
   try { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); } catch { /* ignore */ }
 
@@ -5011,6 +6233,16 @@ app.whenReady().then(() => {
   calendarEvents = loadCalendarEvents();
   gcalAccounts = loadGcalConfig();
   streakData = loadStreak();
+  if (!calendarMigrated) {
+    calendarLib.migrateEvents(calendarEvents, localDateStr(new Date()));
+    calendarMigrated = true;
+    saveCalendarEvents();
+    saveSettings();
+  }
+  if (extendRepeatingEvents()) saveCalendarEvents();
+  updateStreak();
+  // Before the accounts: the active one is where a launcher session is.
+  cliActiveAccount = readCliActiveAccount();
   // Discover/merge accounts, then hydrate each one's cached usage + history
   initAccounts();
   for (const ctx of Object.values(accountCtx)) {
@@ -5023,17 +6255,18 @@ app.whenReady().then(() => {
   if (pomoState === 'running' || pomoState === 'break') {
     pomoInterval = setInterval(pomoTick, 1000);
   }
+  relaxInit();
+  cleanupTimers.push(setInterval(relaxTick, RELAX_TICK_MS));
   startCliMarkerWatcher();
   // Pick up accounts logged in (or out) while the app is running.
-  const discoveryTimer = setInterval(
-    () => rediscoverAccounts('poll'), ACCOUNT_DISCOVERY_INTERVAL_MS
-  );
+  const discoveryTimer = setInterval(() => {
+    rediscoverAccounts('poll');
+    checkLogins();
+  }, ACCOUNT_DISCOVERY_INTERVAL_MS);
   cleanupTimers.push(discoveryTimer);
   startClaudeStatusPoller();
   scheduleReminders();
   scheduleDailyDigest();
-  // Re-check reminders every 5 minutes (catches missed reminders from sleep/boot)
-  setInterval(scheduleReminders, 5 * 60 * 1000);
 
   // Google Calendar: initial sync + timer
   if (gcalAccounts.length > 0) {
@@ -5065,12 +6298,24 @@ app.whenReady().then(() => {
   // Quick-task hotkey: add a task from anywhere
   try { globalShortcut.register('Control+]', openQuickTaskCapture); } catch { /* ignore */ }
 
-  // IPC sender validation helper
-  const isLocalSender = (event) => {
-    try {
-      return event.senderFrame && event.senderFrame.url.startsWith('file://');
-    } catch { return false; }
-  };
+  mapsFeature = createMapsFeature({
+    WebContentsView, ipcMain, session, isLocalSender,
+    dataDir: CLAUDE_DIR,
+    getDashboard: () => dashWin,
+    openDashboard,
+    getTheme: () => ({ name: currentTheme, ...(THEMES[currentTheme] || THEMES.dark) }),
+    getTargets: () => [win, dashWin],
+    getAccounts: () => buildUsagePayload().accounts,
+  });
+  notesView = createNotesView({
+    WebContentsView, ipcMain,
+    getDashboard: () => dashWin,
+    getTheme: () => ({ name: currentTheme, ...(THEMES[currentTheme] || THEMES.dark) }),
+    dirname: __dirname,
+    onCreated: (contents) => addSpellMenu(contents, () => dashWin),
+  });
+
+  ipcMain.handle('streak-get', (event) => (isLocalSender(event) ? streakData : {}));
 
   // IPC
   ipcMain.on('popup-dismiss', (event) => {
@@ -5094,16 +6339,16 @@ app.whenReady().then(() => {
     if (typeof id !== 'string' || !accountCtx[id]) return { success: false };
     const entry = accountList.find((a) => a.id === id);
     if (!entry || entry.enabled === false) return { success: false };
-    if (activeAccountId !== id) {
-      activeAccountId = id;
-      saveSettings();
-      const ctx = accountCtx[id];
-      updateTrayTooltip();
-      if (ctx.cachedUsage) updateTrayBadge(ctx.cachedUsage);
-      broadcastUsage();
-      syncIfStale(ctx);
-    }
+    // The pages do not offer the choice then; a stale page that still does is told no.
+    if (activeFollowsCli()) return { success: false, activeAccountId };
+    setActiveAccount(id);
     return { success: true, activeAccountId };
+  });
+  ipcMain.handle('move-cli-to-account', (event, id) => {
+    if (!isLocalSender(event)) return { ok: false, text: '', detail: '' };
+    const entry = typeof id === 'string' ? accountList.find((a) => a.id === id) : null;
+    if (!entry || entry.enabled === false || !accountCtx[id]) return { ok: false, text: 'Not moved', detail: '' };
+    return moveCliToAccount(id);
   });
   ipcMain.on('minimize-to-tray', (event) => {
     if (!isLocalSender(event)) return;
@@ -5146,7 +6391,8 @@ app.whenReady().then(() => {
   });
 
   // Auth status check for first-launch onboarding
-  ipcMain.handle('check-auth-status', () => {
+  ipcMain.handle('check-auth-status', (event) => {
+    if (!isLocalSender(event)) return null;
     // The overlay is about the active account — any other account's expiry is
     // reported on its own tab instead.
     const ctx = getActiveCtx();
@@ -5168,7 +6414,8 @@ app.whenReady().then(() => {
 
   // Launch claude auth login from the app
   let reAuthWatcher = null;
-  ipcMain.handle('launch-auth-login', () => {
+  ipcMain.handle('launch-auth-login', (event) => {
+    if (!isLocalSender(event)) return { success: false };
     try {
       const { execFileSync } = require('child_process');
       const cmd = process.platform === 'win32' ? 'where' : 'which';
@@ -5200,9 +6447,13 @@ app.whenReady().then(() => {
           if (filename === '.credentials.json' && authCtx) {
             authCtx.cachedToken = null;
             authCtx.tokenLastRead = 0;
+            // Signed out refuses every token on purpose, and this file changing is the way back.
+            const wasSignedOut = authCtx.signedOut;
+            authCtx.signedOut = false;
             const token = getAccessToken(authCtx, true);
+            if (!token) authCtx.signedOut = wasSignedOut;
             if (token) {
-              authCtx.signedOut = false;
+              authCtx.authAttempts = 0;
               authCtx.needsLogin = false;
               if (win && !win.isDestroyed()) {
                 win.webContents.send('auth-status-changed', { authenticated: true });
@@ -5246,7 +6497,7 @@ app.whenReady().then(() => {
     const b = win.getBounds();
     // Height auto-fits the content exactly: grow when clipped, shrink when
     // there's dead space (the calendar card stretches, so excess = empty white).
-    if (Math.abs(b.height - needed) > 2) {
+    if (b.height !== needed) {
       const y = Math.max(wa.y, Math.min(b.y, wa.y + wa.height - needed));
       win.setBounds({ x: b.x, y, width: b.width, height: needed });
     }
@@ -5269,9 +6520,15 @@ app.whenReady().then(() => {
       try {
         const watcher = fs.watch(ctx.dir, (_, filename) => {
           if (filename !== '.credentials.json') return;
-          const token = getAccessToken(ctx, true);
-          if (!token) return;
+          // Signed out refuses every token on purpose, and this file changing is the way back.
+          const wasSignedOut = ctx.signedOut;
           ctx.signedOut = false;
+          const token = getAccessToken(ctx, true);
+          if (!token) {
+            ctx.signedOut = wasSignedOut;
+            return;
+          }
+          ctx.authAttempts = 0;
           ctx.needsLogin = false;
           ctx.lastError = null;
           if (ctx.id === activeAccountId) {
@@ -5365,7 +6622,8 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('get-settings', async () => {
+  ipcMain.handle('get-settings', async (event) => {
+    if (!isLocalSender(event)) return null;
     return {
       hotkey: currentHotkey,
       version: (APP_VERSION || app.getVersion()),
@@ -5402,7 +6660,8 @@ app.whenReady().then(() => {
     return { success: true };
   });
 
-  ipcMain.handle('get-autostart', async () => {
+  ipcMain.handle('get-autostart', async (event) => {
+    if (!isLocalSender(event)) return { enabled: false };
     return { enabled: getAutoStartEnabled() };
   });
 
@@ -5445,33 +6704,19 @@ app.whenReady().then(() => {
 
   // --- Habits IPC ---
   ipcMain.handle('habits-get', (event) => {
-    if (!isLocalSender(event)) return { training: [], reading: [], learning: [] };
+    if (!isLocalSender(event)) return emptyHabits();
     return habits;
   });
 
   ipcMain.handle('habits-toggle-day', (event, kind, dateStr) => {
     if (!isLocalSender(event)) return habits;
-    if (kind !== 'training' && kind !== 'reading' && kind !== 'learning') return habits;
-    if (!isValidDateStr(dateStr)) return habits;
-    const arr = habits[kind];
-    const idx = arr.indexOf(dateStr);
-    if (idx === -1) arr.push(dateStr);
-    else arr.splice(idx, 1);
-    saveHabits();
-    broadcastHabits();
+    setHabitDay(kind, dateStr); // toggle; Relax is refused there, it ticks itself
     return habits;
   });
 
   ipcMain.on('tasks-set-priority', (event, id, priority) => {
     if (!isLocalSender(event)) return;
-    if (typeof id !== 'string' || id.length >= 20) return;
-    const task = tasks.find((t) => t.id === id);
-    if (!task) return;
-    if (['high', 'medium', 'low'].indexOf(priority) >= 0) {
-      task.priority = priority;
-      saveTasks();
-      broadcastTasks();
-    }
+    setTaskPriority(id, priority);
   });
 
   ipcMain.on('tasks-reorder', (event, orderedIds) => {
@@ -5493,7 +6738,8 @@ app.whenReady().then(() => {
   ipcMain.handle('tasks-schedule', (event, taskId, date, time) => {
     if (!isLocalSender(event)) return { success: false };
     const task = tasks.find((t) => t.id === taskId);
-    if (!task) return { success: false };
+    if (!task || !isRealDate(date)) return { success: false };
+    if (time && !(typeof time === 'string' && TIME_RE.test(time))) return { success: false };
     // Check if already linked to a calendar event
     const existing = calendarEvents.find((e) => e.linkedTaskId === taskId);
     if (existing) return { success: true, event: existing, alreadyExists: true };
@@ -5524,12 +6770,9 @@ app.whenReady().then(() => {
     if (!isLocalSender(event)) return { success: false };
     if (typeof newDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(newDate)) return { success: false };
     const evt = calendarEvents.find((e) => e.id === eventId);
-    if (!evt) return { success: false };
-    evt.date = newDate;
-    saveCalendarEvents();
-    broadcastCalendar();
-    scheduleReminders();
-    return { success: true };
+    // A synced event lives in Google, and the next sync would put it straight back.
+    if (!evt || evt.isGoogleEvent) return { success: false };
+    return updateCalendarEvent({ id: evt.id, date: newDate });
   });
 
   ipcMain.on('open-tasks-window', (event) => {
@@ -5575,20 +6818,85 @@ app.whenReady().then(() => {
     broadcastPomo(true);
   });
 
-  ipcMain.handle('pomo-get', () => {
+  ipcMain.handle('pomo-get', (event) => {
+    if (!isLocalSender(event)) return null;
     return { state: pomoState, seconds: pomoSeconds, total: pomoTotal };
   });
 
+  // Relax IPC
+  ipcMain.handle('relax-get', (event) => {
+    if (!isLocalSender(event)) return null;
+    return relaxViewNow();
+  });
+  ipcMain.on('relax-now', (event) => {
+    if (!isLocalSender(event)) return;
+    relaxNow('widget');
+  });
+  ipcMain.on('relax-end', (event) => {
+    if (!isLocalSender(event) || !relaxActive) return;
+    if (relaxActive.windows.some((w) => !w.isDestroyed() && w.webContents === event.sender)) relaxEndEarly('ended by him');
+  });
+  // The break page asks for his next track (only during a break, only its own windows).
+  const relaxFromBreak = (event) => isLocalSender(event) && relaxActive && !relaxActive.ending
+    && relaxActive.windows.some((w) => !w.isDestroyed() && w.webContents === event.sender);
+  ipcMain.handle('relax-track', async (event) => {
+    if (!relaxFromBreak(event) || relaxActive.musicSource !== 'folder') return { error: 'no track wanted now' };
+    const pick = relaxMusic.pickTrack(RELAX_MUSIC_DIR, RELAX_MUSIC_FILE, { log: relaxLog });
+    if (!pick) return { error: 'no tracks in ' + RELAX_MUSIC_DIR };
+    try {
+      const data = await relaxMusic.readTrack(pick);
+      relaxLog('music: ' + pick.name + ' (' + pick.left + ' more before the shuffle repeats)');
+      return { name: pick.name, data };
+    } catch (err) {
+      relaxLog('music: could not read ' + pick.name + ': ' + err.message);
+      return { error: 'could not read ' + pick.name };
+    }
+  });
+  ipcMain.on('relax-log', (event, msg) => {
+    if (relaxFromBreak(event)) relaxLog('page: ' + String(msg).slice(0, 300));
+  });
+  ipcMain.on('relax-toast-skip', (event) => {
+    const h = relaxHeadsUp;
+    if (!isLocalSender(event) || !h || !h.win || h.win.isDestroyed() || h.win.webContents !== event.sender) return;
+    relaxCloseHeadsUp();
+    relaxState.slots[h.slot] = { status: 'skipped', at: Date.now() };
+    relaxSave();
+    relaxLog('slot ' + h.slot + ' skipped');
+    broadcastRelax();
+  });
+  ipcMain.on('relax-toast-start', (event) => {
+    const h = relaxHeadsUp;
+    if (!isLocalSender(event) || !h || !h.win || h.win.isDestroyed() || h.win.webContents !== event.sender) return;
+    // No busy checks: he asked for it now, exactly like the widget's Relax now.
+    relaxLog('slot ' + h.slot + ' started from the heads-up');
+    relaxNow('toast');
+  });
+  ipcMain.on('relax-toast-later', (event) => {
+    const h = relaxHeadsUp;
+    if (!isLocalSender(event) || !h || !h.win || h.win.isDestroyed() || h.win.webContents !== event.sender) return;
+    relaxCloseHeadsUp();
+    const nextAt = Date.now() + relaxLib.RETRY_MS;
+    // "Later" is his answer, so it outlives the slot's usual hour.
+    relaxState.slots[h.slot] = Object.assign({}, relaxState.slots[h.slot],
+      { status: 'waiting', nextAt, laterUntil: nextAt + 60 * 1000, reason: 'later' });
+    relaxSave();
+    relaxLog('slot ' + h.slot + ' later, at ' + new Date(nextAt).toTimeString().slice(0, 5));
+    broadcastRelax();
+  });
+
   // Meeting popup dismiss
-  ipcMain.on('meeting-popup-dismiss', () => {
+  ipcMain.on('meeting-popup-dismiss', (event) => {
+    if (!isLocalSender(event)) return;
     if (alertPopup && !alertPopup.isDestroyed()) alertPopup.close();
   });
 
   // Pomo popup buttons
-  ipcMain.on('pomo-popup-dismiss', () => {
+  ipcMain.on('pomo-popup-dismiss', (event) => {
+    if (!isLocalSender(event)) return;
     if (pomoPopupWin && !pomoPopupWin.isDestroyed()) pomoPopupWin.close();
   });
-  ipcMain.on('pomo-popup-start-next', () => {
+  ipcMain.on('pomo-popup-start-next', (event) => {
+    if (!isLocalSender(event)) return;
     if (pomoState === 'break_pending') {
       pomoState = 'break';
       pomoSeconds = POMO_BREAK_SECS;
@@ -5618,7 +6926,8 @@ app.whenReady().then(() => {
     openNotesAppWindow();
   });
 
-  ipcMain.handle('notes-get', () => {
+  ipcMain.handle('notes-get', (event) => {
+    if (!isLocalSender(event)) return '';
     try { return fs.readFileSync(NOTES_FILE, 'utf-8'); } catch { return ''; }
   });
 
@@ -5626,37 +6935,16 @@ app.whenReady().then(() => {
     if (!isLocalSender(event)) return;
     var content = typeof text === 'string' ? text : '';
     if (content.length > 500000) content = content.slice(0, 500000);
-    try { fs.writeFileSync(NOTES_FILE, content); } catch { /* ignore */ }
+    try { writeTextAtomic(NOTES_FILE, content); } catch (err) { console.error('[notes] save failed:', err.message); }
   });
 
   // Multi-note sticky notes
-  ipcMain.handle('sticky-notes-get', () => {
-    try {
-      if (fs.existsSync(STICKY_NOTES_FILE)) {
-        return JSON.parse(fs.readFileSync(STICKY_NOTES_FILE, 'utf-8'));
-      }
-    } catch { /* ignore */ }
-    return null;
-  });
+  ipcMain.handle('sticky-notes-get', (event) => (isLocalSender(event) ? readStickyNotes() : null));
 
   ipcMain.on('sticky-notes-save', (event, notes) => {
     if (!isLocalSender(event)) return;
     if (!Array.isArray(notes)) return;
-    // Validate and cap each note
-    const clean = notes.slice(0, 50).map((n) => ({
-      id: typeof n.id === 'string' ? n.id.slice(0, 20) : '',
-      title: typeof n.title === 'string' ? n.title.slice(0, 30) : '',
-      text: typeof n.text === 'string' ? n.text.slice(0, 100000) : '',
-      color: typeof n.color === 'string' ? n.color.slice(0, 10) : 'default',
-      createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
-    }));
-    try { fs.writeFileSync(STICKY_NOTES_FILE, JSON.stringify(clean, null, 2)); } catch { /* ignore */ }
-    // Keep the other notes window (panel vs app) in sync
-    for (const w of [notesWin, notesAppWin]) {
-      if (w && !w.isDestroyed() && w.webContents !== event.sender) {
-        try { w.webContents.send('sticky-notes-updated', clean); } catch { /* ignore */ }
-      }
-    }
+    saveStickyNotes(notes, event.sender);
   });
 
   // Quick-task popover → task list
@@ -5676,7 +6964,7 @@ app.whenReady().then(() => {
     const title = note && typeof note.title === 'string' ? note.title : 'note';
     const text = note && typeof note.text === 'string' ? note.text : '';
     const md = normalizeMarkdown(text);
-    const res = await dialog.showSaveDialog(notesWin || win || undefined, {
+    const res = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender) || dashWin || win || undefined, {
       title: 'Export note as Markdown',
       defaultPath: safeFileName(title) + '.md',
       filters: [{ name: 'Markdown', extensions: ['md'] }],
@@ -5692,7 +6980,7 @@ app.whenReady().then(() => {
     const title = payload && typeof payload.title === 'string' ? payload.title : 'note';
     const text = payload && typeof payload.text === 'string' ? payload.text : '';
     const html = noteHtmlDoc(title, text);
-    const res = await dialog.showSaveDialog(notesWin || win || undefined, {
+    const res = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender) || dashWin || win || undefined, {
       title: 'Export note as PDF',
       defaultPath: safeFileName(title) + '.pdf',
       filters: [{ name: 'PDF', extensions: ['pdf'] }],
@@ -5712,57 +7000,25 @@ app.whenReady().then(() => {
   });
 
   // Notes archive — deleted notes go here for recovery
-  ipcMain.handle('notes-archive-get', () => {
-    try {
-      if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-        return JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-      }
-    } catch { /* ignore */ }
-    return [];
-  });
+  ipcMain.handle('notes-archive-get', (event) => (isLocalSender(event) ? readNotesArchive() : []));
 
   ipcMain.on('notes-archive-add', (event, note) => {
     if (!isLocalSender(event)) return;
-    if (!note || typeof note.id !== 'string') return;
-    try {
-      let archive = [];
-      if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-        archive = JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-      }
-      note.archivedAt = Date.now();
-      archive.unshift(note);
-      // Keep last 50 archived notes
-      if (archive.length > 50) archive = archive.slice(0, 50);
-      fs.writeFileSync(NOTES_ARCHIVE_FILE, JSON.stringify(archive, null, 2));
-    } catch { /* ignore */ }
+    archiveAddNote(note);
   });
 
   ipcMain.on('notes-archive-restore', (event, noteId) => {
     if (!isLocalSender(event)) return;
-    if (typeof noteId !== 'string') return;
-    try {
-      let archive = [];
-      if (fs.existsSync(NOTES_ARCHIVE_FILE)) {
-        archive = JSON.parse(fs.readFileSync(NOTES_ARCHIVE_FILE, 'utf-8'));
-      }
-      archive = archive.filter((n) => n.id !== noteId);
-      fs.writeFileSync(NOTES_ARCHIVE_FILE, JSON.stringify(archive, null, 2));
-    } catch { /* ignore */ }
+    archiveRemoveNote(noteId);
   });
 
-  ipcMain.handle('get-theme', () => currentTheme);
+  ipcMain.handle('get-theme', (event) => (isLocalSender(event) ? currentTheme : null));
   ipcMain.handle('set-theme', (event, themeName) => {
     if (!isLocalSender(event)) return;
     if (THEMES[themeName]) {
       currentTheme = themeName;
       broadcastTheme();
-      // Save to settings
-      try {
-        const settings = fs.existsSync(SETTINGS_FILE)
-          ? JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8')) : {};
-        settings.theme = themeName;
-        fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-      } catch { /* ignore */ }
+      saveSettings();
     }
   });
 
@@ -5773,16 +7029,6 @@ app.whenReady().then(() => {
     return parseSmartText(text.trim());
   });
 
-  ipcMain.on('close-add-event', (event) => {
-    if (!isLocalSender(event)) return;
-    if (addEventWin && !addEventWin.isDestroyed()) addEventWin.close();
-  });
-
-  ipcMain.on('open-add-event', (event, selectedDate) => {
-    if (!isLocalSender(event)) return;
-    openAddEventWindow(selectedDate);
-  });
-
   // --- Smart add: parse plain text into task + calendar event ---
   ipcMain.handle('smart-add', (event, rawText) => {
     if (!isLocalSender(event)) return { success: false };
@@ -5791,7 +7037,7 @@ app.whenReady().then(() => {
     const result = parseSmartText(text);
 
     // Always create a task
-    addTask(result.title, result.priority);
+    const addedTask = addTask(result.title, result.priority);
 
     // If date was detected, also create a calendar event
     if (result.date) {
@@ -5805,7 +7051,7 @@ app.whenReady().then(() => {
         reminder: 15,
         recurrence: null,
         done: false,
-        linkedTaskId: tasks[tasks.length - 1]?.id || null,
+        linkedTaskId: addedTask ? addedTask.id : null,
         googleEventId: null,
         createdAt: Date.now(),
       };
@@ -5853,8 +7099,8 @@ app.whenReady().then(() => {
     try {
       const dir = path.join(CLAUDE_DIR, 'task-notes');
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, taskId + '.txt'), typeof text === 'string' ? text : '');
-    } catch { /* ignore */ }
+      writeTextAtomic(path.join(dir, taskId + '.txt'), typeof text === 'string' ? text : '');
+    } catch (err) { console.error('[notes] save failed:', err.message); }
   });
 
   ipcMain.on('open-task-note', (event, taskId, taskText) => {
@@ -5870,82 +7116,28 @@ app.whenReady().then(() => {
 
   ipcMain.handle('calendar-add-event', (event, data) => {
     if (!isLocalSender(event)) return { success: false };
-    if (!data || typeof data.title !== 'string' || !data.date) return { success: false };
-    const evt = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      title: data.title.trim().slice(0, 100),
-      date: data.date,
-      time: data.time || null,
-      duration: typeof data.duration === 'number' && data.duration > 0 ? data.duration : null,
-      color: ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0 ? data.color : 'blue',
-      reminder: typeof data.reminder === 'number' ? data.reminder : null,
-      recurrence: data.recurrence || null,
-      done: false,
-      googleEventId: null,
-      createdAt: Date.now(),
-    };
-    // Generate recurring instances
-    if (evt.recurrence) {
-      generateRecurringEvents(evt);
-    }
-    calendarEvents.push(evt);
-    saveCalendarEvents();
-    broadcastCalendar();
-    scheduleReminders();
-    return { success: true, event: evt };
+    return addCalendarEvent(data);
   });
 
   ipcMain.handle('calendar-update-event', (event, data) => {
     if (!isLocalSender(event)) return { success: false };
-    if (!data || !data.id) return { success: false };
-    const idx = calendarEvents.findIndex((e) => e.id === data.id);
-    if (idx < 0) return { success: false };
-    const evt = calendarEvents[idx];
-    if (data.title !== undefined) evt.title = String(data.title).trim().slice(0, 100);
-    if (data.date !== undefined) evt.date = data.date;
-    if (data.time !== undefined) evt.time = data.time || null;
-    if (data.color !== undefined && ['blue', 'green', 'orange', 'red', 'purple'].indexOf(data.color) >= 0) evt.color = data.color;
-    if (data.reminder !== undefined) evt.reminder = typeof data.reminder === 'number' ? data.reminder : null;
-    firedReminders.delete(evt.id); // allow re-fire if time changed
-    saveCalendarEvents();
-    broadcastCalendar();
-    scheduleReminders();
-    return { success: true };
+    return updateCalendarEvent(data);
   });
 
   ipcMain.handle('calendar-toggle-event', (event, data) => {
     if (!isLocalSender(event)) return { success: false };
-    if (!data || !data.id) return { success: false };
-    const evt = calendarEvents.find((e) => e.id === data.id);
-    if (!evt) return { success: false };
-    evt.done = !evt.done;
-    saveCalendarEvents();
-    broadcastCalendar();
-    return { success: true };
+    return toggleCalendarEvent(data);
   });
 
   ipcMain.handle('calendar-delete-event', (event, data) => {
     if (!isLocalSender(event)) return { success: false };
-    if (!data || !data.id) return { success: false };
-    calendarEvents = calendarEvents.filter((e) => e.id !== data.id);
-    firedReminders.delete(data.id);
-    // Reminder timers use compound key "id:stage" — clear all matching
-    for (const key of Object.keys(reminderTimers)) {
-      if (key === data.id || key.startsWith(data.id + ':')) {
-        clearTimeout(reminderTimers[key]);
-        delete reminderTimers[key];
-      }
-    }
-    delete firedStages[data.id];
-    saveCalendarEvents();
-    broadcastCalendar();
-    scheduleReminders();
-    return { success: true };
+    return deleteCalendarEvent(data);
   });
 
   // --- Google Calendar IPC ---
 
-  ipcMain.handle('gcal-get-accounts', () => {
+  ipcMain.handle('gcal-get-accounts', (event) => {
+    if (!isLocalSender(event)) return [];
     return gcalAccounts.map((a) => ({ email: a.email }));
   });
 
@@ -5984,14 +7176,16 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('gcal-get-status', () => {
+  ipcMain.handle('gcal-get-status', (event) => {
+    if (!isLocalSender(event)) return { accounts: [] };
     return {
       accounts: gcalAccounts.map((a) => ({ email: a.email })),
       lastSync: gcalLastSync,
     };
   });
 
-  ipcMain.handle('check-for-updates', async () => {
+  ipcMain.handle('check-for-updates', async (event) => {
+    if (!isLocalSender(event)) return { hasUpdate: false };
     const result = await checkForUpdates();
     if (result.hasUpdate) {
       lastUpdateResult = result;
@@ -6042,18 +7236,21 @@ app.whenReady().then(() => {
             try { fs.unlinkSync(backupPath); } catch { /* ignore */ }
             fs.renameSync(currentAppImage, backupPath);
             try {
-              // rename is atomic but fails across devices; fall back to copy
-              fs.renameSync(installerPath, currentAppImage);
-            } catch {
-              fs.copyFileSync(installerPath, currentAppImage);
-              fs.unlinkSync(installerPath);
+              try {
+                // rename is atomic but fails across devices; fall back to copy
+                fs.renameSync(installerPath, currentAppImage);
+              } catch {
+                fs.copyFileSync(installerPath, currentAppImage);
+                fs.unlinkSync(installerPath);
+              }
+            } catch (moveErr) {
+              // Whatever went wrong, the app that works goes back where it was.
+              fs.renameSync(backupPath, currentAppImage);
+              throw moveErr;
             }
             fs.chmodSync(currentAppImage, 0o755);
             try { fs.unlinkSync(backupPath); } catch { /* ignore */ }
-            spawn(currentAppImage, [], {
-              detached: true,
-              stdio: 'ignore',
-            }).unref();
+            restartDetached(currentAppImage, []);
           } else {
             // Not running as AppImage (dev mode) — just launch from tmp
             spawn(installerPath, [], {
@@ -6098,13 +7295,14 @@ app.whenReady().then(() => {
     // (removed) history-update was sent to the widget renderer, but neither preload.js nor renderer.js listens for it - only the dashboard does. Serialising ~2581 points cost ~1.4ms per send for nothing.
     // Send badge counts
     const pendingCount = tasks.filter((t) => !t.done).length;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateStr(new Date());
     const todayCount = calendarEvents.filter((e) => e.date === today).length;
     win.webContents.send('badge-update', { tasks: pendingCount, calendar: todayCount });
     // Send streak
     if (streakData.current > 0) win.webContents.send('streak-update', streakData);
     // Send pomo state
     win.webContents.send('pomo-update', { state: pomoState, seconds: pomoSeconds, total: pomoTotal });
+    win.webContents.send('relax-update', relaxViewNow());
     // Try syncing fresh data — if the active token is null (mid-refresh), retry in 5s
     const activeCtx = getActiveCtx();
     const token = activeCtx ? getAccessToken(activeCtx) : null;
@@ -6123,11 +7321,7 @@ app.whenReady().then(() => {
     }
     if (claudeStatus) win.webContents.send('claude-status-update', claudeStatus);
     tryShowDigestOnOpen();
-    // Apply saved theme
-    if (currentTheme !== 'dark') {
-      const theme = THEMES[currentTheme] || THEMES.dark;
-      win.webContents.send('theme-update', { name: currentTheme, ...theme });
-    }
+    sendCurrentTheme(win);
   });
 
   // Auto-refresh usage every 3 minutes — fires even when widget is hidden
@@ -6149,9 +7343,27 @@ app.whenReady().then(() => {
   cleanupTimers.push(tokenRefreshInterval);
 
   startFileWatcher();
+  startPhoneSync();
+
+  // Timers only exist for the next day's reminders, and missed ones are only noticed when something looks.
+  let calendarDay = localDateStr(new Date());
+  cleanupTimers.push(setInterval(() => {
+    const today = localDateStr(new Date());
+    if (today !== calendarDay) {
+      calendarDay = today;
+      if (extendRepeatingEvents()) {
+        saveCalendarEvents();
+        broadcastCalendar();
+      }
+      updateStreak();
+    }
+    scheduleReminders();
+  }, REMINDER_CHECK_MS));
 
   // --- Power monitor: handle sleep/wake ---
   powerMonitor.on('suspend', () => {
+    relaxEndEarly('system suspended');
+    relaxCloseHeadsUp();
     for (const ctx of Object.values(accountCtx)) {
       if (ctx.activeRequest) {
         try { ctx.activeRequest.destroy(); } catch { /* ignore */ }
@@ -6198,7 +7410,13 @@ app.whenReady().then(() => {
 
 });
 
+// Before the windows close: a break window would otherwise veto the quit.
+app.on('before-quit', relaxShutdown);
+
 app.on('will-quit', () => {
+  relaxShutdown();
+  if (mapsFeature) mapsFeature.stopServer();
+  stopPhoneSync();
   globalShortcut.unregisterAll();
   if (fileWatcher) { try { fileWatcher.close(); } catch {} }
   for (const w of linuxSubWatchers) { try { w.close(); } catch {} }

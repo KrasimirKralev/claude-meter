@@ -1,10 +1,10 @@
-/* Meeting reminder popup renderer — safe DOM only */
+/* Meeting reminder popup renderer: safe DOM only */
 
 var countdownSecs = 30;
 var countdownInterval = null;
 var liveInterval = null;
 
-/* ── Meeting alert sound (Web Audio API, Pop Brutalist set) ── */
+/* Meeting alert sound (Web Audio API, Pop Brutalist set) */
 
 function brutTone(ctx, masterNode, opts) {
   var osc = ctx.createOscillator();
@@ -90,53 +90,60 @@ function playMeetingChime(urgent) {
   }
 }
 
+window.meetingPopupAPI.onThemeUpdate(UI.applyTheme);
+
 window.meetingPopupAPI.onData(function(data) {
-  var ringFill = document.getElementById('ringFill');
+  var popup = document.getElementById('popup');
   var ringIcon = document.getElementById('ringIcon');
   var title = document.getElementById('title');
   var eventName = document.getElementById('eventName');
   var subtitle = document.getElementById('subtitle');
+  var okBtn = document.getElementById('dismissBtn');
   var progressBar = document.getElementById('progressBar');
   var countdown = document.getElementById('countdown');
 
   eventName.textContent = data.label || 'Meeting';
+  eventName.title = data.label || '';
 
-  // Join button — shown only when the event carries a meeting link
+  // Join button: shown only when the event carries a meeting link
   var joinBtn = document.getElementById('joinBtn');
-  if (joinBtn) {
-    if (data.meetLink) {
-      joinBtn.style.display = '';
-      joinBtn.onclick = function() {
-        window.meetingPopupAPI.openUrl(data.meetLink);
-        window.meetingPopupAPI.dismiss();
-      };
-    } else {
-      joinBtn.style.display = 'none';
-      joinBtn.onclick = null;
-    }
+  if (data.meetLink) {
+    joinBtn.hidden = false;
+    // The button says where it goes, because a calendar invite can come from anyone.
+    var host = '';
+    try { host = new URL(data.meetLink).hostname.replace(/^www\./, ''); } catch (error) { host = ''; }
+    joinBtn.lastChild.nodeValue = host ? 'Join ' + host : 'Join';
+    joinBtn.title = data.meetLink;
+    // One primary action: with a link, joining is the one he reaches for.
+    okBtn.classList.remove('primary');
+    joinBtn.onclick = function() {
+      window.meetingPopupAPI.openUrl(data.meetLink);
+      window.meetingPopupAPI.dismiss();
+    };
+  } else {
+    joinBtn.hidden = true;
+    okBtn.classList.add('primary');
+    joinBtn.onclick = null;
   }
 
-  var isCritical = data.stage === '0m' || data.stage === '5m';
+  var isCritical = data.stage === '0m' || data.stage === '10m' || data.stage === '5m';
 
+  UI.clear(ringIcon);
   if (data.stage === '0m') {
-    ringIcon.textContent = '\uD83D\uDD34'; // red circle
-    title.textContent = 'Starting now!';
-    title.classList.add('critical');
-    ringFill.classList.add('critical');
-    progressBar.classList.add('critical');
+    ringIcon.appendChild(UI.icon('alarm'));
     ringIcon.classList.add('pulse');
-    subtitle.textContent = data.resetText || 'Your meeting is starting';
-  } else if (data.stage === '5m') {
-    ringIcon.textContent = '\u26A0\uFE0F'; // warning
+    title.textContent = 'Starting now';
+    popup.classList.add('crit');
+    subtitle.textContent = timeText(data.resetText) || 'Your meeting is starting';
+  } else if (data.stage === '10m' || data.stage === '5m') {
+    ringIcon.appendChild(UI.icon('warning'));
     title.textContent = 'Starting soon';
-    title.classList.add('critical');
-    ringFill.classList.add('critical');
-    progressBar.classList.add('critical');
-    subtitle.textContent = data.resetText || 'In 5 minutes';
+    popup.classList.add('warn');
+    subtitle.textContent = timeText(data.resetText) || 'In 5 minutes';
   } else {
-    ringIcon.textContent = '\uD83D\uDCC5'; // calendar
+    ringIcon.appendChild(UI.icon('calendar'));
     title.textContent = 'Upcoming meeting';
-    subtitle.textContent = data.resetText || '';
+    subtitle.textContent = timeText(data.resetText);
   }
 
   // Ring fill based on urgency
@@ -151,6 +158,7 @@ window.meetingPopupAPI.onData(function(data) {
   // Auto-dismiss countdown
   countdownSecs = isCritical ? 0 : 30; // critical stays until dismissed
   if (countdownSecs > 0) {
+    progressBar.hidden = false;
     progressBar.style.animation = 'progressShrink ' + countdownSecs + 's linear forwards';
     updateCountdownText();
     countdownInterval = setInterval(function() {
@@ -162,61 +170,38 @@ window.meetingPopupAPI.onData(function(data) {
       }
     }, 1000);
   } else {
-    progressBar.style.width = '100%';
-    countdown.textContent = 'Dismiss manually';
+    progressBar.hidden = true;
+    countdown.textContent = 'Stays open until you dismiss it';
   }
 });
+
+// main.js writes "In 5 min, em dash, 14:30"; the rest of the app separates with a middle dot.
+function timeText(text) {
+  return String(text || '').replace(/\s*\u2014\s*/g, ' \u00b7 ');
+}
 
 function updateRing(eventTime) {
   var ringFill = document.getElementById('ringFill');
   var now = Date.now();
   var diff = eventTime - now;
-  // Map 15 minutes → full ring, 0 → empty
+  // 15 minutes away or more: empty. At the start: full.
   var maxMs = 15 * 60 * 1000;
   var pct = Math.max(0, Math.min(1, diff / maxMs));
-  var offset = 251.3 * pct;
-  ringFill.style.strokeDashoffset = offset;
+  ringFill.style.strokeDashoffset = 100 * pct;
 }
 
 function updateCountdownText() {
   var el = document.getElementById('countdown');
   if (countdownSecs > 0) {
-    el.textContent = 'Auto-dismiss in ' + countdownSecs + 's';
+    el.textContent = 'Closes in ' + countdownSecs + 's';
   }
 }
 
 // Buttons
-document.getElementById('okBtn').addEventListener('click', function() {
-  clearInterval(countdownInterval);
-  clearInterval(liveInterval);
-  window.meetingPopupAPI.dismiss();
-});
+document.getElementById('joinBtn').insertBefore(UI.icon('video'), document.getElementById('joinBtn').firstChild);
 
 document.getElementById('dismissBtn').addEventListener('click', function() {
   clearInterval(countdownInterval);
   clearInterval(liveInterval);
   window.meetingPopupAPI.dismiss();
-});
-
-window.meetingPopupAPI.onThemeUpdate(function(t) {
-  var r = document.documentElement;
-  // Popups are opaque cards — prefer the solid window bg over translucent theme bg
-  r.style.setProperty('--bg', t.winBg || t.bg);
-  r.style.setProperty('--surface', t.surface);
-  r.style.setProperty('--border', t.border);
-  r.style.setProperty('--text', t.text);
-  r.style.setProperty('--text-dim', t.textDim);
-  if (t.accent) {
-    r.style.setProperty('--accent', t.accent);
-    r.style.setProperty('--accent-grad-start', t.accent);
-    r.style.setProperty('--accent-grad-end', t.accent);
-    // Soft glow approximation
-    var c = (t.accent || '').replace('#', '');
-    if (c.length === 6) {
-      var rr = parseInt(c.substring(0, 2), 16);
-      var gg = parseInt(c.substring(2, 4), 16);
-      var bb = parseInt(c.substring(4, 6), 16);
-      r.style.setProperty('--accent-glow', 'rgba(' + rr + ',' + gg + ',' + bb + ',0.3)');
-    }
-  }
 });

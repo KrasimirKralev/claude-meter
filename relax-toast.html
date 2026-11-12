@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self';">
+<title>Relax soon</title>
+<link rel="stylesheet" href="assets/fonts/inter.css">
+<link rel="stylesheet" href="assets/ui.css">
+<style>
+  html, body { height: 100%; }
+  /* Paper on macOS and Windows. On Linux main.js clears it and only the card shows.
+     The padding is the room the card's hard shadow needs inside the window. */
+  body {
+    margin: 0; padding: 4px 8px 8px 4px; overflow: hidden; user-select: none;
+    background: var(--bg); color: var(--text);
+    font-family: Inter, system-ui, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px; font-variant-numeric: tabular-nums lining-nums;
+    -webkit-font-smoothing: antialiased;
+    /* The themes' own dim text is under AA on the nord and dracula surfaces. */
+  }
+
+  .toast {
+    height: 100%; overflow: hidden;
+    display: flex; flex-direction: column;
+    animation: pop-in 0.25s var(--pop);
+  }
+  @keyframes pop-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.97); }
+    to { opacity: 1; transform: none; }
+  }
+
+  .strip {
+    display: flex; align-items: center; height: 28px; flex: none; padding: 0 12px;
+    background: var(--bar); color: var(--bar-ink);
+    border-bottom: 2px solid var(--ink);
+    font-size: 12.5px; font-weight: 800;
+  }
+  /* Today's breaks, done and still to come. */
+  .segs { display: flex; gap: 3px; margin-left: auto; }
+  .seg { width: 14px; height: 10px; border: 1.5px solid var(--bar-ink); border-radius: 3px; }
+  .seg.f { background: var(--green); }
+
+  .toast-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 12px 12px; }
+  .title { font-size: 20px; line-height: 24px; font-weight: 900; }
+  .sub { margin-top: 1px; font-size: 12.5px; line-height: 17px; color: var(--text-dim); }
+
+  .btns { display: grid; grid-template-columns: 1fr auto; gap: 7px; margin-top: auto; }
+  /* Start now takes the whole first row: it is the one he reaches for. */
+  .btn.start { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<div class="card raised toast" role="alertdialog" aria-labelledby="title" aria-describedby="sub">
+  <header class="strip">
+    <span>Relax</span>
+    <span class="segs" id="segs" aria-hidden="true"></span>
+  </header>
+  <div class="toast-body">
+    <div class="title" id="title">Relax in <span id="count">30</span>s</div>
+    <div class="sub" id="sub">4 min · screens go calm · music</div>
+    <div class="btns">
+      <button class="btn primary start" id="startBtn" type="button">Start now</button>
+      <button class="btn" id="laterBtn" type="button">Later, 10 min</button>
+      <button class="btn" id="skipBtn" type="button">Skip</button>
+    </div>
+  </div>
+</div>
+<script src="ui-theme.js"></script>
+<script src="relax-toast-renderer.js"></script>
+</body>
+</html>

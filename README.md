@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/KrasimirKralev/claude-meter?style=for-the-badge&color=e5484d&labelColor=111" alt="License"></a>
 </p>
 
-A desktop widget that tracks your **Claude usage** in real time — current session, weekly (all models), Fable-only, and pay-as-you-go **extra-usage spend** — with a built-in planner: **calendar** (with optional Google Calendar sync), **tasks**, **notes** (markdown editor), and **habit tracking**. Pop-brutalist UI, always-on-top, snap-to-edge.
+A desktop widget that shows your **Claude usage** in real time, for every account at once: what's left this week, what refills next, and which account has the most room. Around it sits a small planner (calendar, tasks, habits, notes), short relax breaks, and **Maps**, which turns a sketch into a finished bubble map.
 
 > **Unofficial; not affiliated with Anthropic.** Claude Meter is an independent open-source tool that reads the login
 > [Claude Code](https://claude.com/claude-code) already keeps on your machine.
@@ -19,10 +19,15 @@ A desktop widget that tracks your **Claude usage** in real time — current sess
 
 ## Screenshots
 
-| Dashboard | Notes editor |
+| Dashboard | Plan |
 |:---:|:---:|
-| ![Dashboard](assets/screenshot-dashboard.png) | ![Notes editor](assets/screenshot-notes.png) |
-| Usage overview, 7-day history, and the full planner. | Split markdown editor with live preview, tables → inline bars, and click-to-copy fields. |
+| ![Dashboard](assets/screenshot-dashboard.png) | ![Plan](assets/screenshot-plan.png) |
+| Every account in one table, when room comes back, and this week against an even pace. | The calendar's month beside the day, with tasks, habits and notes one tab away. |
+
+| Maps | Notes |
+|:---:|:---:|
+| ![Maps](assets/screenshot-maps.png) | ![Notes](assets/screenshot-notes.png) |
+| Sketch freely, press Digitize, and get a finished map. | A board of notes with a Markdown editor. |
 
 ---
 
@@ -74,14 +79,17 @@ If you're not logged into Claude Code, the usage bars will be empty.
 
 ## Features
 
-- **Multiple accounts** — log each Claude account into its own `CLAUDE_CONFIG_DIR` (`~/.claude-<name>`) and the widget shows a tab per account with a live status dot; click to switch, each polled independently with its own rate-limit backoff.
-- **Usage meters** — current session, weekly (all models), Fable-only, each as a segmented bar with reset countdown.
-- **Extra-usage strip** — how much pay-as-you-go credit you've spent this month vs your limit, color-coded (teal → yellow at 80% → red at 100%). Auto-hidden if you don't have extra usage enabled.
-- **Calendar** — local events + optional read-only Google Calendar sync (see below). Meetings with a Meet/Zoom/Teams link show a 🎥 marker — click to **join directly**.
-- **Tasks** — quick to-dos with a completion-streak badge.
-- **Notes** — a **standalone note-taking app** (own window + taskbar icon) with a sticky board, markdown editor + live preview, tables → inline bars, tap-to-edit blocks in read view, a quick-capture bar, `/` slash commands, #tags + search, and click-to-copy fields for links/keys.
-- **Quick task** — `Ctrl+]` from anywhere opens a popover that adds a task to your list.
-- **Habits** — Training / Reading / Learning day-trackers with monthly calendars, reflected on the widget.
+- **Every account at once.** Log each Claude account into its own `CLAUDE_CONFIG_DIR` (`~/.claude-<name>`) and the widget lists them all, with one line saying who has the most room and what refills next.
+- **Usage.** Session, weekly and per-model limits as the server reports them, with refill times, extra usage, history, and alerts at the levels you choose.
+- **Maps.** A dotted canvas inside the dashboard. Draw with the mouse, a pen or touch, press **Digitize**, and AI proposes a finished bubble map that you accept piece by piece. Export a plan, Markdown, an image or a backup, or press F to present. It uses the account with the most room. See [`maps/`](maps/).
+- **Calendar.** Local events, repeating ones, reminders you choose per event, and optional read-only Google Calendar sync (see below). Meetings with a Meet, Zoom or Teams link get a Join button.
+- **Tasks.** Type "Call Sam tomorrow 3pm" and it becomes a task with a calendar event. Priorities, drag to reorder, a note per task, and a streak.
+- **Notes.** A board of notes with a Markdown editor, tags, search, tables, and export to Markdown or PDF. It's a tab in the dashboard and also its own window.
+- **Habits.** Training, reading and relax on one board, a month at a time, with streaks.
+- **Relax breaks.** Short full-screen scenes with music, a few times a day, with a heads-up you can put off or skip.
+- **Quick task.** `Ctrl+]` from anywhere opens a box that adds a task.
+- **Always at hand.** `Ctrl+\` shows and hides the widget, which stays on top and snaps to screen edges, with Tasks, Calendar and Notes panels that snap beside it.
+- **Themes.** Brutal, Karchx, Light, Dark, Nord and Dracula, across every window.
 
 ---
 
@@ -90,7 +98,8 @@ If you're not logged into Claude Code, the usage bars will be empty.
 ### Settings
 
 Preferences (theme, hotkey, thresholds, window position) live in `~/.claude/usage-widget-settings.json`
-and are written by the app — edit through the dashboard, not by hand.
+and are written by the app, so edit them through the dashboard, not by hand. If a data file is ever damaged, the app
+sets it aside as `<name>.bad-<time>` rather than overwriting it.
 
 ### Google Calendar setup (optional)
 
@@ -116,7 +125,7 @@ Calendar sync is **off by default** and needs **your own** Google OAuth client
 
    **b) Environment variables** — set `GCAL_CLIENT_ID` and `GCAL_CLIENT_SECRET` before launching.
 
-6. Restart the app, open the **Calendar**, and click **Connect Google Calendar**.
+6. Restart the app, open **Settings**, and click **Add a Google account**.
 
 The OAuth redirect uses a temporary `http://127.0.0.1:48271/callback` loopback — nothing is sent anywhere except Google. Scope is **read-only** (`calendar.readonly`).
 
@@ -124,11 +133,14 @@ The OAuth redirect uses a temporary `http://127.0.0.1:48271/callback` loopback �
 
 ## Build from source
 
-Only dependency is Electron + Chart.js (no native modules).
+The app itself needs only Electron and Chart.js (no native modules). Maps is its own project in [`maps/`](maps/), with its own dependencies, and needs Node 24 to build. Without that step the app still runs, with no Maps section.
 
 ```bash
 npm install
+npm run bundle:maps    # builds maps/ once; the npm run build scripts do this themselves
 npm start              # run from source (macOS, Linux)
+npm test               # the app's tests
+npm run test:maps:install && npm run test:maps   # Maps' tests
 npm run build:mac      # macOS DMGs (must run on macOS)
 ```
 
@@ -146,8 +158,10 @@ required to ship.
 
 ## Tech
 
-Electron 33 · Chart.js · vanilla JS (no framework). All rendering is safe-DOM (no `innerHTML`). Your Claude Code
+Electron 33 · Chart.js · vanilla JS (no framework) for the app, and React with Vite for Maps. All rendering is safe-DOM (no `innerHTML`). Your Claude Code
 token is only ever sent to Anthropic (the usage endpoint and its token refresh).
+
+A sketch leaves your computer only when you press Digitize. Maps' server listens on 127.0.0.1 only and runs only while the dashboard has Maps open.
 
 ## Contributing
 

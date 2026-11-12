@@ -1,7 +1,10 @@
-var usageData = null;
-var calendarOpen = false;
-var animatingPcts = { session: 0, weekAll: 0, weekSonnet: 0 };
+var WL = window.WidgetLib;
+var usageData = null;     // the active account's usage: the extra strip and "Synced" follow it
 var lastSyncError = null; // persists error message until next successful sync
+var syncing = false;
+var syncingSince = 0;
+// Some syncs end with no message, so "Syncing..." may not hide how old the numbers are for long.
+var SYNCING_LIMIT_MS = 20000;
 var accountsData = [];    // one entry per enabled account, from the usage-update payload
 var activeAccountId = null;
 // The account the user just clicked. A usage-update already in flight still
@@ -10,6 +13,12 @@ var pendingAccountId = null;
 var pendingAccountTimer = null;
 // Name the CLI launcher reports for itself; falls back to the product name.
 var cliLauncherName = 'Claude Code';
+// True while a launcher says where the CLI is: Active follows it, and no row is a button.
+var activeFollowsCli = false;
+// True when a click on a row can ask the launcher to move every session to that account.
+var cliMove = false;
+var cliMoving = false;
+var moveNotice = null;    // { text, detail, error, until }: the answer to a click, in the status line
 
 function createElement(tag, cls, text) {
   var el = document.createElement(tag);
@@ -20,114 +29,23 @@ function createElement(tag, cls, text) {
 
 // --- Setup overlay (first-launch onboarding) ---
 function showSetupOverlay() {
-  var overlay = document.getElementById('setupOverlay');
-  var rows = document.getElementById('usageRows');
-  var footer = document.querySelector('.footer');
-  overlay.classList.add('visible');
-  rows.style.display = 'none';
-  if (footer) footer.style.display = 'none';
+  // With several accounts, the logged-out row says so and offers its own login command. This
+  // screen's Sign In doesn't know which account it would log in to.
+  if (accountsData.length > 1) return;
+  document.getElementById('setupOverlay').classList.add('visible');
+  document.querySelector('.widget').classList.add('setup');
+  reportMinHeight();
 }
 
 function hideSetupOverlay() {
-  var overlay = document.getElementById('setupOverlay');
-  var rows = document.getElementById('usageRows');
-  var footer = document.querySelector('.footer');
-  overlay.classList.remove('visible');
-  rows.style.display = '';
-  if (footer) footer.style.display = '';
+  document.getElementById('setupOverlay').classList.remove('visible');
+  document.querySelector('.widget').classList.remove('setup');
+  reportMinHeight();
 }
 
-function formatResetTime(ts) {
-  if (!ts) return '';
-  var d = new Date(ts);
-  if (isNaN(d.getTime())) return '';
-  var diff = d.getTime() - Date.now();
-  if (diff <= 0) return 'Resetting...';
-  // If more than 24h, show date
-  if (diff > 86400000) {
-    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    var h = d.getHours();
-    var ampm = h >= 12 ? 'pm' : 'am';
-    var h12 = h % 12 || 12;
-    var min = d.getMinutes();
-    var minStr = min > 0 ? ':' + (min < 10 ? '0' : '') + min : '';
-    return 'Resets ' + months[d.getMonth()] + ' ' + d.getDate() + ', ' + h12 + minStr + ampm;
-  }
-  // Under 24h: live countdown
-  var hours = Math.floor(diff / 3600000);
-  var mins = Math.floor((diff % 3600000) / 60000);
-  if (hours > 0) return 'Resets in ' + hours + 'h ' + mins + 'm';
-  if (mins > 0) return 'Resets in ' + mins + 'm';
-  return 'Resets in ' + Math.max(1, Math.floor(diff / 1000)) + 's';
-}
 
-function getBarClass(pct) {
-  if (pct >= 85) return 'danger';
-  if (pct >= 60) return 'warning';
-  return '';
-}
 
-function animateNumbers(from, to, key, duration) {
-  var start = performance.now();
-  function step(now) {
-    var elapsed = now - start;
-    var progress = Math.min(elapsed / duration, 1);
-    // Ease out cubic
-    var eased = 1 - Math.pow(1 - progress, 3);
-    animatingPcts[key] = Math.round(from + (to - from) * eased);
-    var el = document.getElementById(key + 'Pct');
-    if (el) el.textContent = animatingPcts[key] + '%';
-    if (progress < 1) requestAnimationFrame(step);
-  }
-  requestAnimationFrame(step);
-}
-
-var SEG_COUNT = 12;
-
-function renderUsageRow(container, data, key) {
-  while (container.firstChild) container.removeChild(container.firstChild);
-  if (!data) return;
-
-  // Card tint follows usage level
-  container.classList.remove('state-warning', 'state-danger');
-  var barClass = getBarClass(data.pct);
-  if (barClass === 'warning') container.classList.add('state-warning');
-  else if (barClass === 'danger') container.classList.add('state-danger');
-
-  // Label row with pct
-  var labelRow = createElement('div', 'usage-label');
-  var labelText = createElement('span', 'usage-label-text', data.label);
-  var pctEl = createElement('span', 'bar-pct', data.pct + '%');
-  if (key) pctEl.id = key + 'Pct';
-  labelRow.appendChild(labelText);
-  labelRow.appendChild(pctEl);
-  container.appendChild(labelRow);
-
-  // Block-segment meter: N chunky cells, filled count = pct
-  var barContainer = createElement('div', 'bar-container');
-  var segs = createElement('div', 'segs');
-  var pct = Math.max(0, Math.min(100, data.pct || 0));
-  var filled = Math.round(pct / 100 * SEG_COUNT);
-  if (pct > 0 && filled === 0) filled = 1; // never show 0 blocks for non-zero usage
-  var fillCls = barClass === 'danger' ? 'fr' : (barClass === 'warning' ? 'fy' : 'f');
-  for (var s = 0; s < SEG_COUNT; s++) {
-    segs.appendChild(createElement('div', 'seg' + (s < filled ? ' ' + fillCls : '')));
-  }
-  barContainer.appendChild(segs);
-  container.appendChild(barContainer);
-
-  if (data.resetsAt) {
-    container.appendChild(createElement('div', 'reset-info', formatResetTime(data.resetsAt)));
-  }
-}
-
-function fmtMoney(minor, decimals, currency) {
-  var d = (typeof decimals === 'number' && decimals >= 0) ? decimals : 2;
-  var v = (Number(minor || 0) / Math.pow(10, d)).toFixed(d);
-  if (currency === 'BGN') return v + ' лв';
-  var sym = { EUR: '€', USD: '$', GBP: '£', JPY: '¥' }[currency] || ((currency || '') + ' ');
-  return sym + v;
-}
+var fmtMoney = WL.money;
 
 // Extra usage inline strip — spend this month toward the monthly limit
 function renderExtraUsage(eu) {
@@ -138,7 +56,7 @@ function renderExtraUsage(eu) {
 
   var strip = document.getElementById('extraStrip');
   var amtEl = document.getElementById('extraAmt');
-  var fillEl = document.getElementById('extraFill');
+  var cellsEl = document.getElementById('extraCells');
   var pctEl = document.getElementById('extraPct');
 
   var used = eu.usedMinor, limit = eu.limitMinor, dec = eu.decimals;
@@ -150,9 +68,13 @@ function renderExtraUsage(eu) {
   var clamped = Math.max(0, Math.min(100, pct));
 
   amtEl.textContent = (used != null) ? fmtMoney(used, dec, eu.currency) : '—';
-  fillEl.style.width = clamped + '%';
-  fillEl.className = 'es-fill' + ((pct >= 100 || eu.severity === 'critical') ? ' crit'
-    : ((pct >= 80 || eu.severity === 'warning') ? ' warn' : ''));
+  while (cellsEl.firstChild) cellsEl.removeChild(cellsEl.firstChild);
+  cellsEl.appendChild(buildCells({
+    label: 'Current extra usage',
+    pct: clamped,
+    severity: (pct >= 100 || eu.severity === 'critical') ? 'critical'
+      : ((pct >= 80 || eu.severity === 'warning') ? 'warning' : 'normal'),
+  }, false));
   pctEl.textContent = pct + '%';
 
   var usedStr = (used != null) ? fmtMoney(used, dec, eu.currency) : '—';
@@ -160,7 +82,7 @@ function renderExtraUsage(eu) {
   if (strip) strip.title = 'Extra usage this month: ' + usedStr + (limStr ? ' of ' + limStr : '') + ' (' + pct + '%)';
 }
 
-// --- Account tabs ---
+// --- Account board: every account at once, so choosing between them takes one glance ---
 
 function getActiveAccount() {
   for (var i = 0; i < accountsData.length; i++) {
@@ -174,171 +96,275 @@ function clearPendingAccount() {
   if (pendingAccountTimer) { clearTimeout(pendingAccountTimer); pendingAccountTimer = null; }
 }
 
-// Minutes until this account's own rate-limit window expires, 0 if it is fine.
-function accountLimitedMins(acc) {
-  if (!acc.rateLimitedUntil) return 0;
-  var diff = acc.rateLimitedUntil - Date.now();
-  return diff > 0 ? Math.max(1, Math.round(diff / 60000)) : 0;
+function buildCells(meter, small) {
+  var grade = WL.meterClass(meter);
+  var cells = createElement('span', 'cells' + (small ? ' s' : '')
+    + (grade === 'danger' ? ' hot' : (grade === 'warning' ? ' warm' : '')));
+  cells.setAttribute('role', 'img');
+  cells.setAttribute('aria-label', WL.shortLabel(meter) + ', ' + meter.pct + '% used');
+  var filled = WL.filledCells(meter.pct);
+  for (var i = 0; i < WL.CELLS; i++) cells.appendChild(createElement('u', i < filled ? 'on' : undefined));
+  return cells;
 }
 
-// The dot uses the meters' own thresholds so a tab can never disagree with the
-// bar it stands for.
-function getAccountDotClass(acc) {
-  if (acc.needsLogin || acc.error) return 'alert';
-  if (!acc.usage || !acc.usage.session) return accountLimitedMins(acc) ? 'limited' : '';
-  var cls = getBarClass(acc.usage.session.pct);
-  if (cls === 'danger') return 'crit';
-  if (cls === 'warning') return 'warn';
-  return 'ok';
+function selectAccount(acc) {
+  if (acc.id === activeAccountId) return;
+  activeAccountId = acc.id;
+  clearPendingAccount();
+  pendingAccountId = acc.id;
+  // Safety net: never pin the choice for longer than one sync round.
+  pendingAccountTimer = setTimeout(clearPendingAccount, 8000);
+  if (window.electronAPI.setActiveAccount) {
+    window.electronAPI.setActiveAccount(acc.id).then(function(res) {
+      if (!res || !res.success) clearPendingAccount();
+    }, clearPendingAccount);
+  }
+  // Re-render from the payload we already have: switching never refetches.
+  showActiveAccountUsage();
 }
 
-function buildAccountTab(acc) {
-  var limitedMins = accountLimitedMins(acc);
-  var cls = 'account-tab';
-  if (acc.id === activeAccountId) cls += ' active';
-  if (limitedMins) cls += ' rate-limited';
-  var tab = createElement('div', cls);
-
-  var label = createElement('span', 'account-tab-label');
-  label.appendChild(createElement('span', 'account-tab-name', acc.name || acc.id));
-  if (acc.cliActive) {
-    var cliTag = createElement('span', 'account-tab-cli', 'CLI');
-    cliTag.title = cliLauncherName + ' is running on this account';
-    label.appendChild(cliTag);
+// The whole story of an account, for whoever hovers: e-mail, login end, and the fix when it's broken.
+function accountTooltip(acc) {
+  var login = acc.login;
+  if (acc.needsLogin || (login && login.state === 'out')) {
+    return (login && login.state === 'out')
+      ? login.detail
+      : 'Run: ' + ((login && login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login');
   }
-  tab.appendChild(label);
-
-  var dotCls = getAccountDotClass(acc);
-  var dot = createElement('span', 'account-tab-dot' + (dotCls ? ' ' + dotCls : ''));
-  if (dotCls === 'alert') {
-    dot.textContent = '!';
-    tab.title = acc.needsLogin
-      ? 'Run: CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login'
-      : acc.error;
-  } else {
-    tab.title = acc.name + (acc.email ? ' · ' + acc.email : '')
-      + (limitedMins ? ' — rate limited · retrying in ' + limitedMins + 'm' : '');
-  }
-  tab.appendChild(dot);
-
-  tab.addEventListener('click', function() {
-    if (acc.id === activeAccountId) return;
-    activeAccountId = acc.id;
-    clearPendingAccount();
-    pendingAccountId = acc.id;
-    // Safety net: never pin the choice for longer than one sync round.
-    pendingAccountTimer = setTimeout(clearPendingAccount, 8000);
-    if (window.electronAPI.setActiveAccount) {
-      window.electronAPI.setActiveAccount(acc.id).then(function(res) {
-        if (!res || !res.success) clearPendingAccount();
-      }, clearPendingAccount);
-    }
-    // Re-render from the payload we already have — switching never refetches.
-    showActiveAccountUsage();
-  });
-
-  return tab;
-}
-
-function renderAccountTabs() {
-  var row = document.getElementById('accountTabs');
-  if (!row) return;
-  while (row.firstChild) row.removeChild(row.firstChild);
-  // A single account looks exactly as it always did — no tab row at all.
-  if (accountsData.length < 2) {
-    row.classList.remove('visible');
-    return;
-  }
-  row.classList.add('visible');
-  for (var i = 0; i < accountsData.length; i++) {
-    row.appendChild(buildAccountTab(accountsData[i]));
-  }
-}
-
-// Why the active account has no numbers to show, in one short line.
-function accountStatusText(acc) {
-  if (!acc) return 'No account';
-  var limited = accountLimitedMins(acc);
-  if (acc.needsLogin) return acc.name + ': sign-in needed';
-  if (limited) return acc.name + ': rate limited · retrying in ' + limited + 'm';
   if (acc.error) return acc.name + ': ' + acc.error;
-  return acc.name + ': waiting for first sync';
+  return acc.name + (acc.email ? ' · ' + acc.email : '') + (login && login.detail ? '\n' + login.detail : '');
 }
 
-// Paint the meters, timers and footer for whichever account is active.
+// Each limit keeps its own refill time here, because the row only prints one of them.
+function meterTooltip(meter, now) {
+  var refill = WL.refillText(meter.resetsAt, now);
+  return WL.shortLabel(meter) + ': ' + meter.pct + '% used' + (refill ? ', refills ' + refill : '');
+}
+
+function loginCommand(acc) {
+  return (acc.login && acc.login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login';
+}
+
+// Copies the command rather than running it: a login has to land in this account's own folder, and
+// CLAUDE.md's rule is to check the e-mail it reports.
+function buildLoginButton(acc) {
+  var button = createElement('button', 'login-btn', 'Copy login command');
+  button.title = loginCommand(acc);
+  button.addEventListener('click', function(e) {
+    e.stopPropagation();
+    navigator.clipboard.writeText(loginCommand(acc)).then(function() {
+      button.textContent = 'Copied, paste it in a terminal';
+    }, function() {
+      button.textContent = loginCommand(acc);
+    });
+  });
+  return button;
+}
+
+// Called every second by the timer, so it only touches the page when the words change.
+function setRowText(el, state) {
+  var key = state.alert + '|' + state.detail;
+  if (el.getAttribute('data-text') === key) return;
+  el.setAttribute('data-text', key);
+  while (el.firstChild) el.removeChild(el.firstChild);
+  // Two whole pieces: when they don't fit on one line, they break between them, never inside.
+  if (state.alert) el.appendChild(createElement('strong', null, state.alert));
+  if (state.alert && state.detail) el.appendChild(document.createTextNode(' '));
+  if (state.detail) el.appendChild(createElement('span', null, state.detail));
+}
+
+function buildAccountRow(acc, index) {
+  var state = WL.rowState(acc, Date.now());
+  var active = acc.id === activeAccountId;
+  var name = acc.name || acc.id;
+  // With one account there is nothing to choose between, so nothing to highlight.
+  var chosen = active && accountsData.length > 1;
+  var row = createElement('li', 'acct' + (chosen ? ' active' : '')
+    + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : '')
+    + (state.status === 'limited' || state.status === 'error' || state.status === 'out' ? ' stale' : ''));
+  if (cliMove) {
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    if (chosen) row.setAttribute('aria-current', 'true');
+  } else if (activeFollowsCli) {
+    row.classList.add('fixed');
+    if (chosen) row.setAttribute('aria-current', 'true');
+  } else {
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
+  }
+  row.setAttribute('data-id', acc.id);
+  row.title = accountTooltip(acc)
+    + (cliMove ? '\nClick: move every ' + cliLauncherName + ' session to this account' : '');
+
+  var bullet = createElement('span', 'bullet b-' + (index % 4), name.charAt(0).toUpperCase());
+  bullet.setAttribute('aria-hidden', 'true');
+  row.appendChild(bullet);
+
+  var who = createElement('div', 'who');
+  var nameEl = createElement('span', 'name');
+  nameEl.appendChild(createElement('span', 'name-text', name));
+  if (chosen) {
+    // One badge: where the CLI runs IS the active account.
+    var badge = createElement('em', null, 'Active');
+    if (acc.cliActive) badge.title = cliLauncherName + ' is running on this account';
+    nameEl.appendChild(badge);
+  }
+  who.appendChild(nameEl);
+  var reset = createElement('span', 'reset');
+  setRowText(reset, state);
+  who.appendChild(reset);
+  row.appendChild(who);
+
+  var meters = createElement('div', 'meters');
+  if (state.status === 'out') {
+    // Old bars say nothing once logged out. Getting back in is the only thing left to do.
+    meters.appendChild(buildLoginButton(acc));
+  } else if (state.main) {
+    var now = Date.now();
+    var mainLabel = WL.labelMeter(state.main, acc.usage);
+    if (mainLabel) meters.appendChild(createElement('span', 'lab wide', mainLabel));
+    var mainCells = buildCells(state.main, false);
+    mainCells.classList.add('wide');
+    mainCells.title = meterTooltip(state.main, now);
+    meters.appendChild(mainCells);
+    state.subs.forEach(function(meter) {
+      var lab = createElement('span', 'lab', WL.shortLabel(meter) + ' ' + meter.pct + '%');
+      lab.title = meterTooltip(meter, now);
+      meters.appendChild(lab);
+      var cells = buildCells(meter, true);
+      cells.title = lab.title;
+      meters.appendChild(cells);
+    });
+  } else {
+    row.classList.add('no-meters');
+  }
+  if (!row.classList.contains('no-meters')) row.appendChild(meters);
+
+  var pct = createElement('div', 'pct');
+  if (state.main) {
+    pct.appendChild(createElement('b', null, String(state.main.pct)));
+    pct.appendChild(createElement('small', null, '%'));
+  }
+  row.appendChild(pct);
+
+  if (cliMove || !activeFollowsCli) {
+    var act = cliMove ? moveCli : selectAccount;
+    row.addEventListener('click', function() { act(acc); });
+    row.addEventListener('keydown', function(e) {
+      // Keys pressed on a button inside the row belong to that button.
+      if (e.target !== row || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      act(acc);
+    });
+  }
+  return { acc: acc, reset: reset, row: row };
+}
+
+var boardRows = [];
+var lastPcts = {};
+
+function renderAccountBoard() {
+  var board = document.getElementById('accountTabs');
+  var focused = document.activeElement && document.activeElement.getAttribute('data-id');
+  while (board.firstChild) board.removeChild(board.firstChild);
+  boardRows = accountsData.map(buildAccountRow);
+  boardRows.forEach(function(entry) {
+    board.appendChild(entry.row);
+    var main = WL.rowMeters(entry.acc.usage).main;
+    var previous = lastPcts[entry.acc.id];
+    if (main) {
+      // One brief flash on the row whose number just moved.
+      if (previous !== undefined && previous !== main.pct) entry.row.querySelector('.cells').classList.add('bar-pulse');
+      lastPcts[entry.acc.id] = main.pct;
+    }
+    if (entry.acc.id === focused) entry.row.focus();
+  });
+}
+
+function renderAnswer() {
+  var el = document.getElementById('answerLine');
+  var parts = WL.answerParts(accountsData, Date.now());
+  var key = JSON.stringify(parts);
+  if (el.getAttribute('data-key') === key) return;
+  el.setAttribute('data-key', key);
+  while (el.firstChild) el.removeChild(el.firstChild);
+  el.hidden = !parts || (!parts.most && !parts.full && !parts.nextText);
+  if (el.hidden) return;
+  if (parts.full) {
+    el.appendChild(createElement('b', null, parts.of ? 'Every readable account is full.' : 'Every account is full.'));
+  } else if (parts.most) {
+    el.appendChild(createElement('b', null, parts.most));
+    el.appendChild(document.createTextNode(' has the most room'
+      + (parts.of ? ' of ' + parts.of + ' readable accounts.' : '.')));
+  }
+  if (parts.nextText) {
+    if (el.firstChild) el.appendChild(document.createTextNode(' '));
+    el.appendChild(document.createTextNode('Next refill: '));
+    var who = [parts.nextName, parts.nextKind].filter(Boolean).join(' ');
+    el.appendChild(createElement('b', null, (who ? who + ', ' : '') + parts.nextText));
+    el.appendChild(document.createTextNode('.'));
+  }
+}
+
+// Paint everything that depends on the accounts. The extra-usage strip follows the active one.
 function showActiveAccountUsage() {
-  renderAccountTabs();
+  renderAccountBoard();
+  renderAnswer();
   var active = getActiveAccount();
   var data = active ? active.usage : null;
-  if (!data) {
-    // Never leave another account's numbers under this account's tab — clear
-    // the meters and say why they are empty.
-    usageData = null;
-    lastSyncError = accountStatusText(active);
-    renderAll();
-    setSyncStatus('stale');
-    if (typeof reportMinHeight === 'function') reportMinHeight();
-    return;
-  }
-  var oldData = usageData;
+  var state = active ? WL.rowState(active, Date.now()) : null;
   usageData = data;
-  // A rate-limited account keeps showing its last good numbers, labelled.
-  var limitedMins = accountLimitedMins(active);
-  lastSyncError = limitedMins
-    ? 'Rate limited · retrying in ' + limitedMins + 'm'
-    : null;
-  hideSetupOverlay();
-  renderAll();
-  setSyncStatus(limitedMins ? 'stale' : 'live');
-
-  // Animate percentage changes
-  if (oldData) {
-    var keys = ['session', 'weekAll', 'weekSonnet'];
-    for (var i = 0; i < keys.length; i++) {
-      var k = keys[i];
-      var oldPct = oldData[k] ? oldData[k].pct : 0;
-      var newPct = data[k] ? data[k].pct : 0;
-      if (oldPct !== newPct) {
-        animateNumbers(oldPct, newPct, k, 600);
-        var rowId = k === 'session' ? 'sessionRow' : (k === 'weekAll' ? 'weekAllRow' : 'weekSonnetRow');
-        var barEl = document.getElementById(rowId);
-        if (barEl) {
-          var meter = barEl.querySelector('.segs') || barEl.querySelector('.bar-fill');
-          if (meter) { meter.classList.remove('bar-pulse'); void meter.offsetWidth; meter.classList.add('bar-pulse'); }
-        }
-      }
-    }
-  }
-}
-
-function renderAll() {
-  var data = usageData;
   if (!data) {
-    // Clear bars so stale data doesn't show
-    ['sessionRow', 'weekAllRow', 'weekSonnetRow'].forEach(function(id) {
-      var row = document.getElementById(id);
-      if (row) { while (row.firstChild) row.removeChild(row.firstChild); }
-    });
-    renderExtraUsage(null);
-    updateFooter();
-    return;
+    lastSyncError = active ? (active.name || active.id) + ': ' + (state.alert || state.detail) : 'No account';
+    setSyncStatus('stale');
+    if (accountsData.length > 1) hideSetupOverlay();
+  } else {
+    lastSyncError = state.status === 'limited' ? state.detail : null;
+    hideSetupOverlay();
+    setSyncStatus(state.status === 'limited' ? 'stale' : 'live');
   }
-  renderUsageRow(document.getElementById('sessionRow'), data.session, 'session');
-  renderUsageRow(document.getElementById('weekAllRow'), data.weekAll, 'weekAll');
-  renderUsageRow(document.getElementById('weekSonnetRow'), data.weekSonnet, 'weekSonnet');
-
-  renderExtraUsage(data.extraUsage);
-
-  updateTimers();
-  if (typeof applyResponsiveScaling === 'function') applyResponsiveScaling();
+  renderExtraUsage(data ? data.extraUsage : null);
+  updateFooter();
+  if (typeof reportMinHeight === 'function') reportMinHeight();
 }
 
-// Update footer to reflect sync state
+// A click on a row: the launcher moves every running session to that account.
+// Active is not set here; it follows the launcher's record when the move lands.
+function moveCli(acc) {
+  if (cliMoving || !window.electronAPI.moveCliToAccount) return;
+  cliMoving = true;
+  showMoveNotice({ ok: true, text: 'Moving ' + cliLauncherName + ' to ' + (acc.name || acc.id) + '…' }, 25000);
+  window.electronAPI.moveCliToAccount(acc.id).then(function(res) {
+    cliMoving = false;
+    showMoveNotice(res && res.text ? res : { ok: false, text: 'The move did not answer' }, 10000);
+  }, function() {
+    cliMoving = false;
+    showMoveNotice({ ok: false, text: 'The move failed' }, 10000);
+  });
+}
+
+function showMoveNotice(res, ms) {
+  moveNotice = { text: res.text, detail: res.detail || '', error: !res.ok, until: Date.now() + ms };
+  updateFooter();
+}
+
 function updateFooter() {
   var footer = document.getElementById('footerHint');
+  if (moveNotice && Date.now() < moveNotice.until) {
+    footer.textContent = moveNotice.text;
+    footer.title = moveNotice.detail || moveNotice.text;
+    footer.className = moveNotice.error ? 'footer-hint error' : 'footer-hint';
+    return;
+  }
+  if (moveNotice) { moveNotice = null; footer.title = ''; }
   if (lastSyncError) {
     footer.textContent = lastSyncError;
     footer.className = 'footer-hint error';
+  } else if (syncing && Date.now() - syncingSince < SYNCING_LIMIT_MS) {
+    footer.textContent = 'Syncing...';
+    footer.className = 'footer-hint';
   } else if (usageData && usageData.syncTime) {
     var ago = Math.round((Date.now() - usageData.syncTime) / 60000);
     footer.textContent = ago < 1 ? 'Synced just now' : 'Synced ' + ago + 'm ago';
@@ -349,26 +375,11 @@ function updateFooter() {
   }
 }
 
-// Lightweight timer update — only changes text, no DOM rebuild
+// Lightweight timer update: only changes text, no rebuild.
 function updateTimers() {
-  var data = usageData;
-  if (!data) return;
-
-  // Update countdown text for each row
-  var rows = [
-    { id: 'sessionRow', data: data.session },
-    { id: 'weekAllRow', data: data.weekAll },
-    { id: 'weekSonnetRow', data: data.weekSonnet },
-  ];
-  for (var i = 0; i < rows.length; i++) {
-    var rowEl = document.getElementById(rows[i].id);
-    if (!rowEl) continue;
-    var resetEl = rowEl.querySelector('.reset-info');
-    if (resetEl && rows[i].data && rows[i].data.resetsAt) {
-      resetEl.textContent = formatResetTime(rows[i].data.resetsAt);
-    }
-  }
-
+  var now = Date.now();
+  boardRows.forEach(function(entry) { setRowText(entry.reset, WL.rowState(entry.acc, now)); });
+  renderAnswer();
   updateFooter();
 }
 
@@ -376,6 +387,9 @@ function setSyncStatus(status) {
   var dot = document.getElementById('statusDot');
   var badge = document.getElementById('syncStatus');
 
+  // Only the first of a run of syncs starts the clock: offline, they keep arriving every few seconds.
+  if (status === 'syncing' && !syncing) syncingSince = Date.now();
+  syncing = status === 'syncing';
   if (status === 'syncing') {
     dot.className = 'dot syncing';
     badge.className = 'sync-status syncing';
@@ -425,6 +439,9 @@ window.electronAPI.onUsageUpdate(function(payload) {
     if (typeof payload.cliLauncher === 'string' && payload.cliLauncher) {
       cliLauncherName = payload.cliLauncher;
     }
+    activeFollowsCli = payload.activeFollowsCli === true;
+    cliMove = payload.cliMove === true;
+    if (activeFollowsCli) clearPendingAccount(); // a click from before it took over is not held
     if (pendingAccountId && payload.activeAccountId !== pendingAccountId) {
       // Main has not applied the click yet — hold the user's choice.
       activeAccountId = pendingAccountId;
@@ -461,8 +478,9 @@ var pendingWidgetUpdate = null;
 window.electronAPI.onUpdateAvailable(function(data) {
   pendingWidgetUpdate = data;
   var btn = document.getElementById('updateBtn');
-  btn.textContent = 'Update v' + data.latestVersion;
+  btn.textContent = (data.downloadUrl ? 'Update v' : 'Get v') + data.latestVersion;
   btn.classList.add('visible');
+  reportMinHeight();
 });
 
 window.electronAPI.onUpdateProgress(function(pct) {
@@ -475,11 +493,9 @@ document.getElementById('updateBtn').addEventListener('click', function() {
   if (!pendingWidgetUpdate) return;
   var btn = document.getElementById('updateBtn');
 
+  // This system has no installer in the release, so the release page is the way to it.
   if (!pendingWidgetUpdate.downloadUrl) {
-    btn.textContent = 'No installer found';
-    setTimeout(function() {
-      btn.textContent = 'Update v' + pendingWidgetUpdate.latestVersion;
-    }, 3000);
+    if (pendingWidgetUpdate.url) window.electronAPI.openExternalUrl(pendingWidgetUpdate.url);
     return;
   }
 
@@ -492,9 +508,8 @@ document.getElementById('updateBtn').addEventListener('click', function() {
       btn.textContent = 'Installing...';
       btn.classList.remove('downloading');
       btn.style.backgroundSize = '';
-      btn.style.background = 'linear-gradient(90deg, #6366f1, #a855f7, #ec4899)';
     } else {
-      btn.textContent = 'Failed — retry';
+      btn.textContent = 'Failed. Try again';
       btn.classList.remove('downloading');
       btn.style.backgroundSize = '';
       btn.style.background = '';
@@ -504,7 +519,7 @@ document.getElementById('updateBtn').addEventListener('click', function() {
       }, 3000);
     }
   }).catch(function() {
-    btn.textContent = 'Failed — retry';
+    btn.textContent = 'Failed. Try again';
     btn.classList.remove('downloading');
     btn.style.backgroundSize = '';
     btn.style.background = '';
@@ -538,17 +553,6 @@ document.getElementById('calendarBtn').addEventListener('dblclick', function(e) 
   e.stopPropagation();
 });
 
-// Usage rows open the dashboard on its usage overview
-['sessionRow', 'weekAllRow', 'weekSonnetRow', 'extraRow'].forEach(function(id) {
-  var rowEl = document.getElementById(id);
-  if (!rowEl) return;
-  rowEl.style.cursor = 'pointer';
-  rowEl.title = 'Open usage overview';
-  rowEl.addEventListener('click', function() {
-    window.electronAPI.openDashboard('overview');
-  });
-});
-
 // Extra usage strip opens the usage overview too
 (function() {
   var strip = document.getElementById('extraStrip');
@@ -561,7 +565,7 @@ document.getElementById('calendarBtn').addEventListener('dblclick', function(e) 
   var streak = document.getElementById('streakBadge');
   if (!streak) return;
   streak.style.cursor = 'pointer';
-  streak.title = 'Task completion streak — open Tasks';
+  streak.title = 'Days in a row with a task finished. Opens Tasks.';
   streak.addEventListener('click', function(e) {
     e.stopPropagation();
     window.electronAPI.openTasks();
@@ -606,7 +610,7 @@ document.getElementById('setupSignInBtn').addEventListener('click', function() {
       btn.style.display = 'none';
       waiting.style.display = '';
     } else {
-      btn.textContent = 'Sign In';
+      btn.textContent = 'Sign in';
       btn.disabled = false;
       document.getElementById('setupDesc').textContent =
         'Could not launch login. Run "claude auth login" in a terminal.';
@@ -659,6 +663,7 @@ function updateClaudeStatusBanner(status) {
 
   if (!status || !status.incidents || status.incidents.length === 0 || status.indicator === 'none') {
     banner.className = 'claude-status-banner';
+    reportMinHeight();
     return;
   }
 
@@ -668,6 +673,7 @@ function updateClaudeStatusBanner(status) {
   var started = inc.startedAt ? 'Started ' + relativeTime(inc.startedAt) : '';
   metaEl.textContent = [components, started].filter(Boolean).join(' \u00B7 ');
   banner.className = 'claude-status-banner ' + status.indicator + ' visible';
+  reportMinHeight();
 }
 
 window.electronAPI.getClaudeStatus().then(function(status) {
@@ -688,7 +694,7 @@ var timerInterval = null;
 function startTimerInterval() {
   if (timerInterval) return;
   timerInterval = setInterval(function() {
-    if (!usageData) return;
+    if (!accountsData.length) return;
     updateTimers();
   }, 1000);
 }
@@ -717,6 +723,7 @@ startTimerInterval();
       if (el.classList && (el.classList.contains('dash-btn') || el.classList.contains('win-btn')
         || el.classList.contains('pomo-ring-wrap')
         || el.classList.contains('refresh-btn') || el.classList.contains('footer-update-btn')
+        || el.classList.contains('acct') || el.classList.contains('widget-habits-badge')
         || el.classList.contains('pomo-tooltip') || el.classList.contains('icon-badge'))) return true;
       el = el.parentElement;
     }
@@ -789,22 +796,8 @@ window.electronAPI.onToggleAnimate(function(dir) {
 // --- Badge updates ---
 window.electronAPI.onBadgeUpdate(function(data) {
   if (data.tasks !== undefined) {
-    var badge = document.getElementById('tasksBadge');
-    if (data.tasks > 0) {
-      badge.textContent = data.tasks;
-      badge.classList.remove('hidden');
-    } else {
-      badge.classList.add('hidden');
-    }
-  }
-  if (data.calendar !== undefined) {
-    var calBadge = document.getElementById('calBadge');
-    if (data.calendar > 0) {
-      calBadge.textContent = data.calendar;
-      calBadge.classList.remove('hidden');
-    } else {
-      calBadge.classList.add('hidden');
-    }
+    tasksLeft = data.tasks;
+    renderToday();
   }
 });
 
@@ -826,11 +819,13 @@ window.electronAPI.onEventOverdue(function(data) {
   document.getElementById('overdueBannerText').textContent = data.title;
   document.getElementById('overdueBannerTime').textContent = data.time || 'today';
   banner.classList.add('visible');
+  reportMinHeight();
 });
 
 document.getElementById('overdueBannerClose').addEventListener('click', function(e) {
   e.stopPropagation();
   document.getElementById('overdueBanner').classList.remove('visible');
+  reportMinHeight();
 });
 
 // Clicking the overdue banner itself opens the Calendar (where the event lives)
@@ -840,18 +835,9 @@ document.getElementById('overdueBanner').addEventListener('click', function() {
 
 // --- Theme system ---
 window.electronAPI.onThemeUpdate(function(theme) {
-  var root = document.documentElement;
-  root.style.setProperty('--bg', theme.bg);
-  root.style.setProperty('--surface', theme.surface);
-  root.style.setProperty('--surface2', theme.surface2);
-  root.style.setProperty('--border', theme.border);
-  root.style.setProperty('--text', theme.text);
-  root.style.setProperty('--text-dim', theme.textDim);
-  root.style.setProperty('--accent', theme.accent);
-  if (theme.green) root.style.setProperty('--green', theme.green);
-  if (theme.red) root.style.setProperty('--red', theme.red);
-  if (theme.yellow) root.style.setProperty('--yellow', theme.yellow);
-  if (theme.barBg) root.style.setProperty('--bar-bg', theme.barBg);
+  UI.applyTheme(theme);
+  // The widget's own ground may be translucent, where the window system allows it.
+  document.documentElement.style.setProperty('--bg', theme.bg);
 });
 
 // --- Snap glow effect ---
@@ -889,15 +875,16 @@ function pomoUpdateRing(data) {
   else if (state === 'idle') fillCls += ' idle';
   else fillCls += ' running';
   ringFill.className = fillCls;
+  document.getElementById('pomoRing').classList.toggle('idle', state === 'idle');
   ringText.className = 'pomo-ring-text' + (state === 'running' ? ' active' : (state === 'break' ? ' break' : ''));
 
   // Ring text
-  ringText.textContent = state === 'idle' ? String(mins) : String(mins).padStart(2, '0');
+  ringText.textContent = (state === 'break' ? 'Break ' : 'Focus ') + (state === 'idle' ? String(mins) : String(mins).padStart(2, '0'));
 
   // Tooltip
   tooltipTime.textContent = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
   tooltipTime.className = 'pomo-tooltip-time' + (state === 'running' ? ' active' : (state === 'break' ? ' break' : ''));
-  tooltipLabel.textContent = state === 'break' ? 'Break' : (state === 'running' ? 'Focus' : (state === 'paused' ? 'Paused' : 'Pomodoro'));
+  tooltipLabel.textContent = state === 'break' ? 'Break' : (state === 'running' ? 'Focus' : (state === 'paused' ? 'Paused' : 'Focus'));
 
   if (state === 'running') startBtn.textContent = 'Pause';
   else if (state === 'paused') startBtn.textContent = 'Resume';
@@ -966,148 +953,69 @@ document.getElementById('pomoTooltip').addEventListener('click', function(e) { e
 // Load initial state
 window.electronAPI.pomoGet().then(function(data) { pomoUpdateRing(data); });
 
-// --- Widget Calendar ---
-var widgetCalColorMap = { blue: '#60a5fa', green: '#4ade80', orange: '#fb923c', red: '#f87171', purple: '#c084fc' };
+// --- Today: the next event and the tasks left, on one line ---
+var todayEvents = [];
+var tasksLeft = null;
+var nextJoinLink = null;
 
-function widgetCalToday() {
-  var d = new Date();
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+function eventJoinLink(evt) {
+  return PlanLib.meetingLink(evt);
 }
 
-function renderWidgetCalendar(events, forceShow) {
-  var container = document.getElementById('widgetCalendar');
-  var todayEl = document.getElementById('widgetCalEvents');
-  var upcomingEl = document.getElementById('widgetCalUpcomingEvents');
-  var todayHeader = document.getElementById('widgetCalToday');
-  var upcomingHeader = document.getElementById('widgetCalUpcoming');
-
-  while (todayEl.firstChild) todayEl.removeChild(todayEl.firstChild);
-  while (upcomingEl.firstChild) upcomingEl.removeChild(upcomingEl.firstChild);
-
-  var today = widgetCalToday();
-  var todayEvents = (events || []).filter(function(e) { return e.date === today; });
-  var futureEvents = (events || []).filter(function(e) { return e.date > today; });
-
-  todayEvents.sort(function(a, b) {
-    if (!a.time && b.time) return -1;
-    if (a.time && !b.time) return 1;
-    return (a.time || '').localeCompare(b.time || '');
-  });
-  futureEvents.sort(function(a, b) {
-    if (a.date !== b.date) return a.date.localeCompare(b.date);
-    return (a.time || '').localeCompare(b.time || '');
-  });
-
-  // Always show if there are today events — user shouldn't miss them
-  var hasTodayEvents = todayEvents.length > 0;
-  if (!forceShow && !calendarOpen && !hasTodayEvents && futureEvents.length === 0) {
-    container.classList.remove('visible');
-    return;
-  }
-
-  container.classList.add('visible');
-
-  // Today events
-  todayHeader.style.display = '';
-  if (todayEvents.length > 0) {
-    for (var i = 0; i < todayEvents.length; i++) {
-      todayEl.appendChild(buildWidgetCalEvent(todayEvents[i], false));
-    }
+function renderToday() {
+  var nextEl = document.getElementById('nextEvent');
+  var tasksEl = document.getElementById('tasksLeft');
+  var now = Date.now();
+  var upcoming = WL.upcomingEvents(todayEvents, now);
+  var today = WL.localDay(now);
+  var next = upcoming[0];
+  while (nextEl.firstChild) nextEl.removeChild(nextEl.firstChild);
+  nextJoinLink = null;
+  if (next) {
+    nextEl.appendChild(createElement('b', null, WL.eventTimeText(next, now)));
+    nextEl.appendChild(document.createTextNode(' ' + PlanLib.eventTitle(next)));
+    var moreToday = upcoming.filter(function(evt) { return evt.date === today; }).length - 1;
+    if (next.date === today && moreToday > 0) nextEl.appendChild(createElement('span', 'more', ' +' + moreToday));
+    nextJoinLink = eventJoinLink(next);
+    // A click here opens the link, and the title leaves the address out, so the place shows.
+    if (nextJoinLink) nextEl.appendChild(createElement('span', 'more', ' · ' + PlanLib.linkHost(nextJoinLink)));
+    nextEl.title = nextJoinLink ? 'Join meeting: ' + nextJoinLink : PlanLib.eventTitle(next);
   } else {
-    var noToday = createElement('div', 'widget-cal-event');
-    noToday.style.color = 'var(--text-dim)';
-    noToday.style.fontSize = '10px';
-    noToday.textContent = 'No events today';
-    todayEl.appendChild(noToday);
+    nextEl.textContent = 'Nothing coming up';
+    nextEl.title = 'Open the calendar';
   }
-
-  // Upcoming (next 3)
-  if (futureEvents.length > 0) {
-    upcomingHeader.style.display = '';
-    var max = Math.min(3, futureEvents.length);
-    for (var j = 0; j < max; j++) {
-      upcomingEl.appendChild(buildWidgetCalEvent(futureEvents[j], true));
-    }
-  } else {
-    upcomingHeader.style.display = 'none';
-  }
+  tasksEl.textContent = tasksLeft ? '· ' + tasksLeft + (tasksLeft === 1 ? ' task' : ' tasks') + ' left' : '';
   if (typeof reportMinHeight === 'function') reportMinHeight();
 }
 
-function buildWidgetCalEvent(evt, showDate) {
-  var row = createElement('div', 'widget-cal-event');
-
-  var dot = createElement('div', 'widget-cal-dot');
-  var dotColor = widgetCalColorMap[evt.color] || widgetCalColorMap.blue;
-  dot.style.background = dotColor;
-  row.appendChild(dot);
-
-  var timeEl = createElement('div', 'widget-cal-time');
-  if (showDate) {
-    var parts = evt.date.split('-');
-    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    timeEl.textContent = months[parseInt(parts[1], 10) - 1] + ' ' + parseInt(parts[2], 10);
-  } else if (evt.time) {
-    // Show relative time for today's events
-    var now = Date.now();
-    var evtMs = new Date(evt.date + 'T' + evt.time).getTime();
-    var diff = evtMs - now;
-    if (diff > 0 && diff < 60 * 60 * 1000) {
-      var mins = Math.round(diff / 60000);
-      timeEl.textContent = 'in ' + mins + 'm';
-      timeEl.style.color = dotColor;
-      timeEl.style.fontWeight = '700';
-    } else if (diff >= -30 * 60 * 1000 && diff <= 0) {
-      timeEl.textContent = 'NOW';
-      timeEl.style.color = 'var(--red)';
-      timeEl.style.fontWeight = '700';
-      dot.style.boxShadow = '0 0 6px ' + dotColor;
-    } else {
-      timeEl.textContent = evt.time;
-    }
-  } else {
-    timeEl.textContent = 'All day';
-  }
-  row.appendChild(timeEl);
-
-  var titleEl = createElement('div', 'widget-cal-title');
-  titleEl.textContent = evt.title;
-  row.appendChild(titleEl);
-
-  // Meetings with a link: click jumps straight into the meeting
-  var joinLink = evt.meetLink || (function(s) {
-    var m = typeof s === 'string' && s.match(/https:\/\/[^\s<>"']+/);
-    return m ? m[0] : null;
-  })(evt.title);
-
-  if (joinLink) {
-    var cam = createElement('span', 'widget-cal-join');
-    cam.textContent = '🎥';
-    cam.style.fontSize = '10px';
-    cam.style.flexShrink = '0';
-    row.appendChild(cam);
-  }
-
-  row.style.cursor = 'pointer';
-  row.title = joinLink ? 'Join meeting: ' + joinLink : evt.title;
-  row.addEventListener('click', function() {
-    if (joinLink) {
-      window.electronAPI.openExternalUrl(joinLink);
-      return;
-    }
-    // Calendar events open the Calendar window, not the generic dashboard
-    window.electronAPI.openCalendar();
-  });
-
-  return row;
-}
+document.getElementById('nextEvent').addEventListener('click', function() {
+  if (nextJoinLink) window.electronAPI.openExternalUrl(nextJoinLink);
+  else window.electronAPI.openCalendar();
+});
+document.getElementById('tasksLeft').addEventListener('click', function() {
+  window.electronAPI.openTasks();
+});
 
 window.electronAPI.getCalendarEvents().then(function(events) {
-  renderWidgetCalendar(events);
+  todayEvents = events || [];
+  renderToday();
 });
 
 window.electronAPI.onCalendarUpdate(function(events) {
-  renderWidgetCalendar(events);
+  todayEvents = events || [];
+  renderToday();
+});
+
+// "in 12m" and "Now" go stale without any new data arriving.
+setInterval(function() { if (!document.hidden) renderToday(); }, 30000);
+
+// --- Maps ---
+window.electronAPI.getMapsState().then(function(state) {
+  document.getElementById('mapsBtn').hidden = !(state && state.available);
+  if (typeof reportMinHeight === 'function') reportMinHeight();
+});
+document.getElementById('mapsBtn').addEventListener('click', function() {
+  window.electronAPI.openMaps();
 });
 
 // --- Responsive scaling — glass panels adapt to widget size ---
@@ -1134,13 +1042,16 @@ function reportMinHeight() {
     minHeightTimer = null;
     var widget = document.querySelector('.widget');
     if (!widget || !window.electronAPI.setMinContentHeight) return;
-    // scrollHeight lies here: flex-grow children (calendar card) stretch to fill,
-    // so measure the TRUE natural height with height:max-content, then restore.
-    // Both happen in the same JS turn — no visible flash.
-    var prev = widget.style.height;
+    // Measure the true natural height, then restore. Both happen in the same JS turn, so nothing
+    // flashes. The widget must not shrink while measured: as a flex item it would report the
+    // window's current height, and a too-short window could never grow.
+    var prevHeight = widget.style.height;
+    var prevShrink = widget.style.flexShrink;
     widget.style.height = 'max-content';
-    var needed = widget.offsetHeight + 4; // small safety margin
-    widget.style.height = prev;
+    widget.style.flexShrink = '0';
+    var needed = Math.ceil(widget.getBoundingClientRect().height);
+    widget.style.height = prevHeight;
+    widget.style.flexShrink = prevShrink;
     if (needed > 40) window.electronAPI.setMinContentHeight(needed);
   }, 150);
 }
@@ -1173,19 +1084,71 @@ function reportMinHeight() {
     return Math.round((bMid.getTime() - aMid.getTime()) / 86400000);
   }
 
-  function makeBadge(kind, label, on) {
+  var HABIT_BADGES = [
+    { kind: 'training', label: 'Train' },
+    { kind: 'reading', label: 'Read/Write' },
+    // Never pressed: it ticks itself when the day's last Relax break completes.
+    { kind: 'relax', label: 'Relax', auto: true },
+  ];
+  var lastHabits = null;
+  var relaxCount = null; // { done, total } from the Relax meter
+
+  function tick() {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '13');
+    svg.setAttribute('height', '13');
+    svg.setAttribute('aria-hidden', 'true');
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'm6 12.5 4 4 8-9');
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', 'currentColor');
+    path.setAttribute('stroke-width', '1.8');
+    path.setAttribute('stroke-linecap', 'round');
+    path.setAttribute('stroke-linejoin', 'round');
+    svg.appendChild(path);
+    return svg;
+  }
+
+  // Relax: a ring filling with the day's breaks and "Relax 2/4". It ticks itself, so a click does
+  // nothing.
+  function makeAutoBadge(label, on) {
     var el = document.createElement('span');
+    el.className = 'widget-habits-badge auto' + (on ? ' on' : '');
+    el.setAttribute('data-kind', 'relax');
+    var done = relaxCount ? relaxCount.done : 0;
+    var total = relaxCount ? relaxCount.total : 0;
+    el.setAttribute('aria-label', label + (relaxCount ? ', ' + done + ' of ' + total + ' breaks today' : '')
+      + (on ? ', done' : ''));
+    el.title = on
+      ? 'Relax done today'
+      : 'Relax ticks itself when today\'s ' + (total || 'last') + ' breaks are done' + (relaxCount ? ' (' + done + ' so far)' : '');
+
+    if (on) {
+      el.appendChild(tick());
+    } else {
+      var ring = document.createElement('span');
+      ring.className = 'widget-habits-ring';
+      ring.style.setProperty('--p', (total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0) + '%');
+      el.appendChild(ring);
+    }
+
+    var text = document.createElement('span');
+    text.textContent = label + (relaxCount && !on ? ' ' + done + '/' + total : '');
+    el.appendChild(text);
+
+    el.addEventListener('click', function(e) { e.stopPropagation(); });
+    return el;
+  }
+
+  function makeBadge(kind, label, on) {
+    var el = document.createElement('button');
     el.className = 'widget-habits-badge' + (on ? ' on' : '');
     el.setAttribute('data-kind', kind);
-    el.setAttribute('role', 'button');
     el.setAttribute('aria-pressed', on ? 'true' : 'false');
     el.title = (on ? 'Unmark' : 'Mark') + ' today as ' + label.toLowerCase();
 
-    var box = document.createElement('span');
-    box.className = 'widget-habits-checkbox';
-    box.textContent = on ? '✓' : '';
-    el.appendChild(box);
-
+    if (on) el.appendChild(tick());
     var text = document.createElement('span');
     text.textContent = label;
     el.appendChild(text);
@@ -1206,19 +1169,16 @@ function reportMinHeight() {
     var box = document.getElementById('widgetHabits');
     var todayBadges = document.getElementById('widgetHabitsTodayBadges');
     if (!box) return;
-
-    // Always show the widget once habits are present in the system
-    box.style.display = 'block';
+    lastHabits = habits;
 
     var todayStr = ymd(new Date());
-    var t = (habits.training || []).indexOf(todayStr) !== -1;
-    var r = (habits.reading || []).indexOf(todayStr) !== -1;
-    var l = (habits.learning || []).indexOf(todayStr) !== -1;
     if (todayBadges) {
       while (todayBadges.firstChild) todayBadges.removeChild(todayBadges.firstChild);
-      todayBadges.appendChild(makeBadge('training', 'Train', t));
-      todayBadges.appendChild(makeBadge('reading', 'Read', r));
-      todayBadges.appendChild(makeBadge('learning', 'Learn', l));
+      // `learning` stays in the file for its history but is no longer shown.
+      HABIT_BADGES.forEach(function(b) {
+        var on = (habits[b.kind] || []).indexOf(todayStr) !== -1;
+        todayBadges.appendChild(b.auto ? makeAutoBadge(b.label, on) : makeBadge(b.kind, b.label, on));
+      });
     }
     if (typeof reportMinHeight === 'function') reportMinHeight();
   }
@@ -1226,12 +1186,8 @@ function reportMinHeight() {
   var habitsBox = document.getElementById('widgetHabits');
   if (habitsBox) {
     habitsBox.addEventListener('click', function(e) {
-      // Only open dashboard when the click isn't on a badge
-      var t = e.target;
-      while (t && t !== habitsBox) {
-        if (t.classList && t.classList.contains('widget-habits-badge')) return;
-        t = t.parentNode;
-      }
+      // Only the empty part of the row opens the dashboard: everything else in it has its own job.
+      if (e.target !== habitsBox) return;
       if (window.electronAPI && window.electronAPI.openDashboard) {
         // Clicking the streak area opens the Habits tab directly
         window.electronAPI.openDashboard('habits');
@@ -1245,10 +1201,71 @@ function reportMinHeight() {
   if (window.electronAPI.onHabitsUpdate) {
     window.electronAPI.onHabitsUpdate(function(data) { render(data); });
   }
+  function takeRelax(v) {
+    if (!v) return;
+    if (relaxCount && relaxCount.done === v.done && relaxCount.total === v.total) return;
+    relaxCount = { done: v.done, total: v.total };
+    if (lastHabits) render(lastHabits);
+  }
+  if (window.electronAPI.onRelaxUpdate) window.electronAPI.onRelaxUpdate(takeRelax);
+  if (window.electronAPI.getRelax) window.electronAPI.getRelax().then(takeRelax);
 
   // Re-fetch and re-render once per minute so the day count auto-ticks past midnight
   setInterval(function() {
     if (!window.electronAPI || !window.electronAPI.getHabits) return;
     window.electronAPI.getHabits().then(function(data) { if (data) render(data); });
   }, 60 * 1000);
+})();
+
+// --- Relax meter (the schedule and the breaks live in main) ---
+(function() {
+  if (!window.electronAPI || !window.electronAPI.getRelax) return;
+  var metaEl = document.getElementById('relaxMeta');
+  var btn = document.getElementById('relaxNowBtn');
+  if (!metaEl || !btn) return;
+  var view = null;
+  var clock = null;
+
+  function mmss(ms) {
+    var secs = Math.max(0, Math.ceil(ms / 1000));
+    return Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+  }
+
+  // Only a running countdown takes room on the row. The rest lives in the tooltip.
+  function liveText(v) {
+    if (v.phase === 'active') return 'Relaxing ' + mmss(v.endsAt - Date.now());
+    if (v.phase === 'headsup') return 'Starts in ' + mmss(v.startsAt - Date.now());
+    return '';
+  }
+
+  function nextText(v) {
+    var count = v.total > 0 ? v.done + '/' + v.total : v.done + ' today';
+    if (!v.enabled) return count + ', schedule off';
+    if (!v.next) return count;
+    if (v.next.tomorrow) {
+      return count + (v.total > 0 && v.done >= v.total ? ', done for today' : ', next tomorrow at ' + v.next.time);
+    }
+    return count + ', next at ' + v.next.time + (v.next.retry ? ' (retry)' : '');
+  }
+
+  function render() {
+    if (!view) return;
+    metaEl.textContent = liveText(view);
+    btn.hidden = view.phase === 'active';
+    btn.textContent = view.phase === 'headsup' ? 'Start now' : 'Relax now';
+    btn.title = 'Relax: ' + nextText(view)
+      + (view.total > 0 ? '. ' + view.total + ' breaks a day, ' + view.minutes + ' min each.' : '');
+    var ticking = view.phase === 'active' || view.phase === 'headsup';
+    if (ticking && !clock) clock = setInterval(function() { if (view) metaEl.textContent = liveText(view); }, 1000);
+    if (!ticking && clock) { clearInterval(clock); clock = null; }
+    if (typeof reportMinHeight === 'function') reportMinHeight();
+  }
+
+  btn.addEventListener('click', function(e) {
+    e.stopPropagation(); // the row itself opens the Habits tab
+    window.electronAPI.relaxNow();
+  });
+
+  window.electronAPI.onRelaxUpdate(function(v) { if (v) { view = v; render(); } });
+  window.electronAPI.getRelax().then(function(v) { if (v) { view = v; render(); } });
 })();

@@ -1,6 +1,6 @@
 {
   "name": "claude-usage-widget",
-  "version": "2.8.1",
+  "version": "2.17.3",
   "description": "Desktop widget for Claude usage + a planner (calendar, tasks, notes, habits).",
   "main": "main.js",
   "author": "Krasimir Kralev",
@@ -11,10 +11,14 @@
   },
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder",
-    "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac --publish never",
-    "build:linux": "electron-builder --linux"
+    "test": "node --test test/relax.test.js test/relax-biomes.test.js test/relax-lofi.test.js test/relax-music.test.js test/login-expiry.test.js test/cli-account.test.js test/display-scale.test.js test/usage-limits.test.js test/maps-lib.test.js test/widget-lib.test.js test/maps-view.test.js test/plan-lib.test.js test/notes-view.test.js test/smart-text.test.js test/calendar-lib.test.js test/safe-file.test.js",
+    "bundle:maps": "node scripts/bundle-maps.js",
+    "build": "npm run bundle:maps && electron-builder",
+    "build:win": "npm run bundle:maps && electron-builder --win",
+    "build:mac": "npm run bundle:maps && electron-builder --mac --publish never",
+    "build:linux": "npm run bundle:maps && electron-builder --linux",
+    "test:maps": "npm --prefix maps run typecheck && npm --prefix maps test",
+    "test:maps:install": "npm --prefix maps install --no-audit --no-fund"
   },
   "build": {
     "appId": "com.claude-usage-widget",
@@ -25,7 +29,13 @@
     "files": [
       "*.js",
       "*.html",
-      "assets/**/*"
+      "relax-biomes/**/*",
+      "!relax-biomes/samples/build-pack.py",
+      "assets/**/*",
+      "maps/build/**/*"
+    ],
+    "asarUnpack": [
+      "maps/build/**/*"
     ],
     "win": {
       "target": [

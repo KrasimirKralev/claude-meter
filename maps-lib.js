@@ -1,0 +1,151 @@
+'use strict';
+// The Maps feature's pure logic: no Electron, so it can be tested on its own.
+
+const path = require('path');
+
+const MAPS_PORT = 3418;
+const MAPS_ORIGIN = `http://127.0.0.1:${MAPS_PORT}`;
+const MAX_MAPS = 100;
+const MAX_PREVIEW = 12;
+const MAX_LINKS = 24;
+const MAX_TITLE = 200;
+const MAX_ID = 64;
+
+// Set by the AppImage runtime. Harmless to this app, but they point at its own libraries and mount,
+// which breaks the `claude` command the map server runs.
+const APPIMAGE_VARS = ['LD_LIBRARY_PATH', 'LD_PRELOAD', 'APPDIR', 'APPIMAGE', 'ARGV0', 'OWD', 'GSETTINGS_SCHEMA_DIR'];
+
+const withoutMounts = (value) => (value || '').split(':').filter((p) => p && !p.includes('/.mount_'));
+
+// With several accounts there's often no default login, so Digitize would have no way to reach the AI.
+// The app knows which account has the most room. Null when none is usable.
+function roomiestDir(accounts) {
+  let best = null;
+  for (const account of accounts || []) {
+    if (!account || !account.dir || account.needsLogin) continue;
+    const used = account.usage && account.usage.weekAll ? account.usage.weekAll.pct : 100;
+    if (best === null || used < best.used) best = { dir: account.dir, used };
+  }
+  return best ? best.dir : null;
+}
+
+function childEnv(env, home, configDir) {
+  const clean = { ...env };
+  for (const key of APPIMAGE_VARS) delete clean[key];
+  const dirs = withoutMounts(env.PATH);
+  // An autostarted app gets a minimal PATH, and this is where Claude Code installs itself.
+  const localBin = path.join(home, '.local', 'bin');
+  if (!dirs.includes(localBin)) dirs.push(localBin);
+  clean.PATH = dirs.join(':');
+  if (env.XDG_DATA_DIRS !== undefined) clean.XDG_DATA_DIRS = withoutMounts(env.XDG_DATA_DIRS).join(':');
+  clean.ELECTRON_RUN_AS_NODE = '1';
+  clean.PORT = String(MAPS_PORT);
+  if (configDir) clean.BALONCHE_FALLBACK_CONFIG_DIR = configDir;
+  return clean;
+}
+
+// electron-builder unpacks the server beside the asar, because Node's ES module loader can't read
+// from inside one. Null means this build skipped the bundle step, so the Maps button stays hidden.
+function serverEntry(dirname, exists) {
+  const base = dirname.replace(/app\.asar(?=$|[/\\])/, 'app.asar.unpacked');
+  const entry = path.join(base, 'maps', 'build', 'server', 'index.mjs');
+  return exists(entry) ? entry : null;
+}
+
+const finite = (value) => typeof value === 'number' && Number.isFinite(value);
+
+function cleanPreview(bubble) {
+  if (!bubble || typeof bubble !== 'object') return null;
+  const { x, y, w, h, color } = bubble;
+  if (![x, y, w, h].every(finite)) return null;
+  if (typeof color !== 'string' || !/^#[0-9a-f]{3,8}$/i.test(color)) return null;
+  return { x, y, w, h, color };
+}
+
+// The list comes from a web page, so nothing in it is trusted.
+function cleanMapsReport(list) {
+  if (!Array.isArray(list)) return null;
+  const maps = [];
+  for (const entry of list) {
+    if (maps.length >= MAX_MAPS) break;
+    if (!entry || typeof entry.id !== 'string' || !entry.id || entry.id.length > MAX_ID) continue;
+    const title = typeof entry.title === 'string' && entry.title.trim()
+      ? entry.title.slice(0, MAX_TITLE)
+      : 'Untitled map';
+    const preview = Array.isArray(entry.preview)
+      ? entry.preview.map(cleanPreview).filter(Boolean).slice(0, MAX_PREVIEW)
+      : [];
+    const links = Array.isArray(entry.links)
+      ? entry.links
+        .filter((link) => Array.isArray(link) && link.length === 2 && link.every((end) => Number.isInteger(end) && end >= 0 && end < preview.length))
+        .slice(0, MAX_LINKS)
+      : [];
+    maps.push({ id: entry.id, title, updatedAt: finite(entry.updatedAt) ? entry.updatedAt : 0, preview, links });
+  }
+  return maps;
+}
+
+function cleanOpenRequest(request) {
+  if (!request || typeof request !== 'object') return null;
+  if (request.new === true) return { new: true };
+  if (typeof request.id === 'string' && request.id && request.id.length <= MAX_ID) return { id: request.id };
+  return null;
+}
+
+function isMapsUrl(url) {
+  try {
+    return new URL(url).origin === MAPS_ORIGIN;
+  } catch {
+    return false;
+  }
+}
+
+// Where the dashboard wants the Maps view, in window coordinates. Null when it makes no sense, and a
+// view can't be placed at a fraction of a pixel.
+function cleanBounds(bounds) {
+  if (!bounds || typeof bounds !== 'object') return null;
+  const { x, y, width, height } = bounds;
+  if (![x, y, width, height].every(finite)) return null;
+  if (x < 0 || y < 0 || width < 1 || height < 1) return null;
+  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+}
+
+// The app has more themes than the map page. Each maps to the nearest one it draws well on.
+const MAPS_THEMES = { brutal: 'brutal', karchx: 'light', light: 'light', dark: 'dark', nord: 'dark', dracula: 'dark' };
+const mapsThemeFor = (name) => MAPS_THEMES[name] || 'brutal';
+
+// The page's colours, from the app's theme, so it looks like the rest of the app in every theme.
+function mapsTokens(theme) {
+  const dark = mapsThemeFor(theme.name) === 'dark';
+  const float = `3px 3px 0 ${theme.shadow}`;
+  return {
+    bg: theme.winBg,
+    surface: theme.surface,
+    raised: theme.surface2,
+    hover: dark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(17, 17, 17, 0.06)',
+    line: theme.line,
+    ink: theme.text,
+    mute: theme.textDim,
+    arrow: theme.line,
+    blue: theme.accent,
+    'blue-hover': theme.accent,
+    accent: theme.text,
+    'accent-ink': theme.text,
+    'on-accent': theme.onAccent,
+    soft: theme.yellow,
+    chip: theme.yellow,
+    'chip-ink': '#111111',
+    ok: theme.green,
+    danger: theme.critText,
+    selection: theme.accent,
+    'active-bg': theme.line,
+    'active-ink': theme.winBg,
+    'elev-float': float,
+    'elev-card': float,
+    'map-line': theme.text,
+    'bubble-shadow': `4px 4px 0 ${theme.shadow}`,
+    'ripple-dot': theme.accent,
+  };
+}
+
+module.exports = { MAPS_ORIGIN, MAPS_PORT, childEnv, cleanBounds, cleanMapsReport, cleanOpenRequest, isMapsUrl, mapsThemeFor, mapsTokens, roomiestDir, serverEntry };

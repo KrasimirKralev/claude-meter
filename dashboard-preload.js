@@ -11,6 +11,7 @@ let claudeStatusHandler = null;
 let authStatusHandler = null;
 let calendarUpdateHandler = null;
 let habitsUpdateHandler = null;
+let relaxUpdateHandler = null;
 let navigateTabHandler = null;
 
 contextBridge.exposeInMainWorld('dashboardAPI', {
@@ -28,6 +29,7 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   launchAuthLogin: () => ipcRenderer.invoke('launch-auth-login'),
   getAccounts: () => ipcRenderer.invoke('get-accounts'),
   setActiveAccount: (id) => ipcRenderer.invoke('set-active-account', id),
+  moveCliToAccount: (id) => ipcRenderer.invoke('move-cli-to-account', id),
   onAuthStatusChanged: (cb) => {
     if (authStatusHandler) ipcRenderer.removeListener('auth-status-changed', authStatusHandler);
     authStatusHandler = (_e, data) => cb(data);
@@ -40,6 +42,11 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   toggleTask: (id) => ipcRenderer.send('tasks-toggle', id),
   deleteTask: (id) => ipcRenderer.send('tasks-delete', id),
   clearCompleted: () => ipcRenderer.send('tasks-clear-completed'),
+  smartAddTask: (text) => ipcRenderer.invoke('smart-add', text),
+  setTaskPriority: (id, priority) => ipcRenderer.send('tasks-set-priority', id, priority),
+  reorderTasks: (orderedIds) => ipcRenderer.send('tasks-reorder', orderedIds),
+  scheduleTask: (id, date, time) => ipcRenderer.invoke('tasks-schedule', id, date, time),
+  openTaskNote: (id, text) => ipcRenderer.send('open-task-note', id, text),
   onTasksUpdate: (cb) => {
     if (tasksUpdateHandler) ipcRenderer.removeListener('tasks-update', tasksUpdateHandler);
     tasksUpdateHandler = (_e, data) => cb(data);
@@ -82,7 +89,8 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   addCalendarEvent: (data) => ipcRenderer.invoke('calendar-add-event', data),
   updateCalendarEvent: (data) => ipcRenderer.invoke('calendar-update-event', data),
   toggleCalendarEvent: (id) => ipcRenderer.invoke('calendar-toggle-event', { id }),
-  deleteCalendarEvent: (id) => ipcRenderer.invoke('calendar-delete-event', { id }),
+  deleteCalendarEvent: (id, series) => ipcRenderer.invoke('calendar-delete-event', { id, series }),
+  moveCalendarEvent: (id, newDate) => ipcRenderer.invoke('calendar-move-event', id, newDate),
   onCalendarUpdate: (cb) => {
     if (calendarUpdateHandler) ipcRenderer.removeListener('calendar-update', calendarUpdateHandler);
     calendarUpdateHandler = (_e, data) => cb(data);
@@ -101,7 +109,25 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
     habitsUpdateHandler = (_e, data) => cb(data);
     ipcRenderer.on('habits-update', habitsUpdateHandler);
   },
+  getRelax: () => ipcRenderer.invoke('relax-get'),
+  onRelaxUpdate: (cb) => {
+    if (relaxUpdateHandler) ipcRenderer.removeListener('relax-update', relaxUpdateHandler);
+    relaxUpdateHandler = (_e, data) => cb(data);
+    ipcRenderer.on('relax-update', relaxUpdateHandler);
+  },
   openExternal: (url) => ipcRenderer.send('open-external-url', url),
+  openMaps: (request) => ipcRenderer.send('maps-open', request),
+  openNotes: () => ipcRenderer.send('open-notes-window'),
+  getMapsState: () => ipcRenderer.invoke('maps-state'),
+  onMapsUpdate: (cb) => ipcRenderer.on('maps-update', (_e, data) => cb(data)),
+  onMapsStatus: (cb) => ipcRenderer.on('maps-status', (_e, data) => cb(data)),
+  showMaps: (bounds) => ipcRenderer.send('maps-show', bounds),
+  placeMaps: (bounds) => ipcRenderer.send('maps-bounds', bounds),
+  hideMaps: () => ipcRenderer.send('maps-hide'),
+  showNotes: (bounds) => ipcRenderer.send('notes-view-show', bounds),
+  placeNotes: (bounds) => ipcRenderer.send('notes-view-bounds', bounds),
+  hideNotes: () => ipcRenderer.send('notes-view-hide'),
+  getStreak: () => ipcRenderer.invoke('streak-get'),
   getClaudeStatus: () => ipcRenderer.invoke('get-claude-status'),
   onClaudeStatusUpdate: (cb) => {
     if (claudeStatusHandler) ipcRenderer.removeListener('claude-status-update', claudeStatusHandler);

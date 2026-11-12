@@ -1,0 +1,1090 @@
+@import 'tailwindcss';
+
+@theme inline {
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-mute: var(--mute);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-soft: var(--soft);
+  --color-blue: var(--blue);
+  --color-blue-hover: var(--blue-hover);
+  --color-ok: var(--ok);
+  --color-danger: var(--danger);
+  --shadow-float: var(--elev-float);
+  --font-sans: 'Inter Variable', system-ui, sans-serif;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #111318;
+  --dot: #3a3f4b;
+  --surface: #1b1e25;
+  --raised: #23262e;
+  --hover: #2a2e37;
+  --line: #2f333d;
+  --ink: #f3f4f6;
+  --mute: #a8aebb;
+  --arrow: #8b93a3;
+  --blue: #2563eb;
+  --blue-hover: #1d4ed8;
+  --accent: #60a5fa;
+  --accent-ink: #93c5fd;
+  --soft: #1a2a4d;
+  --chip: #1e3a8a;
+  --chip-ink: #bfdbfe;
+  --ok: #4ade80;
+  --danger: #fca5a5;
+  --selection: #1e40af;
+  --elev-float: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --elev-card: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --map-line: #e5e7eb;
+  --bubble-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --ripple-dot: #ffe14d;
+  --note-fill: #fff6c9;
+  --note-edge: transparent;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --dot: #d1d5db;
+  --surface: #ffffff;
+  --raised: #f9fafb;
+  --hover: #f3f4f6;
+  --line: #e5e7eb;
+  --ink: #111827;
+  --mute: #4b5563;
+  --arrow: #6b7280;
+  --blue: #2563eb;
+  --blue-hover: #1d4ed8;
+  --accent: #2563eb;
+  --accent-ink: #2563eb;
+  --soft: #eff6ff;
+  --chip: #dbeafe;
+  --chip-ink: #1d4ed8;
+  --ok: #15803d;
+  --danger: #b91c1c;
+  --selection: #bfdbfe;
+  --elev-float: 0 4px 16px rgba(17, 24, 39, 0.08);
+  --elev-card: 0 2px 10px rgba(17, 24, 39, 0.07);
+  --map-line: #111827;
+  --bubble-shadow: 0 10px 28px rgba(17, 24, 39, 0.16);
+  --ripple-dot: #e0a800;
+  --note-fill: #ffefa3;
+  --note-edge: #e3c75a;
+}
+
+/* The desktop app's main theme: bone paper, ink borders, hard shadows, pink and yellow. */
+:root[data-theme='brutal'] {
+  color-scheme: light;
+  --bg: #f0ede4;
+  --dot: #bdb8aa;
+  --surface: #ffffff;
+  --raised: #f7f3ea;
+  --hover: #e6e2d6;
+  --line: #111111;
+  --ink: #111111;
+  --mute: #5f5a4f;
+  --arrow: #111111;
+  --blue: #ff90e8;
+  --blue-hover: #ffb0ef;
+  --accent: #111111;
+  --accent-ink: #111111;
+  --soft: #ffc900;
+  --chip: #ffc900;
+  --chip-ink: #111111;
+  --ok: #0f766e;
+  --danger: #c8232b;
+  --selection: #ffc900;
+  --elev-float: 3px 3px 0 #111111;
+  --elev-card: 3px 3px 0 #111111;
+  --map-line: #111111;
+  --bubble-shadow: 4px 4px 0 #111111;
+  --ripple-dot: #ff90e8;
+  --note-fill: #ffc900;
+  --note-edge: #111111;
+}
+
+:root[data-theme='brutal'] {
+  --on-accent: #111111;
+  --active-bg: #111111;
+  --active-ink: #f0ede4;
+}
+
+/* Inside the desktop app: its ink borders, its button size and its way of showing what's chosen. */
+:root[data-skin='app'] .bg-blue {
+  border: 2px solid var(--line);
+  color: var(--on-accent);
+}
+
+:root[data-skin='app'] .rounded-xl.border {
+  border-width: 2.5px;
+}
+
+:root[data-skin='app'] .rounded-lg.border {
+  border-width: 2px;
+}
+
+:root[data-skin='app'] .size-9 {
+  width: 32px;
+  height: 32px;
+}
+
+:root[data-skin='app'] .bg-soft.text-accent-ink {
+  background: var(--active-bg);
+  color: var(--active-ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  color: var(--ink);
+  background: var(--bg);
+  font: 400 14px/1.35 'Inter Variable', system-ui, sans-serif;
+  font-feature-settings: 'locl' 0;
+  -webkit-font-smoothing: antialiased;
+  caret-color: var(--accent);
+}
+
+::selection {
+  background: var(--selection);
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Thin scrollbars for the panels, drawn from the palette. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--arrow) transparent;
+}
+
+/* ---------- The maps menu ---------- */
+
+/* A small canvas: the same dots, with the map or the sketch drawn on it. */
+.map-thumb {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg) radial-gradient(var(--dot) 0.8px, transparent 0.8px) 0 0 / 8px 8px;
+}
+
+.map-thumb-link {
+  fill: none;
+  stroke: var(--map-line);
+  stroke-width: 0.8;
+  opacity: 0.65;
+}
+
+.map-thumb-ink {
+  fill: none;
+  stroke-width: 1.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.map-thumb-note {
+  fill: var(--mute);
+}
+
+.maps-search {
+  color: var(--ink);
+  caret-color: var(--accent);
+  outline: none;
+}
+
+.maps-search:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* The row the arrow keys are on. */
+.map-row.is-active > [role='menuitem'] {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.map-row-delete {
+  opacity: 0;
+}
+
+.map-row:hover .map-row-delete,
+.map-row:focus-within .map-row-delete {
+  opacity: 1;
+}
+
+/* No hover on a touch board, so the control is simply there. */
+@media (hover: none) {
+  .map-row-delete {
+    opacity: 1;
+  }
+}
+
+/* ---------- Canvas ---------- */
+
+.surface {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  user-select: none;
+  touch-action: none;
+  background-color: var(--bg);
+}
+
+.surface[data-tool='pen'],
+.surface[data-tool='lasso'],
+.surface[data-tool='arrow'] {
+  cursor: crosshair;
+}
+
+.surface[data-tool='text'] {
+  cursor: text;
+}
+
+.surface[data-tool='eraser'] {
+  cursor: cell;
+}
+
+.surface[data-tool='hand'] {
+  cursor: grab;
+}
+
+.surface[data-panning='true'] {
+  cursor: grabbing;
+}
+
+.ink-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.dots {
+  z-index: 0;
+}
+
+.ink-committed {
+  z-index: 1;
+  transform-origin: 0 0;
+}
+
+.ink-live {
+  z-index: 4;
+}
+
+.surface[data-view='both'] .ink-committed {
+  opacity: 0.42;
+}
+
+.surface[data-view='map'] .ink-committed {
+  opacity: 0;
+}
+
+.morphing .ink-committed {
+  transition: opacity 0.18s ease-out;
+}
+
+.world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  width: 0;
+  height: 0;
+  transform-origin: 0 0;
+}
+
+.surface:is([data-tool='pen'], [data-tool='lasso'], [data-tool='eraser'], [data-tool='hand']) .world * {
+  pointer-events: none !important;
+}
+
+/* The ring of lit dots that crosses the canvas on Digitize. */
+@property --ripple-r {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+
+.ripple {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  background-image: radial-gradient(var(--ripple-dot) 1.7px, transparent 1.7px);
+  background-position: var(--dot-x, 0) var(--dot-y, 0);
+  background-size: var(--dot-size, 22px) var(--dot-size, 22px);
+  mask-image: radial-gradient(
+    circle at var(--ripple-x, 50%) var(--ripple-y, 50%),
+    transparent calc(var(--ripple-r) - 150px),
+    #000 calc(var(--ripple-r) - 30px),
+    transparent calc(var(--ripple-r) + 10px)
+  );
+}
+
+/* ---------- Typed text on the sketch ---------- */
+
+.raw-text {
+  position: absolute;
+  /* The world layer has no size of its own, so width must not depend on its parent. */
+  width: max-content;
+  max-width: 480px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  line-height: 1.38;
+  color: var(--ink);
+  outline: 0 solid transparent;
+  cursor: default;
+}
+
+.raw-text.selected {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  transform: translate(var(--drag-x, 0), var(--drag-y, 0));
+}
+
+.raw-text[contenteditable] {
+  min-width: 60px;
+  min-height: 1.38em;
+  cursor: text;
+  user-select: text;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.surface[data-view='map'] .raw-text {
+  display: none;
+}
+
+/* ---------- Bubbles, as cards over the sketch ---------- */
+
+.bubble {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: var(--elev-card);
+  cursor: grab;
+}
+
+.bubble.dragging {
+  z-index: 5;
+  cursor: grabbing;
+}
+
+.bubble.selected,
+.bubble:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.surface[data-view='sketch'] .bubble,
+.surface[data-view='sketch'] .link-layer,
+.surface[data-view='sketch'] .link-label {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.surface[data-view='map'] .bubble.status-pending,
+.surface[data-view='map'] .bubble.status-rejected {
+  display: none;
+}
+
+.bubble h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.bubble h2:empty::before,
+.bubble li:empty::before {
+  content: attr(data-placeholder);
+  opacity: 0.55;
+}
+
+.bubble ul {
+  margin: 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+
+.bubble li {
+  margin-top: 4px;
+}
+
+.bubble [data-edit] {
+  cursor: text;
+}
+
+.bubble [contenteditable] {
+  outline: none;
+  user-select: text;
+  box-shadow: 0 0 0 2px var(--accent);
+  border-radius: 4px;
+}
+
+.bubble.status-pending {
+  border: 2px dashed var(--accent);
+  background: var(--soft);
+  animation: rise 0.28s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  animation-delay: var(--rise, 0ms);
+}
+
+/* Marks the local pass could not read stay visible through the proposal. */
+.bubble.ink-only {
+  background: transparent;
+  box-shadow: none;
+}
+
+.bubble.ink-only h2:empty::before {
+  opacity: 1;
+}
+
+/* Starts half visible, so the words never blank out between the sketch and the card. */
+@keyframes rise {
+  from {
+    opacity: 0.5;
+    translate: 0 6px;
+  }
+}
+
+.chip {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--chip-ink);
+  background: var(--chip);
+}
+
+.surface[data-view='map'] .chip {
+  display: none;
+}
+
+.bubble.kind-note {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.bubble.kind-note h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0;
+}
+
+/* ---------- Bubbles drawn inside bubbles, and circled lines ---------- */
+
+.bubble.nested {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  box-shadow: none;
+}
+
+.bubble-children {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.nest-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.mark-ink { --mark: var(--ink); }
+.mark-yellow { --mark: #c79a00; }
+.mark-pink { --mark: #d6408f; }
+.mark-aqua { --mark: #0e9c9a; }
+.mark-peach { --mark: #d9722b; }
+.mark-periwinkle { --mark: #4f63d9; }
+
+/* Over the sketch, a circled line keeps its circle, in the colour it was drawn in. */
+.bubble li.marked {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0 8px;
+  margin-left: -8px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 2px var(--mark);
+}
+
+/* ---------- The finished map ---------- */
+
+.map-candy {
+  --c0: #ffe14d;
+  --c1: #ff8cc6;
+  --c2: #6fe3e1;
+  --c3: #ffb27a;
+  --c4: #a9b8ff;
+  --font-title: 'Comfortaa', sans-serif;
+  --font-body: 'Nunito', sans-serif;
+  --title-size: 24px;
+  --title-weight: 700;
+  --body-weight: 600;
+  --radius: 40px;
+  --item-radius: 22px;
+  --item-bg: rgba(255, 255, 255, 0.72);
+  --item-ink: #14151a;
+}
+
+.map-sunny {
+  --c0: #ffd21f;
+  --c1: #ff7a59;
+  --c2: #4cc9f0;
+  --c3: #3ddc97;
+  --c4: #c4a7ff;
+  --font-title: 'Unbounded', sans-serif;
+  --font-body: 'Golos Text', sans-serif;
+  --title-size: 21px;
+  --title-weight: 700;
+  --body-weight: 500;
+  --radius: 28px;
+  --item-radius: 14px;
+  --item-bg: rgba(255, 255, 255, 0.62);
+  --item-ink: #14151a;
+}
+
+.map-yellow {
+  --c0: #ffd21f;
+  --c1: #ffd21f;
+  --c2: #ffd21f;
+  --c3: #ffd21f;
+  --c4: #ffd21f;
+  --font-title: 'Dela Gothic One', sans-serif;
+  --font-body: 'Rubik', sans-serif;
+  --title-size: 22px;
+  --title-weight: 400;
+  --body-weight: 500;
+  --radius: 24px;
+  --item-radius: 12px;
+  --item-bg: #14151a;
+  --item-ink: #ffffff;
+}
+
+.slot-0 {
+  --c: var(--c0);
+}
+.slot-1 {
+  --c: var(--c1);
+}
+.slot-2 {
+  --c: var(--c2);
+}
+.slot-3 {
+  --c: var(--c3);
+}
+.slot-4 {
+  --c: var(--c4);
+}
+
+.surface[data-view='map'] .bubble {
+  padding: 22px;
+  border: 0;
+  border-radius: var(--radius);
+  color: #14151a;
+  background: var(--c);
+  box-shadow: var(--bubble-shadow);
+}
+
+.surface[data-view='map'] .bubble h2 {
+  margin: 0 0 12px;
+  font: var(--title-weight) var(--title-size) / 1.2 var(--font-title);
+  font-feature-settings: 'locl' var(--locl, 0);
+  letter-spacing: -0.01em;
+}
+
+.surface[data-view='map'] .bubble.no-items h2 {
+  margin-bottom: 0;
+}
+
+.surface[data-view='map'] .bubble ul {
+  padding: 0;
+  list-style: none;
+}
+
+.surface[data-view='map'] .bubble li {
+  margin-top: 8px;
+  padding: 9px 14px;
+  border-radius: var(--item-radius);
+  color: var(--item-ink);
+  background: var(--item-bg);
+  font: var(--body-weight) 15px / 1.35 var(--font-body);
+  font-feature-settings: 'locl' var(--locl, 0);
+}
+
+.surface[data-view='map'] .bubble.kind-note {
+  padding: 18px 20px;
+  color: #14151a;
+  background: var(--note-fill);
+  box-shadow:
+    var(--bubble-shadow),
+    0 0 0 1px var(--note-edge);
+}
+
+.surface[data-view='map'] .bubble.kind-note h2 {
+  margin: 0;
+  font: var(--body-weight) 15px / 1.4 var(--font-body);
+  font-feature-settings: 'locl' var(--locl, 0);
+}
+
+.surface[data-view='map'] .bubble.kind-note::after {
+  content: '';
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: inherit;
+  transform: rotate(45deg);
+}
+
+.surface[data-view='map'] .bubble[data-tail='top']::after {
+  top: -9px;
+  left: calc(var(--tail-pos, 50px) - 10px);
+  box-shadow: -1px -1px 0 var(--note-edge);
+}
+
+.surface[data-view='map'] .bubble[data-tail='bottom']::after {
+  bottom: -9px;
+  left: calc(var(--tail-pos, 50px) - 10px);
+  box-shadow: 1px 1px 0 var(--note-edge);
+}
+
+.surface[data-view='map'] .bubble[data-tail='left']::after {
+  left: -9px;
+  top: calc(var(--tail-pos, 50px) - 10px);
+  box-shadow: -1px 1px 0 var(--note-edge);
+}
+
+.surface[data-view='map'] .bubble[data-tail='right']::after {
+  right: -9px;
+  top: calc(var(--tail-pos, 50px) - 10px);
+  box-shadow: 1px -1px 0 var(--note-edge);
+}
+
+.bubble-add {
+  display: none;
+}
+
+.surface[data-view='map'] .bubble:hover .bubble-add,
+.surface[data-view='map'] .bubble.selected .bubble-add {
+  display: grid;
+}
+
+.bubble-add {
+  position: absolute;
+  right: 18px;
+  bottom: -14px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 0;
+  color: #fff;
+  background: var(--blue);
+  box-shadow: var(--elev-float);
+}
+
+/* On the finished map, a bubble that holds others is a frame around them. */
+.surface[data-view='map'] .bubble.nested {
+  flex: none;
+  padding: 16px;
+  border-radius: calc(var(--radius) * 0.6);
+  box-shadow:
+    0 0 0 2px rgba(20, 21, 26, 0.14),
+    0 6px 14px -8px rgba(20, 21, 26, 0.35);
+}
+
+.surface[data-view='map'] .bubble.nested h2 {
+  margin-bottom: 8px;
+  font-size: calc(var(--title-size) * 0.8);
+}
+
+.surface[data-view='map'] .bubble-children {
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.surface[data-view='map'] .nest-row {
+  gap: 14px;
+}
+
+/* A list of equals has no title until someone gives it one, and the map shows no empty heading. */
+.surface[data-view='map'] .bubble:not(.selected) > h2:empty {
+  display: none;
+}
+
+.surface[data-view='map'] .bubble:not(.selected) > h2:empty + ul > li:first-child {
+  margin-top: 0;
+}
+
+.surface[data-view='map'] .bubble li.marked {
+  width: auto;
+  margin-left: 0;
+  padding: 9px 14px;
+  border-radius: var(--item-radius);
+  box-shadow: inset 0 0 0 2.5px var(--mark);
+}
+
+/* The title of the finished map. */
+.map-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: none;
+  color: var(--ink);
+  cursor: default;
+}
+
+.surface[data-view='map'] .map-header {
+  display: block;
+}
+
+.map-header h1 {
+  margin: 0;
+  font: var(--title-weight) 38px / 1.15 var(--font-title);
+  font-feature-settings: 'locl' var(--locl, 0);
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.map-header p {
+  margin: 8px 0 0;
+  max-width: 68ch;
+  color: var(--mute);
+  font: var(--body-weight) 16px / 1.4 var(--font-body);
+  font-feature-settings: 'locl' var(--locl, 0);
+  text-wrap: pretty;
+}
+
+/* ---------- Arrows ---------- */
+
+.link-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  fill: none;
+  pointer-events: none;
+  color: var(--arrow);
+}
+
+.surface[data-view='map'] .link-layer {
+  color: var(--map-line);
+}
+
+.link-layer marker path {
+  fill: currentColor;
+}
+
+/* An arrow drawn in a pen colour stays that colour, darker on light backgrounds for contrast. */
+.link-layer {
+  --pen-yellow: #c79a00;
+  --pen-pink: #d6408f;
+  --pen-aqua: #0e9c9a;
+  --pen-peach: #d9722b;
+  --pen-periwinkle: #4f63d9;
+}
+
+:root[data-theme='dark'] .link-layer {
+  --pen-yellow: #ffe14d;
+  --pen-pink: #ff8cc6;
+  --pen-aqua: #6fe3e1;
+  --pen-peach: #ffb27a;
+  --pen-periwinkle: #a9b8ff;
+}
+
+.link-layer .c-yellow {
+  color: var(--pen-yellow);
+}
+.link-layer .c-pink {
+  color: var(--pen-pink);
+}
+.link-layer .c-aqua {
+  color: var(--pen-aqua);
+}
+.link-layer .c-peach {
+  color: var(--pen-peach);
+}
+.link-layer .c-periwinkle {
+  color: var(--pen-periwinkle);
+}
+
+.link-line {
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.link-line.pending {
+  stroke-dasharray: 6 6;
+}
+
+.surface[data-view='map'] .link-line {
+  stroke-width: 3;
+  /* The arrows finish the moment: they draw themselves as the bubbles land. */
+  stroke-dasharray: 1;
+  animation: draw-on 0.26s ease-out 0.22s backwards;
+}
+
+@keyframes draw-on {
+  0% {
+    stroke-dashoffset: 1;
+    opacity: 0;
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+.link-hit {
+  stroke: transparent;
+  stroke-width: 16;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.link-group.selected .link-line {
+  stroke: var(--accent);
+}
+
+.link-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  padding: 2px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bg);
+  background: var(--map-line);
+  transform: translate(-50%, -50%);
+}
+
+.surface[data-view='map'] .link-label {
+  font: var(--body-weight) 13px / 1.35 var(--font-body);
+  font-feature-settings: 'locl' var(--locl, 0);
+}
+
+.surface:not([data-view='map']).morphing .link-layer,
+.surface:not([data-view='map']).morphing .link-label,
+.surface[data-view='map'].morphing .link-label {
+  opacity: 0;
+}
+
+.link-layer,
+.link-label {
+  transition: opacity 0.2s ease-out;
+}
+
+/*
+ * The moment the sketch resolves into the map. Colour flips at once, travel eases out, and the
+ * bloom sits on scale so every bubble swells the same however far it moved.
+ * Theme and style changes stay instant.
+ */
+.morphing .bubble {
+  transition:
+    transform 0.28s cubic-bezier(0.16, 1, 0.3, 1),
+    width 0.28s cubic-bezier(0.16, 1, 0.3, 1),
+    border-radius 0.2s ease-out,
+    box-shadow 0.2s ease-out,
+    opacity 0.16s ease-out;
+  transition-delay: calc(var(--i, 0) * 12ms);
+}
+
+.surface[data-view='map'].morphing .bubble {
+  animation: bloom 0.3s ease-out backwards;
+  animation-delay: calc(var(--i, 0) * 12ms);
+}
+
+@keyframes bloom {
+  0% {
+    scale: 0.94;
+  }
+  60% {
+    scale: 1.02;
+  }
+  100% {
+    scale: 1;
+  }
+}
+
+/* ---------- Presenting ---------- */
+
+.presenting .bubble {
+  opacity: 0.28;
+  transition: opacity 0.2s ease-out;
+}
+
+.presenting .bubble.spotlight {
+  opacity: 1;
+}
+
+.presenting .link-layer,
+.presenting .link-label,
+.presenting .map-header {
+  opacity: 0.28;
+}
+
+.present-hint {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  z-index: 20;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--mute);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--elev-float);
+  transform: translateX(-50%);
+  animation: leave 0.4s ease-out 3s forwards;
+}
+
+@keyframes leave {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+/* ---------- Waiting dots in the proposals panel ---------- */
+
+.thinking i {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: thinking 1s ease-in-out infinite;
+}
+
+.thinking i:nth-child(2) {
+  animation-delay: 0.14s;
+}
+
+.thinking i:nth-child(3) {
+  animation-delay: 0.28s;
+}
+
+@keyframes thinking {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .morphing .bubble,
+  .surface[data-view='map'].morphing .bubble,
+  .morphing .ink-committed,
+  .surface[data-view='map'] .link-line,
+  .bubble.status-pending,
+  .thinking i {
+    transition: none;
+    animation: none;
+  }
+}
+
+.too-narrow {
+  display: none;
+}
+
+/* A narrow window: the view switch moves down beside the tools, and the title takes its room. */
+@media (max-width: 999px) {
+  .view-switch {
+    top: 68px;
+    left: 68px;
+    translate: none;
+  }
+
+  .map-title {
+    width: auto;
+    max-width: calc(100vw - 448px);
+  }
+
+  input.map-title {
+    width: calc(100vw - 448px);
+  }
+}
+
+/* A short window: the tools start below the top row, and the pen colours take two columns. */
+@media (max-height: 640px) {
+  .tool-rail {
+    top: 68px;
+    translate: none;
+  }
+
+  .pen-colors {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* The toolbars start to collide below this. The desktop app never gets this narrow. */
+@media (max-width: 639px) {
+  .too-narrow {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: grid;
+    place-items: center;
+    padding: 32px;
+    text-align: center;
+    font-size: 16px;
+    color: var(--ink);
+    background: var(--bg) radial-gradient(var(--dot) 1px, transparent 1px) 0 0 / 22px 22px;
+  }
+}

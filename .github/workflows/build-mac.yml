@@ -8,20 +8,33 @@ on:
       - 'assets/screenshot-*.png'
       - 'LICENSE'
       - '.gitignore'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshot-*.png'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
 
+# Building runs every dependency's install script, so it gets no write access. Publishing runs nothing of
+# the project's, so it can safely hold the one token that can change a release.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-mac:
     runs-on: macos-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -29,6 +42,9 @@ jobs:
       - name: Read app version
         id: v
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Run the tests
+        run: npm test && npm run test:maps:install && npm run test:maps
 
       - name: Build unsigned DMG (Apple Silicon + Intel)
         run: npm run build:mac
@@ -44,11 +60,25 @@ jobs:
           name: claude-meter-macos
           path: dist/*.dmg
 
+  # A pull request proves the build. Only main publishes one.
+  publish:
+    needs: build-mac
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the DMGs
+        uses: actions/download-artifact@v4
+        with:
+          name: claude-meter-macos
+          path: dist
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.v.outputs.version }}
-          name: Claude Meter for macOS v${{ steps.v.outputs.version }}
+          tag_name: v${{ needs.build-mac.outputs.version }}
+          name: Claude Meter for macOS v${{ needs.build-mac.outputs.version }}
           make_latest: true
           files: dist/*.dmg
           body: |

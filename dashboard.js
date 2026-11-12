@@ -1,9 +1,16 @@
 /* Dashboard renderer — safe DOM only (no innerHTML) */
 
+var WL = window.WidgetLib;
 var usageData = null;      // the ACTIVE account's usage — drives planner + chart
 var accountsData = [];     // every enabled account, from the usage-update payload
 var activeAccountId = null;
 var cliLauncherName = 'Claude Code';
+// True while a launcher says where the CLI is: Active follows it, and no row is a button.
+var activeFollowsCli = false;
+// True when a click on a row can ask the launcher to move every session to that account.
+var cliMove = false;
+var cliMoving = false;
+var moveNotice = null;    // { text, detail, error, until }: the answer to a click, where "Synced" stands
 var historyData = [];
 var chartDays = 7;
 var alertThresholds = { session: 80, weekAll: 90, weekSonnet: 90 };
@@ -24,185 +31,553 @@ function getBarClass(pct) {
   return '';
 }
 
-function formatCountdown(ts) {
-  if (!ts) return '';
-  var d = new Date(ts);
-  if (isNaN(d.getTime())) return '';
-  var diff = d.getTime() - Date.now();
-  if (diff <= 0) return 'Resetting...';
-  if (diff > 86400000) {
-    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    var h = d.getHours();
-    var ampm = h >= 12 ? 'pm' : 'am';
-    var h12 = h % 12 || 12;
-    var min = d.getMinutes();
-    var minStr = min > 0 ? ':' + (min < 10 ? '0' : '') + min : '';
-    return 'Resets ' + months[d.getMonth()] + ' ' + d.getDate() + ', ' + h12 + minStr + ampm;
+// The server's severity when it graded the limit, else the pct thresholds.
+function getMeterClass(meter) {
+  if (meter.severity === 'critical') return 'danger';
+  if (meter.severity === 'warning') return 'warning';
+  if (meter.severity === 'normal') return '';
+  return getBarClass(meter.pct);
+}
+
+// The first theme message comes as the page finishes loading, so this can't wait for anything.
+window.dashboardAPI.onThemeUpdate(function(theme) {
+  UI.applyTheme(theme);
+  var chips = document.querySelectorAll('.theme-chip');
+  for (var i = 0; i < chips.length; i++) {
+    chips[i].setAttribute('aria-pressed', chips[i].getAttribute('data-theme-name') === theme.name ? 'true' : 'false');
   }
-  var hours = Math.floor(diff / 3600000);
-  var mins = Math.floor((diff % 3600000) / 60000);
-  if (hours > 0) return 'Resets in ' + hours + 'h ' + mins + 'm';
-  if (mins > 0) return 'Resets in ' + mins + 'm';
-  return 'Resets in ' + Math.max(1, Math.floor(diff / 1000)) + 's';
+  if (currentTab === 'history') drawChart();
+});
+
+// --- Navigation: four sections, each with its own tabs ---
+
+var SECTIONS = [
+  { id: 'usage', title: 'Usage', tabs: [['overview', 'Overview'], ['history', 'History'], ['alerts', 'Alerts'], ['status', 'Status']] },
+  { id: 'plan', title: 'Plan', tabs: [['calendar', 'Calendar'], ['tasks', 'Tasks'], ['habits', 'Habits'], ['notes', 'Notes']] },
+  { id: 'maps', title: 'Maps', tabs: [['maps', 'Maps']] },
+  { id: 'settings', title: 'Settings', tabs: [['settings', 'Settings']] },
+];
+// A name other windows may still ask for.
+var TAB_ALIASES = { analytics: 'history' };
+var currentTab = 'overview';
+var lastTabOf = {};
+
+function sectionOfTab(tab) {
+  for (var i = 0; i < SECTIONS.length; i++) {
+    for (var j = 0; j < SECTIONS[i].tabs.length; j++) {
+      if (SECTIONS[i].tabs[j][0] === tab) return SECTIONS[i];
+    }
+  }
+  return null;
 }
 
-// --- Tab navigation ---
-
-var navItems = document.querySelectorAll('.sidebar-nav li');
-var tabPanels = document.querySelectorAll('.tab-content');
-
-for (var i = 0; i < navItems.length; i++) {
-  (function(item) {
-    item.addEventListener('click', function() {
-      for (var j = 0; j < navItems.length; j++) {
-        navItems[j].classList.remove('active');
-      }
-      for (var k = 0; k < tabPanels.length; k++) {
-        tabPanels[k].classList.remove('active');
-      }
-      item.classList.add('active');
-      var tabId = 'tab-' + item.getAttribute('data-tab');
-      var panel = document.getElementById(tabId);
-      if (panel) panel.classList.add('active');
-
-      // Redraw chart and fix pill slider when history tab becomes visible
-      if (item.getAttribute('data-tab') === 'history') {
-        requestAnimationFrame(function() { updateSlider(); });
-        drawChart();
-      }
-      // Render analytics tab on click
-      if (item.getAttribute('data-tab') === 'analytics') {
-        renderAnalytics();
-      }
-      // Render calendar tab on click
-      if (item.getAttribute('data-tab') === 'calendar') {
-        renderCalendar();
-      }
-      // Render habits tab on click
-      if (item.getAttribute('data-tab') === 'habits') {
-        renderHabits();
-      }
-      // Render status tab on click
-      if (item.getAttribute('data-tab') === 'status') {
-        if (!claudeStatusData) {
-          window.dashboardAPI.getClaudeStatus().then(function(data) {
-            if (data) { claudeStatusData = data; renderStatusTab(); }
-          });
-        }
-        renderStatusTab();
-      }
-    });
-  })(navItems[i]);
+function renderSectionTabs(section, tab) {
+  var holder = document.getElementById('sectionTabs');
+  while (holder.firstChild) holder.removeChild(holder.firstChild);
+  document.getElementById('sectionTitle').textContent = section.title;
+  if (section.tabs.length < 2) return;
+  section.tabs.forEach(function(entry) {
+    var button = el('button', entry[0] === tab ? 'active' : '', entry[1]);
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', entry[0] === tab ? 'true' : 'false');
+    button.addEventListener('click', function() { showTab(entry[0]); });
+    holder.appendChild(button);
+  });
 }
+
+function afterTabShown(tab) {
+  if (tab === 'overview') renderOverview();
+  // Redraw chart and fix pill slider when history tab becomes visible
+  if (tab === 'history') {
+    drawChart();
+    renderAnalytics();
+  }
+  if (tab === 'calendar') renderCalendar();
+  if (tab === 'habits') renderHabits();
+  if (tab === 'maps') window.dashboardAPI.showMaps(hostBounds('mapsHost'));
+  if (tab === 'notes') window.dashboardAPI.showNotes(hostBounds('notesHost'));
+  if (tab === 'alerts') renderAlerts();
+  if (tab === 'settings') renderSettingsAccounts();
+  if (tab === 'status') {
+    if (!claudeStatusData) {
+      window.dashboardAPI.getClaudeStatus().then(function(data) {
+        if (data) { claudeStatusData = data; renderStatusTab(); }
+      });
+    }
+    renderStatusTab();
+  }
+}
+
+function showTab(requested) {
+  var tab = TAB_ALIASES[requested] || requested;
+  var section = sectionOfTab(tab);
+  if (!section) return;
+  if (currentTab === 'maps' && tab !== 'maps') window.dashboardAPI.hideMaps();
+  if (currentTab === 'notes' && tab !== 'notes') window.dashboardAPI.hideNotes();
+  currentTab = tab;
+  lastTabOf[section.id] = tab;
+  document.querySelector('.main').classList.toggle('flush', tab === 'maps' || tab === 'notes');
+  var panels = document.querySelectorAll('.tab-content');
+  for (var i = 0; i < panels.length; i++) {
+    panels[i].classList.toggle('active', panels[i].id === 'tab-' + tab);
+  }
+  var rail = document.querySelectorAll('.sidebar-nav button');
+  for (var j = 0; j < rail.length; j++) {
+    rail[j].classList.toggle('active', rail[j].getAttribute('data-section') === section.id);
+  }
+  renderSectionTabs(section, tab);
+  afterTabShown(tab);
+}
+
+(function() {
+  var rail = document.querySelectorAll('.sidebar-nav button');
+  for (var i = 0; i < rail.length; i++) {
+    (function(button) {
+      button.addEventListener('click', function() {
+        var id = button.getAttribute('data-section');
+        var section = SECTIONS.filter(function(s) { return s.id === id; })[0];
+        showTab(lastTabOf[id] || section.tabs[0][0]);
+      });
+    })(rail[i]);
+  }
+  renderSectionTabs(SECTIONS[0], 'overview');
+})();
 
 // --- Overview ---
 
-function buildUsageCard(label, data) {
-  var card = el('div', 'usage-card');
-  card.appendChild(el('div', 'card-label', label));
-
-  var track = el('div', 'bar-track');
-  var fill = el('div', 'bar-fill ' + getBarClass(data.pct));
-  fill.style.width = Math.max(1, data.pct) + '%';
-  track.appendChild(fill);
-  card.appendChild(track);
-
-  var meta = el('div', 'card-meta');
-  meta.appendChild(el('span', null, data.pct + '% used'));
-  meta.appendChild(el('span', null, formatCountdown(data.resetsAt)));
-  card.appendChild(meta);
-
-  return card;
+function meterCells(meter, small) {
+  var grade = WL.meterClass(meter);
+  var cells = el('span', 'cells' + (small ? ' s' : '') + (grade === 'danger' ? ' hot' : (grade === 'warning' ? ' warm' : '')));
+  cells.setAttribute('role', 'img');
+  cells.setAttribute('aria-label', WL.shortLabel(meter) + ', ' + meter.pct + '% used');
+  var filled = WL.filledCells(meter.pct);
+  for (var i = 0; i < WL.CELLS; i++) cells.appendChild(el('u', i < filled ? 'on' : null));
+  return cells;
 }
 
-// The four usage cards for one account's usage object, appended to `target`.
-function appendUsageCards(target, usage) {
-  target.appendChild(buildUsageCard('Session (5h window)', usage.session));
-  target.appendChild(buildUsageCard('Weekly — All Models', usage.weekAll));
-  // The scoped weekly bucket is named after whatever model the API reports (Fable, Sonnet…)
-  var scopedModel = (usage.weekSonnet && usage.weekSonnet.model) ? usage.weekSonnet.model : 'Sonnet';
-  target.appendChild(buildUsageCard('Weekly — ' + scopedModel, usage.weekSonnet));
-
-  // Extra usage card — same bar style as other metrics
-  if (usage.extraUsage) {
-    if (usage.extraUsage.enabled) {
-      var util = Number(usage.extraUsage.utilization);
-      var extraPct = Number.isFinite(util) ? Math.min(100, Math.max(0, Math.round(util))) : 0;
-      target.appendChild(buildUsageCard('Extra Usage', { pct: extraPct, resetsAt: null }));
-    } else {
-      var extraCard = el('div', 'usage-card');
-      extraCard.appendChild(el('div', 'card-label', 'Extra Usage'));
-      extraCard.appendChild(el('div', 'card-meta', 'Not enabled'));
-      target.appendChild(extraCard);
-    }
-  }
+function loginEnding(state) {
+  return state.alert.indexOf('Login ends') === 0;
 }
 
-function buildAccountGroup(acc) {
-  var group = el('div', 'account-group' + (acc.id === activeAccountId ? ' active' : ''));
+function setRefillText(cell, state) {
+  // The column is headed "Refills", so the word isn't repeated in each row.
+  var detail = state.detail.replace(/^Refills /, '');
+  // A login about to end is about the account, so it goes under the name instead.
+  var alert = loginEnding(state) ? '' : state.alert;
+  var key = alert + '|' + detail;
+  if (cell.getAttribute('data-text') === key) return;
+  cell.setAttribute('data-text', key);
+  // Past this length it would widen the whole table. The two pieces break between them, not inside.
+  cell.classList.toggle('long', (alert + ' ' + detail).length > 26);
+  while (cell.firstChild) cell.removeChild(cell.firstChild);
+  if (alert) cell.appendChild(el('strong', null, alert));
+  if (alert && detail) cell.appendChild(document.createTextNode(' '));
+  if (detail) cell.appendChild(el('span', null, detail));
+}
 
-  var head = el('div', 'account-group-head');
-  var nameRow = el('div', 'account-group-name', acc.name || acc.id);
-  if (acc.cliActive) {
-    var cliTag = el('span', 'account-group-cli', 'CLI');
-    cliTag.title = cliLauncherName + ' is running on this account';
-    nameRow.appendChild(document.createTextNode(' '));
-    nameRow.appendChild(cliTag);
-  }
-  head.appendChild(nameRow);
-  if (acc.email) head.appendChild(el('div', 'account-group-email', acc.email));
-  group.appendChild(head);
+// Copied rather than run: a login has to land in this account's own folder.
+function buildLoginButton(acc) {
+  var command = (acc.login && acc.login.command) || 'CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login';
+  var button = el('button', 'login-btn', 'Copy login command');
+  button.title = command;
+  button.addEventListener('click', function(e) {
+    e.stopPropagation();
+    navigator.clipboard.writeText(command).then(function() {
+      button.textContent = 'Copied, paste it in a terminal';
+    }, function() {
+      button.textContent = command;
+    });
+  });
+  return button;
+}
 
-  var limitedMs = acc.rateLimitedUntil ? acc.rateLimitedUntil - Date.now() : 0;
-  var limitedMins = limitedMs > 0 ? Math.max(1, Math.round(limitedMs / 60000)) : 0;
+var boardCells = [];
 
-  if (acc.needsLogin) {
-    group.appendChild(el('div', 'account-group-warn',
-      'Sign-in needed — run: CLAUDE_CONFIG_DIR=' + (acc.dir || '') + ' claude auth login'));
-  } else if (acc.error) {
-    group.appendChild(el('div', 'account-group-warn', acc.error));
-  } else if (limitedMins) {
-    // Throttled, not broken — the cards below still show the last good numbers.
-    group.appendChild(el('div', 'account-group-note',
-      'Rate limited · retrying in ' + limitedMins + 'm'));
-  }
-
-  var cards = el('div', 'account-group-cards');
-  if (acc.usage) {
-    appendUsageCards(cards, acc.usage);
+function buildBoardRow(acc, index) {
+  var state = WL.rowState(acc, Date.now());
+  var chosen = acc.id === activeAccountId && accountsData.length > 1;
+  var row = el('tr', (chosen ? 'active' : '')
+    + (state.main && WL.meterClass(state.main) === 'danger' ? ' crit' : '')
+    + (state.status === 'limited' || state.status === 'error' || state.status === 'out' ? ' stale-row' : ''));
+  var name = acc.name || acc.id;
+  row.title = name + (acc.email ? ' · ' + acc.email : '') + (acc.error ? '\n' + acc.error : '');
+  if (cliMove) {
+    row.setAttribute('tabindex', '0');
+    if (chosen) row.setAttribute('aria-current', 'true');
+    row.title += '\nClick: move every ' + cliLauncherName + ' session to this account';
+  } else if (activeFollowsCli) {
+    row.classList.add('fixed');
+    if (chosen) row.setAttribute('aria-current', 'true');
   } else {
-    var empty = el('div', 'usage-card');
-    empty.appendChild(el('div', 'card-label', 'Usage'));
-    empty.appendChild(el('div', 'card-meta', limitedMins ? 'Rate limited — no data yet' : 'No data yet'));
-    cards.appendChild(empty);
+    row.setAttribute('tabindex', '0');
+    row.setAttribute('aria-pressed', chosen ? 'true' : 'false');
   }
-  group.appendChild(cards);
-  return group;
+  row.setAttribute('data-id', acc.id);
+
+  var who = el('th');
+  who.setAttribute('scope', 'row');
+  var cell = el('div', 'account-cell');
+  var bullet = el('span', 'bullet b-' + (index % 4), name.charAt(0).toUpperCase());
+  bullet.setAttribute('aria-hidden', 'true');
+  cell.appendChild(bullet);
+  var label = el('div', 'who');
+  var nameEl = el('div', 'name', name);
+  if (chosen) {
+    // One badge: where the CLI runs IS the active account.
+    var badge = el('em', null, 'Active');
+    if (acc.cliActive) badge.title = cliLauncherName + ' is running on this account';
+    nameEl.appendChild(badge);
+  }
+  label.appendChild(nameEl);
+  var login = acc.login;
+  // Only when it needs doing something about. A healthy login is in the row's tooltip. The short form,
+  // because the long one can carry a whole shell command.
+  if (state.status !== 'out' && login && login.state === 'warn' && login.short) {
+    var line = el('div', 'login-line warn', 'Login ends ' + login.short);
+    line.title = login.detail || login.text || '';
+    label.appendChild(line);
+  } else if (login && (login.detail || login.text)) {
+    row.title += '\n' + (login.detail || login.text);
+  }
+  cell.appendChild(label);
+  who.appendChild(cell);
+  row.appendChild(who);
+
+  var meterCell = el('td', 'tmeter');
+  var pctCell = el('td', 'tpct');
+  var fableCell = el('td', 'tfable');
+  if (state.status === 'out') {
+    meterCell.appendChild(buildLoginButton(acc));
+    if (state.main) {
+      pctCell.appendChild(el('b', null, String(state.main.pct)));
+      pctCell.appendChild(el('small', null, '%'));
+    }
+  } else if (state.main) {
+    var heads = WL.boardHeads(accountsData);
+    meterCell.appendChild(meterCells(state.main, false));
+    if (heads.labelMain) meterCell.appendChild(el('span', 'limit', WL.shortLabel(state.main)));
+    pctCell.appendChild(el('b', null, String(state.main.pct)));
+    pctCell.appendChild(el('small', null, '%'));
+    state.subs.forEach(function(meter) {
+      fableCell.appendChild(meterCells(meter, true));
+      // A limit on its own clock says so: nothing else on screen gives that time.
+      var refill = WL.refillDiffers(meter, state.main) ? ' · ' + WL.refillText(meter.resetsAt, Date.now()) : '';
+      fableCell.appendChild(el('span', 'limit', (heads.labelSub ? WL.shortLabel(meter) + ' ' : '') + meter.pct + '%' + refill));
+    });
+  }
+  row.appendChild(meterCell);
+  row.appendChild(pctCell);
+  row.appendChild(fableCell);
+
+  var refill = el('td', 'trefill');
+  setRefillText(refill, state);
+  row.appendChild(refill);
+  boardCells.push({ acc: acc, cell: refill });
+
+  var choose = function() {
+    if (cliMove) { moveCli(acc); return; }
+    if (acc.id === activeAccountId || !window.dashboardAPI.setActiveAccount) return;
+    window.dashboardAPI.setActiveAccount(acc.id);
+  };
+  if (cliMove || !activeFollowsCli) {
+    row.addEventListener('click', choose);
+    row.addEventListener('keydown', function(e) {
+      if (e.target !== row || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      choose();
+    });
+  }
+  return row;
+}
+
+function renderBoardHeads() {
+  var heads = WL.boardHeads(accountsData);
+  document.getElementById('boardMainHead').textContent = heads.main;
+  document.getElementById('boardSubHead').textContent = heads.sub;
+}
+
+function renderTimeline() {
+  var holder = document.getElementById('refillTimeline');
+  while (holder.firstChild) holder.removeChild(holder.firstChild);
+  var now = Date.now();
+  var marks = WL.timelineMarks(accountsData, now);
+  if (marks.length === 0) {
+    holder.style.height = 'auto';
+    holder.appendChild(el('div', 'tl-empty', 'No refills in the coming week.'));
+    return;
+  }
+  holder.style.height = '';
+  holder.appendChild(el('div', 'tl-line'));
+  var DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var today = new Date(now).getDay();
+  for (var d = 0; d <= 7; d++) {
+    var tick = document.createElement('i');
+    tick.style.left = (d / 7 * 100).toFixed(2) + '%';
+    tick.appendChild(el('span', null, DAY_NAMES[(today + d) % 7]));
+    holder.appendChild(tick);
+  }
+  marks.forEach(function(mark) {
+    var item = el('div', 'tl-m ' + mark.lane + (mark.flip ? ' flip' : ''));
+    item.style.left = mark.x.toFixed(1) + '%';
+    var bullet = el('span', 'bullet b-' + (mark.index % 4), mark.name.charAt(0).toUpperCase());
+    bullet.setAttribute('aria-hidden', 'true');
+    item.appendChild(bullet);
+    var text = el('span');
+    text.appendChild(el('b', null, mark.name));
+    text.appendChild(document.createTextNode(mark.text));
+    item.appendChild(text);
+    holder.appendChild(item);
+  });
+}
+
+function svgNode(tag, attrs, text) {
+  var node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  Object.keys(attrs).forEach(function(key) { node.setAttribute(key, attrs[key]); });
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function renderWeekChart() {
+  var holder = document.getElementById('weekChart');
+  var active = accountsData.filter(function(acc) { return acc.id === activeAccountId; })[0] || accountsData[0];
+  var week = active && active.usage && active.usage.weekAll;
+  while (holder.firstChild) holder.removeChild(holder.firstChild);
+  document.getElementById('weekPanel').hidden = !week;
+  if (!week) return;
+  document.getElementById('weekTitle').textContent = (active.name || 'This account') + ' this week';
+  var scoped = active.usage.weekSonnet;
+  document.getElementById('weekScopedKey').textContent = (scoped && scoped.model) || 'Scoped';
+  var series = WL.weekSeries(historyData, week.resetsAt);
+  if (series.length < 2) {
+    holder.appendChild(el('div', 'chart-empty', 'The chart fills in as this week goes on.'));
+    return;
+  }
+  var W = 520;
+  var H = 96;
+  var line = function(key) {
+    var d = '';
+    series.forEach(function(point) {
+      if (point[key] === null) return;
+      d += (d ? 'L' : 'M') + (point.x / 100 * W).toFixed(1) + ' ' + (H - point[key] / 100 * H).toFixed(1);
+    });
+    return d;
+  };
+  var svg = svgNode('svg', { viewBox: '-2 -2 ' + (W + 34) + ' ' + (H + 20), role: 'img',
+    'aria-label': (active.name || 'This account') + ' used ' + week.pct + ' percent of the week so far' });
+  svg.appendChild(svgNode('path', { 'class': 'grid', d: 'M0 0H' + W + 'M0 ' + (H / 2) + 'H' + W + 'M0 ' + H + 'H' + W }));
+  svg.appendChild(svgNode('path', { 'class': 'pace', d: 'M0 ' + H + 'L' + W + ' 0' }));
+  svg.appendChild(svgNode('path', { 'class': 's2', d: line('scoped') }));
+  svg.appendChild(svgNode('path', { 'class': 's1', d: line('all') }));
+  var DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var startDay = new Date(new Date(week.resetsAt).getTime() - 7 * 24 * 3600000).getDay();
+  for (var d = 0; d < 7; d++) {
+    svg.appendChild(svgNode('text', { x: (d / 7 * W).toFixed(1), y: H + 15 }, DAY_NAMES[(startDay + d) % 7]));
+  }
+  svg.appendChild(svgNode('text', { x: W + 4, y: 4 }, '100%'));
+  svg.appendChild(svgNode('text', { x: W + 4, y: H / 2 + 4 }, '50%'));
+  holder.appendChild(svg);
+}
+
+function renderOverviewToday() {
+  var list = document.getElementById('overviewToday');
+  if (!list) return;
+  // The timer redraws this list, which must not pull keyboard focus out of it.
+  if (list.contains(document.activeElement)) return;
+  while (list.firstChild) list.removeChild(list.firstChild);
+  var now = Date.now();
+  var next = WL.upcomingEvents(typeof calEvents === 'undefined' ? [] : calEvents, now)[0];
+  var addRow = function(strong, rest, action) {
+    var li = el('li');
+    var button = el('button');
+    button.appendChild(el('b', null, strong));
+    button.appendChild(document.createTextNode(' ' + rest));
+    button.addEventListener('click', action);
+    li.appendChild(button);
+    list.appendChild(li);
+  };
+  if (next) {
+    addRow(WL.eventTimeText(next, now), PlanLib.eventTitle(next), function() { showTab('calendar'); });
+  } else {
+    addRow('Nothing', 'coming up', function() { showTab('calendar'); });
+  }
+  var tasks = typeof dashTasks === 'undefined' || !dashTasks ? [] : dashTasks;
+  var left = tasks.filter(function(task) { return !task.done; }).length;
+  addRow(String(left), left === 1 ? 'task left' : 'tasks left', function() { showTab('tasks'); });
+  if (typeof habitsData !== 'undefined' && habitsData) {
+    var day = WL.localDay(now);
+    var kinds = ['training', 'reading', 'relax'];
+    var done = kinds.filter(function(kind) { return (habitsData[kind] || []).indexOf(day) !== -1; }).length;
+    addRow(done + ' of ' + kinds.length, 'habits done', function() { showTab('habits'); });
+  }
+}
+
+// --- Maps ---
+var mapsState = { available: false, maps: [] };
+
+// Drawn from the map's own bubbles and colours.
+function mapThumb(map) {
+  var svg = svgNode('svg', { 'class': 'thumb', viewBox: '0 0 120 72', 'aria-hidden': 'true' });
+  svg.appendChild(svgNode('rect', { width: 120, height: 72, rx: 8, fill: '#111318' }));
+  var bubbles = map.preview || [];
+  if (bubbles.length === 0) {
+    // Still a sketch, with no bubbles yet.
+    svg.appendChild(svgNode('path', { d: 'M24 44c10-16 18-16 26-6s16 10 24-2 14-10 22-4', fill: 'none', stroke: '#a8aebb', 'stroke-width': 2, 'stroke-linecap': 'round' }));
+    return svg;
+  }
+  var height = Math.max.apply(null, bubbles.map(function(b) { return b.y + b.h; }));
+  var scale = Math.min(104 / 100, 56 / Math.max(height, 1));
+  var left = (120 - 100 * scale) / 2;
+  var top = (72 - height * scale) / 2;
+  var centre = function(b) {
+    return [left + (b.x + b.w / 2) * scale, top + (b.y + b.h / 2) * scale];
+  };
+  (map.links || []).forEach(function(link) {
+    var from = centre(bubbles[link[0]]);
+    var to = centre(bubbles[link[1]]);
+    svg.appendChild(svgNode('path', { d: 'M' + from[0].toFixed(1) + ' ' + from[1].toFixed(1) + 'L' + to[0].toFixed(1) + ' ' + to[1].toFixed(1), stroke: '#e5e7eb', 'stroke-width': 1.5, fill: 'none' }));
+  });
+  bubbles.forEach(function(b) {
+    svg.appendChild(svgNode('rect', {
+      x: (left + b.x * scale).toFixed(1), y: (top + b.y * scale).toFixed(1),
+      width: Math.max(4, b.w * scale).toFixed(1), height: Math.max(3, b.h * scale).toFixed(1),
+      rx: Math.max(2, b.h * scale / 2).toFixed(1), fill: b.color,
+    }));
+  });
+  return svg;
+}
+
+function mapButton(map, extraClass) {
+  var button = el('button', 'mapitem' + (extraClass ? ' ' + extraClass : ''));
+  button.title = 'Open ' + map.title;
+  button.appendChild(mapThumb(map));
+  var text = el('span');
+  text.appendChild(el('b', null, map.title));
+  text.appendChild(document.createTextNode(WL.editedText(map.updatedAt, Date.now())));
+  button.appendChild(text);
+  button.addEventListener('click', function() { window.dashboardAPI.openMaps({ id: map.id }); });
+  return button;
+}
+
+function mapRow(map) {
+  var button = el('button', 'maprow');
+  button.title = 'Open ' + map.title;
+  button.appendChild(el('b', null, map.title));
+  button.appendChild(el('span', null, WL.editedText(map.updatedAt, Date.now())));
+  button.addEventListener('click', function() { window.dashboardAPI.openMaps({ id: map.id }); });
+  return button;
+}
+
+function renderMaps() {
+  document.getElementById('railMaps').hidden = !mapsState.available;
+  document.getElementById('overviewMapsPanel').hidden = !mapsState.available;
+  var overview = document.getElementById('overviewMaps');
+  while (overview.firstChild) overview.removeChild(overview.firstChild);
+  if (mapsState.maps.length === 0) {
+    overview.appendChild(el('div', 'maps-empty', 'No maps yet.'));
+    return;
+  }
+  mapsState.maps.slice(0, 2).forEach(function(map) { overview.appendChild(mapButton(map)); });
+  // Every older map keeps a line of its own: a map must never drop out of sight because two newer ones exist.
+  var older = mapsState.maps.slice(2);
+  if (older.length === 0) return;
+  var rest = el('div', 'maprest');
+  rest.setAttribute('role', 'group');
+  rest.setAttribute('aria-label', 'Older maps');
+  older.forEach(function(map) { rest.appendChild(mapRow(map)); });
+  overview.appendChild(rest);
+}
+
+// The map and notes pages lie over these boxes in their own views, so main needs to know where they are.
+function hostBounds(id) {
+  var box = document.getElementById(id).getBoundingClientRect();
+  return { x: box.left, y: box.top, width: box.width, height: box.height };
+}
+
+function renderMapsStatus(status) {
+  var failed = status && status.state === 'error';
+  document.getElementById('mapsStatusText').textContent = failed
+    ? status.message + ' Your maps are saved.'
+    : 'Opening Maps...';
+  document.getElementById('mapsRetry').hidden = !failed;
+}
+
+new ResizeObserver(function() {
+  if (currentTab === 'maps') window.dashboardAPI.placeMaps(hostBounds('mapsHost'));
+}).observe(document.getElementById('mapsHost'));
+new ResizeObserver(function() {
+  if (currentTab === 'notes') window.dashboardAPI.placeNotes(hostBounds('notesHost'));
+}).observe(document.getElementById('notesHost'));
+window.dashboardAPI.onMapsStatus(renderMapsStatus);
+document.getElementById('mapsRetry').addEventListener('click', function() {
+  window.dashboardAPI.showMaps(hostBounds('mapsHost'));
+});
+
+function takeMapsState(state) {
+  if (!state) return;
+  mapsState = state;
+  renderMaps();
+}
+window.dashboardAPI.getMapsState().then(takeMapsState);
+window.dashboardAPI.onMapsUpdate(takeMapsState);
+document.getElementById('overviewNewMap').addEventListener('click', function() { window.dashboardAPI.openMaps({ new: true }); });
+
+// A click on a row: the launcher moves every running session to that account.
+// Active is not set here; it follows the launcher's record when the move lands.
+function moveCli(acc) {
+  if (cliMoving || !window.dashboardAPI.moveCliToAccount) return;
+  cliMoving = true;
+  showMoveNotice({ ok: true, text: 'Moving ' + cliLauncherName + ' to ' + (acc.name || acc.id) + '…' }, 25000);
+  window.dashboardAPI.moveCliToAccount(acc.id).then(function(res) {
+    cliMoving = false;
+    showMoveNotice(res && res.text ? res : { ok: false, text: 'The move did not answer' }, 10000);
+  }, function() {
+    cliMoving = false;
+    showMoveNotice({ ok: false, text: 'The move failed' }, 10000);
+  });
+}
+
+function showMoveNotice(res, ms) {
+  moveNotice = { text: res.text, detail: res.detail || '', error: !res.ok, until: Date.now() + ms };
+  renderSyncText();
+  setTimeout(renderSyncText, ms + 50);
+}
+
+function renderSyncText() {
+  var sync = document.getElementById('dashSync');
+  if (moveNotice && Date.now() < moveNotice.until) {
+    sync.textContent = moveNotice.text;
+    sync.title = moveNotice.detail || moveNotice.text;
+    return;
+  }
+  if (moveNotice) { moveNotice = null; sync.title = ''; }
+  if (!usageData || !usageData.syncTime) { sync.textContent = ''; return; }
+  var ago = Math.round((Date.now() - usageData.syncTime) / 60000);
+  sync.textContent = ago < 1 ? 'Synced just now' : 'Synced ' + ago + 'm ago';
 }
 
 function renderOverview() {
-  var container = document.getElementById('overviewCards');
-  while (container.firstChild) container.removeChild(container.firstChild);
-
-  // Two or more accounts: one titled card group each, laid out in a grid.
-  if (accountsData.length > 1) {
-    container.classList.add('multi');
-    for (var i = 0; i < accountsData.length; i++) {
-      container.appendChild(buildAccountGroup(accountsData[i]));
-    }
-    renderPlanner();
-    return;
+  var body = document.getElementById('overviewRows');
+  var focused = document.activeElement && document.activeElement.getAttribute('data-id');
+  while (body.firstChild) body.removeChild(body.firstChild);
+  boardCells = [];
+  accountsData.forEach(function(acc, index) {
+    var row = buildBoardRow(acc, index);
+    body.appendChild(row);
+    if (acc.id === focused) row.focus();
+  });
+  if (accountsData.length === 0) {
+    var waiting = el('tr');
+    var cell = el('td', null, 'Waiting for data...');
+    cell.setAttribute('colspan', '5');
+    waiting.appendChild(cell);
+    body.appendChild(waiting);
   }
-
-  // Single account: exactly the layout it has always had.
-  container.classList.remove('multi');
-  if (!usageData) {
-    container.appendChild(el('div', 'usage-card', 'Waiting for data...'));
-    return;
-  }
-  appendUsageCards(container, usageData);
-
-  // Session planner
+  renderBoardHeads();
+  document.getElementById('overviewFoot').textContent = WL.extraSummary(accountsData);
+  renderTimeline();
+  renderWeekChart();
+  renderOverviewToday();
+  renderSyncText();
   renderPlanner();
 }
 
@@ -216,9 +591,9 @@ function getPlannerStatus(pct, hoursToLimit, remainingHours) {
 }
 
 function getPlannerStatusLabel(status) {
-  if (status === 'at-risk') return 'At Risk';
+  if (status === 'at-risk') return 'At risk';
   if (status === 'watch') return 'Watch';
-  return 'On Track';
+  return 'On track';
 }
 
 function getStatDotColor(pct) {
@@ -227,12 +602,25 @@ function getStatDotColor(pct) {
   return 'var(--green)';
 }
 
+function plannerBadge(status, text) {
+  var header = el('div', 'planner-header');
+  header.appendChild(el('div', 'planner-badge ' + status, text));
+  return header;
+}
+
 function renderPlanner() {
   var container = document.getElementById('plannerText');
   while (container.firstChild) container.removeChild(container.firstChild);
 
-  if (!usageData || !usageData.session) {
+  if (!usageData) {
     container.textContent = 'Waiting for data...';
+    return;
+  }
+  if (!usageData.session) {
+    // The plan reports no 5-hour window (Ultra): nothing to pace within it.
+    container.appendChild(plannerBadge('on-track', 'No session limit'));
+    container.appendChild(el('div', 'planner-recommendation',
+      'This plan has no 5-hour session limit. Only the weekly limits apply.'));
     return;
   }
 
@@ -241,12 +629,7 @@ function renderPlanner() {
 
   if (pct === 0) {
     // Simple state — show badge + message
-    var header0 = el('div', 'planner-header');
-    var badge0 = el('div', 'planner-badge on-track');
-    badge0.appendChild(el('span', 'planner-badge-dot'));
-    badge0.appendChild(document.createTextNode('On Track'));
-    header0.appendChild(badge0);
-    container.appendChild(header0);
+    container.appendChild(plannerBadge('on-track', 'On track'));
     container.appendChild(el('div', 'planner-recommendation', 'No session usage yet. You have a full 5-hour window available.'));
     return;
   }
@@ -256,12 +639,7 @@ function renderPlanner() {
   var remainingMs = resetTime > 0 ? resetTime - now : 0;
 
   if (resetsAt && remainingMs <= 0) {
-    var header1 = el('div', 'planner-header');
-    var badge1 = el('div', 'planner-badge on-track');
-    badge1.appendChild(el('span', 'planner-badge-dot'));
-    badge1.appendChild(document.createTextNode('On Track'));
-    header1.appendChild(badge1);
-    container.appendChild(header1);
+    container.appendChild(plannerBadge('on-track', 'On track'));
     container.appendChild(el('div', 'planner-recommendation', 'Session is resetting now.'));
     return;
   }
@@ -278,12 +656,7 @@ function renderPlanner() {
   var status = getPlannerStatus(pct, hoursToLimit, remainingHoursDecimal);
 
   // Header with badge
-  var header = el('div', 'planner-header');
-  var badge = el('div', 'planner-badge ' + status);
-  badge.appendChild(el('span', 'planner-badge-dot'));
-  badge.appendChild(document.createTextNode(getPlannerStatusLabel(status)));
-  header.appendChild(badge);
-  container.appendChild(header);
+  container.appendChild(plannerBadge(status, getPlannerStatusLabel(status)));
 
   // Stat grid
   var stats = el('div', 'planner-stats');
@@ -301,7 +674,7 @@ function renderPlanner() {
 
   // Stat 2: Burn rate
   var stat2 = el('div', 'planner-stat');
-  stat2.appendChild(el('div', 'planner-stat-label', 'Burn Rate'));
+  stat2.appendChild(el('div', 'planner-stat-label', 'Burn rate'));
   var val2 = el('div', 'planner-stat-value');
   val2.appendChild(document.createTextNode('~' + ratePerHour.toFixed(1) + '%/hr'));
   stat2.appendChild(val2);
@@ -309,15 +682,14 @@ function renderPlanner() {
 
   // Stat 3: Time to limit
   var stat3 = el('div', 'planner-stat');
-  stat3.appendChild(el('div', 'planner-stat-label', 'Time to Limit'));
+  stat3.appendChild(el('div', 'planner-stat-label', 'Time to limit'));
   var val3 = el('div', 'planner-stat-value');
   if (hoursToLimit !== null && hoursToLimit < remainingHoursDecimal) {
     var limitH = Math.floor(hoursToLimit);
     var limitM = Math.round((hoursToLimit - limitH) * 60);
-    val3.style.color = 'var(--red)';
+    val3.classList.add('bad');
     val3.appendChild(document.createTextNode(limitH + 'h ' + limitM + 'm'));
   } else {
-    val3.style.color = 'var(--green)';
     val3.appendChild(document.createTextNode('Safe'));
   }
   stat3.appendChild(val3);
@@ -330,7 +702,7 @@ function renderPlanner() {
   if (hoursToLimit !== null && hoursToLimit < remainingHoursDecimal) {
     var lH = Math.floor(hoursToLimit);
     var lM = Math.round((hoursToLimit - lH) * 60);
-    rec.textContent = 'Slow down \u2014 limit in ' + lH + 'h ' + lM + 'm. ';
+    rec.textContent = 'Slow down: the limit is ' + lH + 'h ' + lM + 'm away. ';
     if (remainingMs > 0) {
       var rH = Math.floor(remainingMs / 3600000);
       var rM = Math.floor((remainingMs % 3600000) / 60000);
@@ -346,10 +718,21 @@ function renderPlanner() {
 
 var usageChart = null;
 
+// True when the active account's current usage says its plan has no such
+// meter (Ultra: no 5-hour session). Only current data can say so - history
+// written before 2.15 holds 0 where the meter was missing.
+function planLacksMeter(key) {
+  return !!(usageData && typeof usageData === 'object' && !usageData[key]);
+}
+
+function cssVar(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
 var chartSeriesDefs = [
   { key: 'session', color: '#d4845a', label: 'Session' },
-  { key: 'weekAll', color: '#7c7cba', label: 'Weekly (all)' },
-  { key: 'weekSonnet', color: '#4ade80', label: 'Weekly (Fable)' },
+  { key: 'weekAll', color: '#111111', label: 'All models' },
+  { key: 'weekSonnet', color: '#23a094', label: 'One model' },
 ];
 
 
@@ -358,10 +741,7 @@ function formatChartDate(ts) {
   var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   if (chartDays <= 7) {
-    var h = d.getHours();
-    var ampm = h >= 12 ? 'pm' : 'am';
-    var h12 = h % 12 || 12;
-    return dayNames[d.getDay()] + ' ' + h12 + ampm;
+    return dayNames[d.getDay()] + ' ' + d.getHours() + ':00';
   }
   return monthNames[d.getMonth()] + ' ' + d.getDate();
 }
@@ -369,15 +749,16 @@ function formatChartDate(ts) {
 function formatTooltipTitle(ts) {
   var d = new Date(ts);
   var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  var h = d.getHours();
-  var ampm = h >= 12 ? 'pm' : 'am';
-  var h12 = h % 12 || 12;
-  var min = d.getMinutes();
-  return monthNames[d.getMonth()] + ' ' + d.getDate() + ', ' + h12 + ':' + (min < 10 ? '0' : '') + min + ampm;
+  return monthNames[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
 
+var CHART_FONT = "Inter, system-ui, sans-serif";
+
 function drawChart() {
+  chartSeriesDefs[2].label = (usageData && usageData.weekSonnet && usageData.weekSonnet.model) || 'One model';
+  chartSeriesDefs[1].color = cssVar('--text', '#111111');
+  chartSeriesDefs[2].color = cssVar('--green', '#23a094');
   var canvas = document.getElementById('historyCanvas');
   if (!canvas) return;
 
@@ -406,6 +787,11 @@ function drawChart() {
   var chartDatasets = [];
   for (var d = 0; d < chartSeriesDefs.length; d++) {
     var def = chartSeriesDefs[d];
+    // A limit the plan never reported in this range (null points) is no line.
+    if (!datasets[d].some(function(v) { return typeof v === 'number'; })) continue;
+    // Nor one the plan has dropped: builds before 2.15 stored 0 for "no
+    // 5-hour limit", so old points alone would draw a fake flat 0 % line.
+    if (planLacksMeter(def.key)) continue;
     chartDatasets.push({
       label: def.label,
       data: datasets[d],
@@ -466,11 +852,11 @@ function drawChart() {
         legend: {
           position: 'bottom',
           labels: {
-            color: '#e2e2f0',
-            font: { size: 12, weight: '500' },
-            usePointStyle: true,
-            pointStyle: 'circle',
-            padding: 20,
+            color: cssVar('--text', '#111111'),
+            font: { size: 12, family: CHART_FONT },
+            boxWidth: 14,
+            boxHeight: 3,
+            padding: 16,
           },
         },
         tooltip: {
@@ -479,7 +865,7 @@ function drawChart() {
           borderWidth: 1,
           titleColor: '#7e7e98',
           bodyColor: '#e2e2f0',
-          titleFont: { size: 11, family: 'monospace' },
+          titleFont: { size: 11, family: CHART_FONT },
           bodyFont: { size: 12 },
           padding: 12,
           cornerRadius: 8,
@@ -501,35 +887,35 @@ function drawChart() {
       scales: {
         x: {
           ticks: {
-            color: '#7e7e98',
-            font: { size: 10, family: 'monospace' },
+            color: cssVar('--text-dim', '#5f5a4f'),
+            font: { size: 11, family: CHART_FONT },
             maxTicksLimit: chartDays <= 7 ? 8 : (chartDays <= 14 ? 8 : 6),
             callback: function(val, idx) {
               return formatChartDate(this.getLabelForValue(val));
             },
           },
           grid: {
-            color: '#2a2a3d',
+            color: 'rgba(127, 127, 127, 0.25)',
             drawTicks: true,
             tickLength: 4,
           },
           border: {
-            color: '#2a2a3d',
+            color: 'rgba(127, 127, 127, 0.25)',
           },
         },
         y: {
           min: 0,
           max: 100,
           ticks: {
-            color: '#7e7e98',
-            font: { size: 11, family: 'monospace' },
+            color: cssVar('--text-dim', '#5f5a4f'),
+            font: { size: 11, family: CHART_FONT },
             stepSize: 25,
             callback: function(val) {
               return val + '%';
             },
           },
           grid: {
-            color: '#2a2a3d',
+            color: 'rgba(127, 127, 127, 0.25)',
           },
           border: {
             display: false,
@@ -541,167 +927,102 @@ function drawChart() {
 }
 
 // Pill slider position — hoisted to module scope so tab-switch handler can call it
-function updateSlider() {
-  var pillBtns = document.querySelectorAll('.pill-btn');
-  var slider = document.getElementById('pillSlider');
-  if (!slider || pillBtns.length === 0) return;
-  var activeBtn = null;
-  for (var i = 0; i < pillBtns.length; i++) {
-    if (pillBtns[i].classList.contains('active')) {
-      activeBtn = pillBtns[i];
-      break;
-    }
+(function() {
+  var buttons = document.querySelectorAll('.pill-btn');
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].addEventListener('click', function() {
+      for (var j = 0; j < buttons.length; j++) {
+        buttons[j].classList.toggle('active', buttons[j] === this);
+        buttons[j].setAttribute('aria-pressed', buttons[j] === this ? 'true' : 'false');
+      }
+      chartDays = parseInt(this.getAttribute('data-days'), 10);
+      drawChart();
+    });
   }
-  if (activeBtn) {
-    slider.style.left = activeBtn.offsetLeft + 'px';
-    slider.style.width = activeBtn.offsetWidth + 'px';
-  }
-}
-
-// Pill toggle controls
-function initPillToggle() {
-  var pillBtns = document.querySelectorAll('.pill-btn');
-  var slider = document.getElementById('pillSlider');
-  if (!slider || pillBtns.length === 0) return;
-
-  for (var i = 0; i < pillBtns.length; i++) {
-    (function(btn) {
-      btn.addEventListener('click', function() {
-        for (var j = 0; j < pillBtns.length; j++) {
-          pillBtns[j].classList.remove('active');
-        }
-        btn.classList.add('active');
-        chartDays = parseInt(btn.getAttribute('data-days'), 10);
-        updateSlider();
-        drawChart();
-      });
-    })(pillBtns[i]);
-  }
-
-  // Initial slider position (defer to next frame so layout is ready)
-  requestAnimationFrame(updateSlider);
-}
-initPillToggle();
+})();
 
 // --- Alerts ---
 
-function renderAlerts() {
-  var container = document.getElementById('alertRows');
-  while (container.firstChild) container.removeChild(container.firstChild);
+var ALERT_PRESETS = [
+  { label: 'Early', session: 60, weekAll: 60, weekSonnet: 60 },
+  { label: 'Standard', session: 80, weekAll: 90, weekSonnet: 90 },
+  { label: 'Late', session: 95, weekAll: 95, weekSonnet: 95 },
+];
 
-  var presets = [
-    { icon: '\uD83D\uDEE1', label: 'Relaxed', session: 60, weekAll: 60, weekSonnet: 60 },
-    { icon: '\u2696', label: 'Standard', session: 80, weekAll: 90, weekSonnet: 90 },
-    { icon: '\u26A1', label: 'Aggressive', session: 95, weekAll: 95, weekSonnet: 95 },
-  ];
-
-  function isPresetActive(preset) {
-    return alertThresholds.session === preset.session
-      && alertThresholds.weekAll === preset.weekAll
-      && alertThresholds.weekSonnet === preset.weekSonnet;
-  }
-
-  var presetsRow = el('div', 'alert-presets');
-  for (var p = 0; p < presets.length; p++) {
-    (function(preset) {
-      var chip = el('button', 'preset-chip');
-      var iconSpan = el('span', 'preset-icon', preset.icon);
-      chip.appendChild(iconSpan);
-      chip.appendChild(document.createTextNode(preset.label));
-      if (isPresetActive(preset)) chip.classList.add('active');
-      chip.addEventListener('click', function() {
-        alertThresholds.session = preset.session;
-        alertThresholds.weekAll = preset.weekAll;
-        alertThresholds.weekSonnet = preset.weekSonnet;
-        saveAlertThresholds();
-        renderAlerts();
-      });
-      presetsRow.appendChild(chip);
-    })(presets[p]);
-  }
-  container.appendChild(presetsRow);
-
-  var alerts = [
-    { key: 'session', label: 'Session' },
-    { key: 'weekAll', label: 'Weekly (all)' },
-    { key: 'weekSonnet', label: 'Weekly (Fable)' },
-  ];
-
-  for (var i = 0; i < alerts.length; i++) {
-    (function(alert) {
-      var row = el('div', 'alert-row');
-      var header = el('div', 'alert-row-header');
-      header.appendChild(el('div', 'alert-label', alert.label));
-      var valueEl = el('div', 'alert-value', alertThresholds[alert.key] + '%');
-      header.appendChild(valueEl);
-      row.appendChild(header);
-
-      // Slider
-      var track = el('div', 'alert-slider-track');
-      var fill = el('div', 'alert-slider-fill');
-      var thumb = el('div', 'alert-slider-thumb');
-      var pct = alertThresholds[alert.key];
-      fill.style.width = pct + '%';
-      thumb.style.left = pct + '%';
-      track.appendChild(fill);
-      track.appendChild(thumb);
-
-      function updateFromX(clientX) {
-        var rect = track.getBoundingClientRect();
-        var raw = (clientX - rect.left) / rect.width;
-        var val = Math.round(Math.min(100, Math.max(5, raw * 100)) / 5) * 5;
-        alertThresholds[alert.key] = val;
-        fill.style.width = val + '%';
-        thumb.style.left = val + '%';
-        valueEl.textContent = val + '%';
-      }
-
-      track.addEventListener('mousedown', function(e) {
-        e.preventDefault();
-        updateFromX(e.clientX);
-        function onMove(ev) { updateFromX(ev.clientX); }
-        function onUp() {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          saveAlertThresholds();
-          updatePresetHighlights();
-        }
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-
-      row.appendChild(track);
-
-      // Tick marks
-      var ticks = el('div', 'alert-ticks');
-      var tickValues = [0, 25, 50, 75, 100];
-      for (var t = 0; t < tickValues.length; t++) {
-        ticks.appendChild(el('span', 'alert-tick', tickValues[t] + '%'));
-      }
-      row.appendChild(ticks);
-
-      container.appendChild(row);
-    })(alerts[i]);
-  }
+function presetIsActive(preset) {
+  return alertThresholds.session === preset.session
+    && alertThresholds.weekAll === preset.weekAll
+    && alertThresholds.weekSonnet === preset.weekSonnet;
 }
 
 function updatePresetHighlights() {
-  var presets = [
-    { session: 60, weekAll: 60, weekSonnet: 60 },
-    { session: 80, weekAll: 90, weekSonnet: 90 },
-    { session: 95, weekAll: 95, weekSonnet: 95 },
-  ];
-  var chips = document.querySelectorAll('.preset-chip');
+  var chips = document.querySelectorAll('.alert-presets button');
   for (var i = 0; i < chips.length; i++) {
-    if (i < presets.length) {
-      var p = presets[i];
-      var match = alertThresholds.session === p.session
-        && alertThresholds.weekAll === p.weekAll
-        && alertThresholds.weekSonnet === p.weekSonnet;
-      if (match) chips[i].classList.add('active');
-      else chips[i].classList.remove('active');
-    }
+    var on = presetIsActive(ALERT_PRESETS[i]);
+    chips[i].classList.toggle('active', on);
+    chips[i].setAttribute('aria-pressed', on ? 'true' : 'false');
   }
+}
+
+function alertRow(key, label) {
+  var row = el('div', 'alert-row');
+  var labelEl = el('label', 'alert-label', label);
+  labelEl.htmlFor = 'alert-' + key;
+  row.appendChild(labelEl);
+  var range = document.createElement('input');
+  range.type = 'range';
+  range.className = 'alert-range';
+  range.id = 'alert-' + key;
+  range.min = '5';
+  range.max = '100';
+  range.step = '5';
+  range.value = String(alertThresholds[key]);
+  var value = el('div', 'alert-value', alertThresholds[key] + '%');
+  var paint = function() {
+    range.style.setProperty('--pct', ((Number(range.value) - 5) / 95 * 100) + '%');
+    value.textContent = range.value + '%';
+  };
+  paint();
+  range.addEventListener('input', function() {
+    alertThresholds[key] = Number(range.value);
+    paint();
+    updatePresetHighlights();
+  });
+  range.addEventListener('change', saveAlertThresholds);
+  row.appendChild(range);
+  row.appendChild(value);
+  return row;
+}
+
+function renderAlerts() {
+  var container = document.getElementById('alertRows');
+  UI.clear(container);
+
+  var presets = el('div', 'seg alert-presets');
+  presets.setAttribute('role', 'group');
+  presets.setAttribute('aria-label', 'Presets');
+  ALERT_PRESETS.forEach(function(preset) {
+    var chip = el('button', null, preset.label);
+    chip.type = 'button';
+    chip.addEventListener('click', function() {
+      alertThresholds.session = preset.session;
+      alertThresholds.weekAll = preset.weekAll;
+      alertThresholds.weekSonnet = preset.weekSonnet;
+      saveAlertThresholds();
+      renderAlerts();
+    });
+    presets.appendChild(chip);
+  });
+  container.appendChild(presets);
+
+  var card = el('div', 'alert-card card raised');
+  // A plan with no session limit has no use for that level. It stays saved for one that does.
+  if (!planLacksMeter('session')) card.appendChild(alertRow('session', 'Session'));
+  card.appendChild(alertRow('weekAll', 'Weekly, all models'));
+  var scoped = usageData && usageData.weekSonnet && usageData.weekSonnet.model;
+  card.appendChild(alertRow('weekSonnet', 'Weekly, ' + (scoped || 'one model')));
+  container.appendChild(card);
+  updatePresetHighlights();
 }
 
 function saveAlertThresholds() {
@@ -750,736 +1071,26 @@ function formatElectronAccelerator(e) {
 
 // --- Calendar tab ---
 var calEvents = [];
-var calSelectedDate = null;
-var calWeekOffset = 0;
-var calMonthGridOpen = false;
-var calMonthViewYear = new Date().getFullYear();
-var calMonthViewMonth = new Date().getMonth();
-var calEditingId = null;
-
-var CAL_COLORS = ['blue', 'green', 'orange', 'red', 'purple'];
-var CAL_COLOR_MAP = { blue: '#60a5fa', green: '#4ade80', orange: '#fb923c', red: '#f87171', purple: '#c084fc' };
-var CAL_DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
-var CAL_DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-var CAL_MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-
-function calToday() {
-  var d = new Date();
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-}
-
-function calFormatDate(y, m, d) {
-  return y + '-' + String(m + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
-}
-
-function calFormatDateObj(d) {
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-}
-
-function calParseDate(str) {
-  var p = str.split('-');
-  return new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]));
-}
-
-function calDayName(dateStr) {
-  return CAL_DAY_FULL[new Date(dateStr + 'T12:00').getDay()];
-}
-
-function calMonthName(m) {
-  return ['January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'][m];
-}
-
-function calGetWeekStart(offset) {
-  var d = new Date();
-  var day = d.getDay();
-  var diff = day === 0 ? 6 : day - 1;
-  d.setDate(d.getDate() - diff + (offset * 7));
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
+var planCalendar = PlanCalendar.mount(document.getElementById('calendarRoot'), {
+  addEvent: window.dashboardAPI.addCalendarEvent,
+  updateEvent: window.dashboardAPI.updateCalendarEvent,
+  toggleEvent: window.dashboardAPI.toggleCalendarEvent,
+  deleteEvent: window.dashboardAPI.deleteCalendarEvent,
+  moveEvent: window.dashboardAPI.moveCalendarEvent,
+  openExternal: window.dashboardAPI.openExternal,
+});
 
 function renderCalendar() {
-  if (!calSelectedDate) calSelectedDate = calToday();
-  renderCalendarGrid();
-  renderCalendarAgenda();
+  planCalendar.update(calEvents);
 }
 
-function renderCalendarGrid() {
-  var grid = document.getElementById('calendarGrid');
-  while (grid.firstChild) grid.removeChild(grid.firstChild);
-
-  var today = calToday();
-  var sd = calParseDate(calSelectedDate);
-
-  // --- Header: date title + expand chevron + add button ---
-  var header = el('div');
-  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;';
-
-  var headerLeft = el('div');
-  headerLeft.style.cssText = 'display:flex;align-items:center;gap:10px;';
-  var dateTitle = el('div');
-  dateTitle.style.cssText = 'font-size:16px;font-weight:700;color:var(--text);letter-spacing:-0.3px;';
-  var shortDay = calDayName(calSelectedDate).slice(0, 3);
-  dateTitle.textContent = shortDay + ', ' + CAL_MONTH_SHORT[sd.getMonth()] + ' ' + sd.getDate();
-  headerLeft.appendChild(dateTitle);
-
-  if (calSelectedDate === today) {
-    var badge = el('span');
-    badge.style.cssText = 'font-size:9px;font-weight:700;color:#fff;background:var(--accent);padding:2px 8px;border-radius:4px;letter-spacing:0.5px;';
-    badge.textContent = 'TODAY';
-    headerLeft.appendChild(badge);
-  }
-  header.appendChild(headerLeft);
-
-  var headerRight = el('div');
-  headerRight.style.cssText = 'display:flex;align-items:center;gap:6px;';
-
-  var expandBtn = el('button');
-  expandBtn.style.cssText = 'width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--text-dim);background:none;border:none;cursor:pointer;border-radius:5px;transition:all 0.12s;' + (calMonthGridOpen ? 'transform:rotate(180deg);' : '');
-  expandBtn.textContent = '\u25BE';
-  expandBtn.title = 'Show month';
-  expandBtn.addEventListener('click', function() {
-    calMonthGridOpen = !calMonthGridOpen;
-    calMonthViewYear = sd.getFullYear();
-    calMonthViewMonth = sd.getMonth();
-    renderCalendarGrid();
-  });
-  headerRight.appendChild(expandBtn);
-
-  var addBtn = el('button');
-  addBtn.style.cssText = 'padding:5px 14px;font-size:11px;font-weight:600;background:linear-gradient(135deg,var(--accent),#c06a3a);border:none;border-radius:6px;color:#fff;cursor:pointer;transition:all 0.15s;';
-  addBtn.textContent = '+ Add';
-  addBtn.addEventListener('click', function() {
-    calEditingId = null;
-    renderCalendarAgenda();
-    var formEl = document.getElementById('calEventForm');
-    if (formEl) formEl.style.display = 'flex';
-  });
-  headerRight.appendChild(addBtn);
-  header.appendChild(headerRight);
-  grid.appendChild(header);
-
-  // --- Expandable month grid ---
-  if (calMonthGridOpen) {
-    var monthWrap = el('div');
-    monthWrap.style.cssText = 'margin-bottom:12px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;';
-
-    var monthNav = el('div');
-    monthNav.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:8px;';
-    var mpBtn = el('button');
-    mpBtn.style.cssText = 'width:24px;height:24px;background:var(--surface2);border:none;border-radius:6px;color:var(--text-dim);font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;';
-    mpBtn.textContent = '\u25C0';
-    mpBtn.addEventListener('click', function() {
-      calMonthViewMonth--;
-      if (calMonthViewMonth < 0) { calMonthViewMonth = 11; calMonthViewYear--; }
-      renderCalendarGrid();
-    });
-    var mTitle = el('div');
-    mTitle.style.cssText = 'font-size:13px;font-weight:700;min-width:110px;text-align:center;';
-    mTitle.textContent = calMonthName(calMonthViewMonth) + ' ' + calMonthViewYear;
-    var mnBtn = el('button');
-    mnBtn.style.cssText = mpBtn.style.cssText;
-    mnBtn.textContent = '\u25B6';
-    mnBtn.addEventListener('click', function() {
-      calMonthViewMonth++;
-      if (calMonthViewMonth > 11) { calMonthViewMonth = 0; calMonthViewYear++; }
-      renderCalendarGrid();
-    });
-    monthNav.appendChild(mpBtn);
-    monthNav.appendChild(mTitle);
-    monthNav.appendChild(mnBtn);
-    monthWrap.appendChild(monthNav);
-
-    // Day letter headers
-    var mhRow = el('div');
-    mhRow.style.cssText = 'display:grid;grid-template-columns:repeat(7,1fr);margin-bottom:2px;';
-    var letters = ['M','T','W','T','F','S','S'];
-    for (var li = 0; li < 7; li++) {
-      var lh = el('div');
-      lh.style.cssText = 'text-align:center;font-size:9px;font-weight:600;color:var(--text-dim);opacity:0.5;letter-spacing:0.5px;';
-      lh.textContent = letters[li];
-      mhRow.appendChild(lh);
-    }
-    monthWrap.appendChild(mhRow);
-
-    // Month cells
-    var mGrid = el('div');
-    mGrid.style.cssText = 'display:grid;grid-template-columns:repeat(7,1fr);gap:2px;';
-    var mFirst = new Date(calMonthViewYear, calMonthViewMonth, 1).getDay();
-    var mOffset = mFirst === 0 ? 6 : mFirst - 1;
-    var mDays = new Date(calMonthViewYear, calMonthViewMonth + 1, 0).getDate();
-    var mPrevDays = new Date(calMonthViewYear, calMonthViewMonth, 0).getDate();
-
-    for (var mp = mOffset - 1; mp >= 0; mp--) {
-      var mpc = el('div');
-      mpc.style.cssText = 'text-align:center;font-size:10px;padding:4px 0;color:var(--border);';
-      mpc.textContent = String(mPrevDays - mp);
-      mGrid.appendChild(mpc);
-    }
-    for (var md = 1; md <= mDays; md++) {
-      var mds = calFormatDate(calMonthViewYear, calMonthViewMonth, md);
-      var mc = el('div');
-      mc.style.cssText = 'text-align:center;font-size:10px;padding:4px 0;border-radius:5px;cursor:pointer;color:var(--text-dim);transition:all 0.1s;position:relative;';
-      if (mds === today) { mc.style.color = 'var(--accent)'; mc.style.fontWeight = '700'; }
-      if (mds === calSelectedDate) { mc.style.background = 'var(--accent)'; mc.style.color = '#fff'; mc.style.fontWeight = '700'; }
-      mc.textContent = String(md);
-
-      var mEvts = calEvents.filter(function(ev) { return ev.date === mds && !ev.done; });
-      if (mEvts.length > 0) {
-        var mDot = el('div');
-        mDot.style.cssText = 'position:absolute;bottom:1px;left:50%;transform:translateX(-50%);width:3px;height:3px;border-radius:50%;background:#60a5fa;';
-        mc.appendChild(mDot);
-      }
-
-      (function(dateStr, dateObj) {
-        mc.addEventListener('click', function() {
-          calSelectedDate = dateStr;
-          calEditingId = null;
-          // Navigate week to this date
-          var currentMonday = calGetWeekStart(0);
-          var targetMonday = new Date(dateObj);
-          var dow = targetMonday.getDay();
-          var mondayDiff = dow === 0 ? 6 : dow - 1;
-          targetMonday.setDate(targetMonday.getDate() - mondayDiff);
-          calWeekOffset = Math.round((targetMonday.getTime() - currentMonday.getTime()) / (7 * 24 * 60 * 60 * 1000));
-          calMonthGridOpen = false;
-          renderCalendar();
-        });
-      })(mds, new Date(calMonthViewYear, calMonthViewMonth, md));
-
-      mGrid.appendChild(mc);
-    }
-    var mTotal = mOffset + mDays;
-    var mRem = mTotal % 7 === 0 ? 0 : 7 - (mTotal % 7);
-    for (var mn = 1; mn <= mRem; mn++) {
-      var mnc = el('div');
-      mnc.style.cssText = 'text-align:center;font-size:10px;padding:4px 0;color:var(--border);';
-      mnc.textContent = String(mn);
-      mGrid.appendChild(mnc);
-    }
-    monthWrap.appendChild(mGrid);
-    grid.appendChild(monthWrap);
-  }
-
-  // --- Week navigation ---
-  var weekNav = el('div');
-  weekNav.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:8px;';
-
-  var wpBtn = el('button');
-  wpBtn.style.cssText = 'width:22px;height:22px;background:none;border:none;border-radius:5px;color:var(--text-dim);font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.12s;';
-  wpBtn.textContent = '\u25C0';
-  wpBtn.addEventListener('click', function() {
-    calWeekOffset--;
-    var ws = calGetWeekStart(calWeekOffset);
-    var sdd = calParseDate(calSelectedDate);
-    var dayIdx = sdd.getDay() === 0 ? 6 : sdd.getDay() - 1;
-    var nd = new Date(ws); nd.setDate(ws.getDate() + dayIdx);
-    calSelectedDate = calFormatDateObj(nd);
-    renderCalendar();
-  });
-
-  var ws = calGetWeekStart(calWeekOffset);
-  var we = new Date(ws); we.setDate(we.getDate() + 6);
-  var weekLabel = el('span');
-  weekLabel.style.cssText = 'font-size:10px;color:var(--text-dim);font-weight:600;min-width:100px;text-align:center;';
-  weekLabel.textContent = CAL_MONTH_SHORT[ws.getMonth()] + ' ' + ws.getDate() + ' \u2013 ' + CAL_MONTH_SHORT[we.getMonth()] + ' ' + we.getDate();
-
-  var wnBtn = el('button');
-  wnBtn.style.cssText = wpBtn.style.cssText;
-  wnBtn.textContent = '\u25B6';
-  wnBtn.addEventListener('click', function() {
-    calWeekOffset++;
-    var ws = calGetWeekStart(calWeekOffset);
-    var sdd = calParseDate(calSelectedDate);
-    var dayIdx = sdd.getDay() === 0 ? 6 : sdd.getDay() - 1;
-    var nd = new Date(ws); nd.setDate(ws.getDate() + dayIdx);
-    calSelectedDate = calFormatDateObj(nd);
-    renderCalendar();
-  });
-
-  weekNav.appendChild(wpBtn);
-  weekNav.appendChild(weekLabel);
-  weekNav.appendChild(wnBtn);
-
-  // Today button
-  var todayInWeek = calParseDate(today) >= ws && calParseDate(today) <= we;
-  if (!(todayInWeek && calSelectedDate === today)) {
-    var todayBtn = el('button');
-    todayBtn.style.cssText = 'font-size:9px;font-weight:700;color:var(--accent);background:none;border:1px solid rgba(212,132,90,0.3);border-radius:4px;padding:3px 8px;cursor:pointer;letter-spacing:0.3px;transition:all 0.12s;';
-    todayBtn.textContent = 'TODAY';
-    todayBtn.addEventListener('click', function() {
-      calWeekOffset = 0;
-      calSelectedDate = calToday();
-      renderCalendar();
-    });
-    weekNav.appendChild(todayBtn);
-  }
-  grid.appendChild(weekNav);
-
-  // --- Week strip ---
-  var strip = el('div');
-  strip.style.cssText = 'display:flex;gap:6px;margin-bottom:14px;';
-
-  for (var wi = 0; wi < 7; wi++) {
-    var wd = new Date(ws);
-    wd.setDate(ws.getDate() + wi);
-    var wds = calFormatDateObj(wd);
-
-    var cell = el('div');
-    cell.style.cssText = 'flex:1;text-align:center;padding:8px 0 6px;border-radius:10px;background:var(--surface);cursor:pointer;transition:all 0.12s;border:1.5px solid transparent;';
-
-    if (wds === today) {
-      cell.style.borderColor = 'rgba(212,132,90,0.5)';
-      cell.style.background = 'rgba(212,132,90,0.08)';
-    }
-    if (wds === calSelectedDate) {
-      cell.style.background = 'var(--accent)';
-      cell.style.borderColor = 'var(--accent)';
-    }
-
-    var dayName = el('div');
-    dayName.style.cssText = 'font-size:9px;font-weight:600;color:var(--text-dim);letter-spacing:0.5px;';
-    if (wds === today) { dayName.style.color = 'var(--accent)'; dayName.style.fontWeight = '700'; }
-    if (wds === calSelectedDate) { dayName.style.color = '#fff'; }
-    dayName.textContent = CAL_DAY_NAMES[wi];
-
-    var dayNum = el('div');
-    dayNum.style.cssText = 'font-size:14px;color:var(--text-dim);margin-top:2px;font-weight:500;';
-    if (wds === today) { dayNum.style.color = 'var(--accent)'; dayNum.style.fontWeight = '700'; }
-    if (wds === calSelectedDate) { dayNum.style.color = '#fff'; dayNum.style.fontWeight = '700'; }
-    dayNum.textContent = String(wd.getDate());
-
-    cell.appendChild(dayName);
-    cell.appendChild(dayNum);
-
-    // Event dots
-    var wEvts = calEvents.filter(function(ev) { return ev.date === wds && !ev.done; });
-    var dotRow = el('div');
-    dotRow.style.cssText = 'display:flex;justify-content:center;gap:2px;margin-top:3px;min-height:4px;';
-    for (var di = 0; di < Math.min(3, wEvts.length); di++) {
-      var dot = el('div');
-      var dotColor = wEvts[di].color && wEvts[di].color.charAt(0) === '#' ? wEvts[di].color : (CAL_COLOR_MAP[wEvts[di].color] || CAL_COLOR_MAP.blue);
-      dot.style.cssText = 'width:4px;height:4px;border-radius:50%;background:' + dotColor + ';';
-      if (wds === calSelectedDate) dot.style.opacity = '0.7';
-      dotRow.appendChild(dot);
-    }
-    cell.appendChild(dotRow);
-
-    (function(dateStr) {
-      cell.addEventListener('click', function() {
-        calSelectedDate = dateStr;
-        calEditingId = null;
-        renderCalendar();
-      });
-    })(wds);
-
-    strip.appendChild(cell);
-  }
-  grid.appendChild(strip);
-}
-
-function renderCalendarAgenda() {
-  var agenda = document.getElementById('calendarAgenda');
-  while (agenda.firstChild) agenda.removeChild(agenda.firstChild);
-
-  // Divider
-  var divider = el('div');
-  divider.style.cssText = 'height:1px;background:linear-gradient(90deg,transparent,var(--border),transparent);margin-bottom:14px;';
-  agenda.appendChild(divider);
-
-  // Events for selected day
-  var dayEvents = calEvents.filter(function(ev) { return ev.date === calSelectedDate; });
-  dayEvents.sort(function(a, b) {
-    if (a.done && !b.done) return 1;
-    if (!a.done && b.done) return -1;
-    if (!a.time && b.time) return -1;
-    if (a.time && !b.time) return 1;
-    return (a.time || '').localeCompare(b.time || '');
-  });
-
-  if (dayEvents.length === 0 && calEditingId === null) {
-    var noEvents = el('div');
-    noEvents.style.cssText = 'color:var(--text-dim);font-size:12px;text-align:center;padding:20px 0;opacity:0.5;';
-    noEvents.textContent = 'No events';
-    agenda.appendChild(noEvents);
-  }
-
-  var now = Date.now();
-
-  for (var i = 0; i < dayEvents.length; i++) {
-    var ev = dayEvents[i];
-    var row = el('div');
-    var evColor = ev.color && ev.color.charAt(0) === '#' ? ev.color : (CAL_COLOR_MAP[ev.color] || CAL_COLOR_MAP.blue);
-    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surface);border-radius:8px;margin-bottom:4px;border-left:3px solid ' + evColor + ';transition:all 0.12s;cursor:default;';
-
-    // Overdue check
-    var isOverdue = false;
-    if (!ev.done) {
-      var evMs = ev.time ? new Date(ev.date + 'T' + ev.time).getTime() : new Date(ev.date + 'T23:59').getTime();
-      if (evMs < now) isOverdue = true;
-    }
-    if (isOverdue) row.style.background = 'rgba(251,113,133,0.04)';
-
-    var timeEl = el('div');
-    timeEl.style.cssText = 'font-size:10px;color:var(--text-dim);width:42px;flex-shrink:0;font-family:"JetBrains Mono","Cascadia Code","Fira Code","Consolas",monospace;';
-    if (isOverdue && ev.time) {
-      timeEl.textContent = 'LATE';
-      timeEl.style.color = 'var(--red)';
-      timeEl.style.fontWeight = '700';
-    } else {
-      timeEl.textContent = ev.time || 'All day';
-    }
-    row.appendChild(timeEl);
-
-    // Google Calendar indicator
-    if (ev.isGoogleEvent) {
-      var gIcon = el('div');
-      gIcon.style.cssText = 'width:14px;height:14px;border-radius:50%;background:linear-gradient(135deg,#4285f4,#34a853);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:8px;color:#fff;font-weight:700;';
-      gIcon.textContent = 'G';
-      gIcon.title = ev.googleAccount || 'Google Calendar';
-      row.appendChild(gIcon);
-    }
-
-    var titleEl = el('div');
-    titleEl.style.cssText = 'flex:1;font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-    titleEl.textContent = ev.title;
-    if (ev.done) { titleEl.style.textDecoration = 'line-through'; titleEl.style.opacity = '0.4'; }
-    if (isOverdue) titleEl.style.color = 'var(--red)';
-    row.appendChild(titleEl);
-
-    // Meta
-    var meta = [];
-    if (ev.duration) meta.push(ev.duration >= 60 ? (ev.duration / 60) + 'h' : ev.duration + 'm');
-    if (ev.recurrence) meta.push('\u21BB');
-    if (ev.reminder != null) meta.push('\uD83D\uDD14');
-    if (ev.isGoogleEvent && ev.googleAccount) {
-      // Show short email label
-      var shortEmail = ev.googleAccount.split('@')[0];
-      if (shortEmail.length > 10) shortEmail = shortEmail.slice(0, 10) + '\u2026';
-      meta.push(shortEmail);
-    }
-    if (meta.length > 0) {
-      var metaEl = el('div');
-      metaEl.style.cssText = 'font-size:9px;color:var(--text-dim);flex-shrink:0;';
-      metaEl.textContent = meta.join(' ');
-      row.appendChild(metaEl);
-    }
-
-    if (ev.isGoogleEvent) {
-      // Google events: open in Google Calendar on click, no local edit/delete
-      if (ev.googleLink) {
-        row.style.cursor = 'pointer';
-        (function(link) {
-          row.addEventListener('click', function() {
-            window.dashboardAPI.openExternal(link);
-          });
-        })(ev.googleLink);
-      }
-    } else {
-      var editBtn = el('button', 'update-btn', 'Edit');
-      editBtn.style.cssText = 'padding:3px 10px;font-size:10px;min-width:auto;opacity:0;transition:opacity 0.12s;';
-      row.addEventListener('mouseenter', (function(btn) { return function() { btn.style.opacity = '1'; }; })(editBtn));
-      row.addEventListener('mouseleave', (function(btn) { return function() { btn.style.opacity = '0'; }; })(editBtn));
-      (function(evId) {
-        editBtn.addEventListener('click', function() {
-          calEditingId = evId;
-          renderCalendarAgenda();
-        });
-      })(ev.id);
-      row.appendChild(editBtn);
-
-      var delBtn = el('button', 'update-btn', '\u2715');
-      delBtn.style.cssText = 'padding:3px 8px;font-size:10px;min-width:auto;background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.3);color:#ef4444;opacity:0;transition:opacity 0.12s;';
-      row.addEventListener('mouseenter', (function(btn) { return function() { btn.style.opacity = '1'; }; })(delBtn));
-      row.addEventListener('mouseleave', (function(btn) { return function() { btn.style.opacity = '0'; }; })(delBtn));
-      (function(evId) {
-        delBtn.addEventListener('click', function() {
-          window.dashboardAPI.deleteCalendarEvent(evId);
-        });
-      })(ev.id);
-      row.appendChild(delBtn);
-    }
-
-    agenda.appendChild(row);
-  }
-
-  // Add/Edit form
-  var isEditing = calEditingId && calEvents.find(function(e) { return e.id === calEditingId; });
-  var editEvt = isEditing ? calEvents.find(function(e) { return e.id === calEditingId; }) : null;
-
-  var form = el('div');
-  form.id = 'calEventForm';
-  form.style.cssText = 'display:none;flex-direction:column;gap:8px;margin-top:12px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;';
-
-  var formTitle = el('div');
-  formTitle.style.cssText = 'font-size:12px;font-weight:600;color:var(--text);margin-bottom:4px;';
-  formTitle.textContent = isEditing ? 'Edit Event' : 'Add Event';
-  form.appendChild(formTitle);
-
-  var inputStyle = 'padding:8px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--text);font-family:inherit;outline:none;';
-
-  var titleInput = document.createElement('input');
-  titleInput.type = 'text';
-  titleInput.maxLength = 100;
-  titleInput.placeholder = 'Event title';
-  titleInput.style.cssText = inputStyle;
-  if (editEvt) titleInput.value = editEvt.title;
-  form.appendChild(titleInput);
-
-  var row2 = el('div');
-  row2.style.cssText = 'display:flex;gap:8px;align-items:center;';
-
-  var dateInput = document.createElement('input');
-  dateInput.type = 'date';
-  dateInput.value = (editEvt ? editEvt.date : calSelectedDate);
-  dateInput.style.cssText = inputStyle + 'flex:1;color-scheme:dark;';
-  row2.appendChild(dateInput);
-
-  // Custom time picker
-  var timePickerWrap = el('div');
-  timePickerWrap.style.cssText = 'display:flex;align-items:center;gap:4px;position:relative;';
-
-  var initTime = editEvt && editEvt.time ? editEvt.time : '';
-  var initH = initTime ? parseInt(initTime.split(':')[0], 10) : 12;
-  var initM = initTime ? parseInt(initTime.split(':')[1], 10) : 0;
-  var initPeriod = initH >= 12 ? 'PM' : 'AM';
-  var initH12 = initH === 0 ? 12 : (initH > 12 ? initH - 12 : initH);
-  var selectedHour = initH12;
-  var selectedMinute = initM;
-  var selectedPeriod = initTime ? initPeriod : 'PM';
-  var hasTime = !!initTime;
-
-  var tpBtnStyle = 'padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:13px;font-weight:600;color:var(--text);cursor:pointer;font-family:"JetBrains Mono","Cascadia Code","Fira Code","Consolas",monospace;min-width:38px;text-align:center;transition:all 0.15s;';
-  var tpBtnActiveStyle = 'background:var(--accent);border-color:var(--accent);color:#fff;';
-
-  var hourBtn = el('button');
-  hourBtn.style.cssText = tpBtnStyle;
-  hourBtn.textContent = hasTime ? String(selectedHour).padStart(2, '0') : '--';
-
-  var colonEl = el('span');
-  colonEl.style.cssText = 'font-size:14px;font-weight:700;color:var(--text-dim);';
-  colonEl.textContent = ':';
-
-  var minBtn = el('button');
-  minBtn.style.cssText = tpBtnStyle;
-  minBtn.textContent = hasTime ? String(selectedMinute).padStart(2, '0') : '--';
-
-  var periodBtn = el('button');
-  periodBtn.style.cssText = tpBtnStyle + 'font-size:10px;padding:6px 8px;';
-  periodBtn.textContent = selectedPeriod;
-
-  var clearTimeBtn = el('button');
-  clearTimeBtn.style.cssText = 'padding:4px 8px;background:none;border:1px solid var(--border);border-radius:4px;font-size:9px;color:var(--text-dim);cursor:pointer;font-family:inherit;';
-  clearTimeBtn.textContent = hasTime ? '\u2715' : 'All day';
-
-  // Dropdown for picking values
-  var dropdown = el('div');
-  dropdown.style.cssText = 'display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px;z-index:100;max-height:180px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.4);';
-
-  function showDropdown(items, onSelect) {
-    while (dropdown.firstChild) dropdown.removeChild(dropdown.firstChild);
-    dropdown.style.display = 'block';
-    var grid = el('div');
-    grid.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:3px;';
-    for (var di = 0; di < items.length; di++) {
-      var item = el('button');
-      item.style.cssText = 'padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;font-size:12px;font-weight:600;color:var(--text);cursor:pointer;font-family:"JetBrains Mono","Cascadia Code","Fira Code","Consolas",monospace;text-align:center;transition:all 0.1s;';
-      item.textContent = items[di];
-      (function(val) {
-        item.addEventListener('click', function(e) {
-          e.stopPropagation();
-          onSelect(val);
-          dropdown.style.display = 'none';
-        });
-        item.addEventListener('mouseenter', function() {
-          item.style.background = 'var(--accent)';
-          item.style.borderColor = 'var(--accent)';
-          item.style.color = '#fff';
-        });
-        item.addEventListener('mouseleave', function() {
-          item.style.background = 'var(--surface2)';
-          item.style.borderColor = 'var(--border)';
-          item.style.color = 'var(--text)';
-        });
-      })(items[di]);
-      grid.appendChild(item);
-    }
-    dropdown.appendChild(grid);
-  }
-
-  function updateTimeDisplay() {
-    hourBtn.textContent = String(selectedHour).padStart(2, '0');
-    minBtn.textContent = String(selectedMinute).padStart(2, '0');
-    periodBtn.textContent = selectedPeriod;
-    clearTimeBtn.textContent = '\u2715';
-    hasTime = true;
-  }
-
-  var hours = [];
-  for (var h = 1; h <= 12; h++) hours.push(String(h).padStart(2, '0'));
-
-  var minutes = [];
-  for (var m = 0; m < 60; m += 5) minutes.push(String(m).padStart(2, '0'));
-
-  hourBtn.addEventListener('click', function(e) {
-    e.stopPropagation();
-    showDropdown(hours, function(val) {
-      selectedHour = parseInt(val, 10);
-      updateTimeDisplay();
-    });
-  });
-
-  minBtn.addEventListener('click', function(e) {
-    e.stopPropagation();
-    showDropdown(minutes, function(val) {
-      selectedMinute = parseInt(val, 10);
-      updateTimeDisplay();
-    });
-  });
-
-  periodBtn.addEventListener('click', function(e) {
-    e.stopPropagation();
-    selectedPeriod = selectedPeriod === 'AM' ? 'PM' : 'AM';
-    periodBtn.textContent = selectedPeriod;
-    if (!hasTime) updateTimeDisplay();
-  });
-
-  clearTimeBtn.addEventListener('click', function(e) {
-    e.stopPropagation();
-    hasTime = false;
-    hourBtn.textContent = '--';
-    minBtn.textContent = '--';
-    clearTimeBtn.textContent = 'All day';
-    dropdown.style.display = 'none';
-  });
-
-  // Close dropdown on outside click
-  document.addEventListener('click', function() {
-    dropdown.style.display = 'none';
-  });
-
-  // Helper to get 24h time string
-  function getTimeValue() {
-    if (!hasTime) return null;
-    var h24 = selectedHour;
-    if (selectedPeriod === 'PM' && h24 !== 12) h24 += 12;
-    if (selectedPeriod === 'AM' && h24 === 12) h24 = 0;
-    return String(h24).padStart(2, '0') + ':' + String(selectedMinute).padStart(2, '0');
-  }
-
-  timePickerWrap.appendChild(hourBtn);
-  timePickerWrap.appendChild(colonEl);
-  timePickerWrap.appendChild(minBtn);
-  timePickerWrap.appendChild(periodBtn);
-  timePickerWrap.appendChild(clearTimeBtn);
-  timePickerWrap.appendChild(dropdown);
-  row2.appendChild(timePickerWrap);
-  form.appendChild(row2);
-
-  var row3 = el('div');
-  row3.style.cssText = 'display:flex;gap:8px;align-items:center;';
-
-  // Color picker
-  var colorLabel = el('span');
-  colorLabel.style.cssText = 'font-size:11px;color:var(--text-dim);margin-right:4px;';
-  colorLabel.textContent = 'Color:';
-  row3.appendChild(colorLabel);
-
-  var selectedColor = editEvt ? editEvt.color : 'blue';
-  var colorDots = [];
-  for (var c = 0; c < CAL_COLORS.length; c++) {
-    var cd = el('div');
-    cd.style.cssText = 'width:16px;height:16px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:border-color 0.15s;background:' + CAL_COLOR_MAP[CAL_COLORS[c]] + ';';
-    if (CAL_COLORS[c] === selectedColor) cd.style.borderColor = '#fff';
-    cd.setAttribute('data-color', CAL_COLORS[c]);
-    (function(color, dotEl) {
-      dotEl.addEventListener('click', function() {
-        selectedColor = color;
-        for (var x = 0; x < colorDots.length; x++) {
-          colorDots[x].style.borderColor = colorDots[x].getAttribute('data-color') === color ? '#fff' : 'transparent';
-        }
-      });
-    })(CAL_COLORS[c], cd);
-    colorDots.push(cd);
-    row3.appendChild(cd);
-  }
-
-  // Reminder dropdown
-  var reminderLabel = el('span');
-  reminderLabel.style.cssText = 'font-size:11px;color:var(--text-dim);margin-left:12px;';
-  reminderLabel.textContent = 'Reminder:';
-  row3.appendChild(reminderLabel);
-
-  var reminderSelect = document.createElement('select');
-  reminderSelect.style.cssText = inputStyle + 'padding:4px 8px;font-size:11px;';
-  var opts = [
-    { v: '', l: 'None' }, { v: '0', l: 'At time' }, { v: '5', l: '5 min' },
-    { v: '15', l: '15 min' }, { v: '30', l: '30 min' }, { v: '60', l: '1 hour' },
-  ];
-  for (var o = 0; o < opts.length; o++) {
-    var opt = document.createElement('option');
-    opt.value = opts[o].v;
-    opt.textContent = opts[o].l;
-    reminderSelect.appendChild(opt);
-  }
-  if (editEvt && editEvt.reminder != null) reminderSelect.value = String(editEvt.reminder);
-  row3.appendChild(reminderSelect);
-  form.appendChild(row3);
-
-  // Buttons
-  var btnRow = el('div');
-  btnRow.style.cssText = 'display:flex;gap:8px;margin-top:4px;';
-
-  var saveBtn = el('button', 'update-btn', isEditing ? 'Save' : 'Add Event');
-  saveBtn.style.cssText = 'padding:6px 16px;font-size:11px;font-weight:600;background:linear-gradient(135deg,var(--accent),#c06a3a);border:none;border-radius:6px;color:#fff;cursor:pointer;';
-  saveBtn.addEventListener('click', function() {
-    var t = titleInput.value.trim();
-    if (!t) return;
-    var data = {
-      title: t,
-      date: dateInput.value,
-      time: getTimeValue(),
-      color: selectedColor,
-      reminder: reminderSelect.value !== '' ? parseInt(reminderSelect.value, 10) : null,
-    };
-    if (isEditing) {
-      data.id = calEditingId;
-      window.dashboardAPI.updateCalendarEvent(data);
-    } else {
-      window.dashboardAPI.addCalendarEvent(data);
-    }
-    calEditingId = null;
-  });
-  btnRow.appendChild(saveBtn);
-
-  var cancelBtn = el('button', 'update-btn', 'Cancel');
-  cancelBtn.style.cssText = 'padding:6px 16px;font-size:11px;';
-  cancelBtn.addEventListener('click', function() {
-    calEditingId = null;
-    renderCalendarAgenda();
-  });
-  btnRow.appendChild(cancelBtn);
-
-  form.appendChild(btnRow);
-  agenda.appendChild(form);
-
-  // Only show form when explicitly editing
-  if (isEditing) {
-    form.style.display = 'flex';
-  }
-}
-
-// Listen for calendar updates from main
-window.dashboardAPI.onCalendarUpdate(function(events) {
+function takeCalendarEvents(events) {
   calEvents = events || [];
   renderCalendar();
-});
-
-// Load events on init
-window.dashboardAPI.getCalendarEvents().then(function(events) {
-  calEvents = events || [];
-});
+  renderOverviewToday();
+}
+window.dashboardAPI.onCalendarUpdate(takeCalendarEvents);
+window.dashboardAPI.getCalendarEvents().then(takeCalendarEvents);
 
 // --- Analytics tab ---
 function renderAnalytics() {
@@ -1487,7 +1098,7 @@ function renderAnalytics() {
   while (container.firstChild) container.removeChild(container.firstChild);
 
   if (!historyData || historyData.length < 2) {
-    container.appendChild(el('div', 'setting-value', 'Not enough data yet. Usage history builds over time.'));
+    container.appendChild(el('p', 'page-note', 'Not enough data yet. Usage history builds over time.'));
     return;
   }
 
@@ -1498,24 +1109,33 @@ function renderAnalytics() {
   var last7 = historyData.filter(function(p) { return p.ts > day7; });
   var last30 = historyData.filter(function(p) { return p.ts > day30; });
 
+  // The stats follow the 5-hour session while the plan reports one; a plan
+  // without it (Ultra: its points carry session null) uses the weekly limit.
+  var hasNum = function(p, key) { return typeof p[key] === 'number'; };
+  var statKey = !planLacksMeter('session') && last7.some(function(p) { return hasNum(p, 'session'); })
+    ? 'session' : 'weekAll';
+  var statName = statKey === 'session' ? 'Session' : 'Weekly';
+
   // Peak usage
-  var peakSession = 0, peakWeekAll = 0;
+  var peakSession = 0;
   for (var i = 0; i < historyData.length; i++) {
-    if (historyData[i].session > peakSession) peakSession = historyData[i].session;
-    if (historyData[i].weekAll > peakWeekAll) peakWeekAll = historyData[i].weekAll;
+    if (hasNum(historyData[i], statKey) && historyData[i][statKey] > peakSession) {
+      peakSession = historyData[i][statKey];
+    }
   }
 
-  // Average session usage
+  // Average usage over the points that carry the series
   var avgSession7 = 0;
-  if (last7.length > 0) {
-    for (var j = 0; j < last7.length; j++) avgSession7 += last7[j].session;
-    avgSession7 = Math.round(avgSession7 / last7.length);
+  var last7Stat = last7.filter(function(p) { return hasNum(p, statKey); });
+  if (last7Stat.length > 0) {
+    for (var j = 0; j < last7Stat.length; j++) avgSession7 += last7Stat[j][statKey];
+    avgSession7 = Math.round(avgSession7 / last7Stat.length);
   }
 
-  // Days hit limit (session >= 95%)
+  // Days hit limit (>= 95%)
   var limitDays = new Set();
   for (var k = 0; k < historyData.length; k++) {
-    if (historyData[k].session >= 95) {
+    if (hasNum(historyData[k], statKey) && historyData[k][statKey] >= 95) {
       limitDays.add(new Date(historyData[k].ts).toDateString());
     }
   }
@@ -1524,8 +1144,9 @@ function renderAnalytics() {
   var hourBuckets = new Array(24).fill(0);
   var hourCounts = new Array(24).fill(0);
   for (var h = 0; h < historyData.length; h++) {
+    if (!hasNum(historyData[h], statKey)) continue;
     var hr = new Date(historyData[h].ts).getHours();
-    hourBuckets[hr] += historyData[h].session;
+    hourBuckets[hr] += historyData[h][statKey];
     hourCounts[hr]++;
   }
   var peakHour = 0, peakHourAvg = 0;
@@ -1534,470 +1155,342 @@ function renderAnalytics() {
     if (avg > peakHourAvg) { peakHourAvg = avg; peakHour = hh; }
   }
 
-  // Stats cards
-  var grid = el('div');
-  grid.style.cssText = 'display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px;';
-
-  function statCard(label, value, sub) {
-    var card = el('div');
-    card.style.cssText = 'padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;';
-    var valEl = el('div');
-    valEl.style.cssText = 'font-size:24px;font-weight:700;color:var(--accent);font-family:"JetBrains Mono",monospace;';
-    valEl.textContent = value;
-    card.appendChild(valEl);
-    var labelEl = el('div');
-    labelEl.style.cssText = 'font-size:11px;color:var(--text-dim);margin-top:4px;';
-    labelEl.textContent = label;
-    card.appendChild(labelEl);
-    if (sub) {
-      var subEl = el('div');
-      subEl.style.cssText = 'font-size:9px;color:var(--text-dim);margin-top:2px;';
-      subEl.textContent = sub;
-      card.appendChild(subEl);
-    }
-    return card;
+  var grid = el('div', 'stat-grid card');
+  function stat(value, label, sub) {
+    var box = el('div', 'stat');
+    box.appendChild(el('b', null, String(value)));
+    box.appendChild(el('span', null, label));
+    box.appendChild(el('small', null, sub));
+    grid.appendChild(box);
   }
-
-  grid.appendChild(statCard('Avg Session (7d)', avgSession7 + '%', 'Average session utilization'));
-  grid.appendChild(statCard('Peak Session', peakSession + '%', 'All-time highest'));
-  grid.appendChild(statCard('Peak Hour', peakHour + ':00', Math.round(peakHourAvg) + '% avg session at this hour'));
-  grid.appendChild(statCard('Limit Days', limitDays.size, 'Days session hit \u226595%'));
-  grid.appendChild(statCard('Data Points', historyData.length, last30.length + ' in last 30 days'));
-  grid.appendChild(statCard('Streak', (typeof streakData !== 'undefined' && streakData.current) || 0, 'Consecutive task-complete days'));
-
+  var lower = statName.toLowerCase();
+  stat(avgSession7 + '%', 'Average, ' + lower, 'Last 7 days');
+  stat(peakSession + '%', 'Highest, ' + lower, 'All the history here');
+  stat(peakHour + ':00', 'Busiest hour', Math.round(peakHourAvg) + '% on average at this hour');
+  stat(limitDays.size, 'Days at the limit', 'Days ' + lower + ' reached 95%');
+  stat(historyData.length, 'Readings', last30.length + ' in the last 30 days');
+  stat(streakData.current || 0, 'Task streak', 'Days in a row with a task done');
   container.appendChild(grid);
 
-  // Hourly usage heatmap
-  var heatTitle = el('div');
-  heatTitle.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;';
-  heatTitle.textContent = 'Usage by Hour';
-  container.appendChild(heatTitle);
-
-  var heatGrid = el('div');
-  heatGrid.style.cssText = 'display:flex;gap:2px;height:40px;align-items:flex-end;';
+  var hours = el('div', 'hours card');
+  hours.appendChild(el('h3', null, 'Usage by hour'));
+  var bars = el('div', 'hour-bars');
   var maxAvg = 1;
   for (var ha = 0; ha < 24; ha++) {
     var a = hourCounts[ha] > 0 ? hourBuckets[ha] / hourCounts[ha] : 0;
     if (a > maxAvg) maxAvg = a;
   }
   for (var hb = 0; hb < 24; hb++) {
-    var bar = el('div');
-    var pct = hourCounts[hb] > 0 ? (hourBuckets[hb] / hourCounts[hb]) / maxAvg * 100 : 0;
-    var color = pct > 75 ? '#f87171' : (pct > 50 ? '#fb923c' : (pct > 25 ? '#facc15' : '#4ade80'));
-    bar.style.cssText = 'flex:1;border-radius:2px 2px 0 0;min-height:2px;background:' + color + ';height:' + Math.max(2, pct) + '%;';
-    bar.title = hb + ':00 - ' + Math.round(hourCounts[hb] > 0 ? hourBuckets[hb] / hourCounts[hb] : 0) + '% avg';
-    heatGrid.appendChild(bar);
+    var average = hourCounts[hb] > 0 ? hourBuckets[hb] / hourCounts[hb] : 0;
+    var pct = average / maxAvg * 100;
+    // Colour says how high that hour really runs. Height only compares the hours with each other.
+    var bar = el('i', average >= 85 ? 'hot' : (average >= 60 ? 'warm' : null));
+    bar.style.height = Math.max(4, pct) + '%';
+    bar.title = hb + ':00, ' + Math.round(average) + '% on average';
+    bars.appendChild(bar);
   }
-  container.appendChild(heatGrid);
-
-  var hourLabels = el('div');
-  hourLabels.style.cssText = 'display:flex;gap:2px;font-size:7px;color:var(--text-dim);margin-top:2px;';
-  for (var hl = 0; hl < 24; hl += 3) {
-    var lbl = el('span');
-    lbl.style.cssText = 'flex:3;text-align:center;';
-    lbl.textContent = hl + 'h';
-    hourLabels.appendChild(lbl);
-  }
-  container.appendChild(hourLabels);
+  hours.appendChild(bars);
+  var labels = el('div', 'hour-labels');
+  for (var hl = 0; hl < 24; hl += 3) labels.appendChild(el('span', null, hl + ':00'));
+  hours.appendChild(labels);
+  container.appendChild(hours);
 }
 
-// Render analytics on tab click
 var streakData = {};
+window.dashboardAPI.getStreak().then(function(data) { streakData = data || {}; });
 
-function renderSettings() {
-  var container = document.getElementById('settingRows');
-  while (container.firstChild) container.removeChild(container.firstChild);
+var THEME_CHOICES = [
+  ['brutal', 'Brutal', '#f0ede4', '#ff90e8'],
+  ['karchx', 'Karchx', '#ece4d6', '#3b2a3a'],
+  ['light', 'Light', '#fafafc', '#b45e35'],
+  ['dark', 'Dark', '#0c0c12', '#d4845a'],
+  ['nord', 'Nord', '#2e3440', '#88c0d0'],
+  ['dracula', 'Dracula', '#282a36', '#bd93f9'],
+];
 
-  // Theme setting
-  var themeRow = el('div', 'setting-row');
-  var themeInfo = el('div', 'setting-info');
-  themeInfo.appendChild(el('div', 'setting-label', 'Theme'));
-  themeInfo.appendChild(el('div', 'setting-value', 'Choose your visual theme'));
-  themeRow.appendChild(themeInfo);
-  var themeSelect = document.createElement('select');
-  themeSelect.style.cssText = 'padding:6px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--text);font-family:inherit;outline:none;';
-  var themeOpts = [['brutal', 'Brutal'], ['karchx', 'Karchx'], ['dark', 'Dark'], ['light', 'Light'], ['nord', 'Nord'], ['dracula', 'Dracula']];
-  for (var ti = 0; ti < themeOpts.length; ti++) {
-    var to = document.createElement('option');
-    to.value = themeOpts[ti][0];
-    to.textContent = themeOpts[ti][1];
-    themeSelect.appendChild(to);
-  }
-  window.dashboardAPI.getTheme().then(function(name) { themeSelect.value = name || 'dark'; });
-  themeSelect.addEventListener('change', function() { window.dashboardAPI.setTheme(themeSelect.value); });
-  themeRow.appendChild(themeSelect);
-  container.appendChild(themeRow);
+function setRow(title, description, control) {
+  var row = el('div', 'set-row');
+  var info = el('div', 'set-info');
+  info.appendChild(el('div', 'set-title', title));
+  var desc = el('div', 'set-desc', description || '');
+  if (description !== null) info.appendChild(desc);
+  row.appendChild(info);
+  if (control) row.appendChild(control);
+  row.desc = desc;
+  return row;
+}
 
-  // Add theme listener for dashboard itself
-  window.dashboardAPI.onThemeUpdate(function(theme) {
-    var root = document.documentElement;
-    root.style.setProperty('--bg', theme.bg);
-    root.style.setProperty('--surface', theme.surface);
-    root.style.setProperty('--surface2', theme.surface2);
-    root.style.setProperty('--border', theme.border);
-    root.style.setProperty('--text', theme.text);
-    root.style.setProperty('--text-dim', theme.textDim);
-    root.style.setProperty('--accent', theme.accent);
-    if (theme.green) root.style.setProperty('--green', theme.green);
-    if (theme.red) root.style.setProperty('--red', theme.red);
-    if (theme.yellow) root.style.setProperty('--yellow', theme.yellow);
-    if (theme.barBg) root.style.setProperty('--bar-bg', theme.barBg);
+function setGroup(title, rows) {
+  var group = el('section', 'set-group');
+  group.appendChild(el('h2', null, title));
+  var card = el('div', 'set-card card');
+  rows.forEach(function(row) { card.appendChild(row); });
+  group.appendChild(card);
+  return group;
+}
+
+function setDesc(node, text, tone) {
+  node.textContent = text;
+  node.className = 'set-desc' + (tone ? ' ' + tone : '');
+}
+
+function themeRow() {
+  var picker = el('div', 'theme-picker');
+  picker.setAttribute('role', 'group');
+  picker.setAttribute('aria-label', 'Theme');
+  var chips = [];
+  THEME_CHOICES.forEach(function(choice) {
+    var chip = el('button', 'theme-chip');
+    chip.type = 'button';
+    chip.setAttribute('data-theme-name', choice[0]);
+    var swatch = el('i');
+    swatch.style.setProperty('--a', choice[2]);
+    swatch.style.setProperty('--b', choice[3]);
+    chip.appendChild(swatch);
+    chip.appendChild(document.createTextNode(choice[1]));
+    chip.addEventListener('click', function() {
+      window.dashboardAPI.setTheme(choice[0]);
+      mark(choice[0]);
+    });
+    chips.push(chip);
+    picker.appendChild(chip);
   });
+  function mark(name) {
+    chips.forEach(function(chip) {
+      chip.setAttribute('aria-pressed', chip.getAttribute('data-theme-name') === name ? 'true' : 'false');
+    });
+  }
+  window.dashboardAPI.getTheme().then(function(name) { mark(name || 'brutal'); });
+  return setRow('Theme', null, picker);
+}
 
-  // Hotkey setting
-  var hotkeyRow = el('div', 'setting-row');
-  var hotkeyInfo = el('div', 'setting-info');
-  hotkeyInfo.appendChild(el('div', 'setting-label', 'Toggle widget'));
-  hotkeyRow.appendChild(hotkeyInfo);
+function hotkeyRow() {
+  var box = el('div', 'set-actions');
+  var cap = el('span', 'key-cap', currentDisplayHotkey);
+  var change = el('button', 'btn small', 'Change');
+  change.type = 'button';
+  box.appendChild(cap);
+  box.appendChild(change);
+  var row = setRow('Show and hide the widget', 'A shortcut that works from anywhere.', box);
+  var listener = null;
 
-  var hotkeyContainer = el('div', 'hotkey-container');
-  var hotkeyDisplay = el('div', 'hotkey-display', currentDisplayHotkey);
-  var changeBtn = el('button', 'hotkey-change-btn', 'Change');
-  var statusEl = el('div', 'hotkey-status');
+  function stopRecording() {
+    isRecordingHotkey = false;
+    cap.classList.remove('recording');
+    change.textContent = 'Change';
+    if (listener) document.removeEventListener('keydown', listener, true);
+    listener = null;
+  }
 
-  var keydownHandler = null;
-
-  changeBtn.addEventListener('click', function() {
+  change.addEventListener('click', function() {
     if (isRecordingHotkey) {
-      // Cancel
-      isRecordingHotkey = false;
-      hotkeyDisplay.classList.remove('recording');
-      hotkeyDisplay.textContent = currentDisplayHotkey;
-      changeBtn.textContent = 'Change';
-      if (keydownHandler) {
-        document.removeEventListener('keydown', keydownHandler, true);
-        keydownHandler = null;
-      }
+      stopRecording();
+      cap.textContent = currentDisplayHotkey;
       return;
     }
-
     isRecordingHotkey = true;
-    hotkeyDisplay.classList.add('recording');
-    hotkeyDisplay.textContent = 'Press shortcut...';
-    changeBtn.textContent = 'Cancel';
-    statusEl.textContent = '';
-    statusEl.className = 'hotkey-status';
-
-    keydownHandler = function(e) {
+    cap.classList.add('recording');
+    cap.textContent = 'Press keys...';
+    change.textContent = 'Cancel';
+    setDesc(row.desc, 'Press the new shortcut, with Ctrl, Alt or Shift. Esc cancels.');
+    listener = function(e) {
       e.preventDefault();
       e.stopPropagation();
-
       if (e.key === 'Escape') {
-        // Cancel recording
-        isRecordingHotkey = false;
-        hotkeyDisplay.classList.remove('recording');
-        hotkeyDisplay.textContent = currentDisplayHotkey;
-        changeBtn.textContent = 'Change';
-        document.removeEventListener('keydown', keydownHandler, true);
-        keydownHandler = null;
+        stopRecording();
+        cap.textContent = currentDisplayHotkey;
+        setDesc(row.desc, 'A shortcut that works from anywhere.');
         return;
       }
-
       var accelerator = formatElectronAccelerator(e);
-      if (!accelerator) return; // modifier-only press, wait for full combo
-
-      isRecordingHotkey = false;
-      hotkeyDisplay.classList.remove('recording');
-      hotkeyDisplay.textContent = accelerator;
-      changeBtn.textContent = 'Change';
-      document.removeEventListener('keydown', keydownHandler, true);
-      keydownHandler = null;
-
-      // Send to main process
-      statusEl.textContent = 'Registering...';
-      statusEl.className = 'hotkey-status';
-
+      if (!accelerator) return; // modifier-only press, wait for the whole combination
+      stopRecording();
+      cap.textContent = accelerator;
+      setDesc(row.desc, 'Saving...');
       window.dashboardAPI.changeHotkey(accelerator).then(function(result) {
         if (result.success) {
           currentDisplayHotkey = accelerator;
-          statusEl.textContent = 'Hotkey updated!';
-          statusEl.className = 'hotkey-status success';
+          setDesc(row.desc, 'Shortcut changed.', 'ok');
         } else {
-          hotkeyDisplay.textContent = currentDisplayHotkey;
-          statusEl.textContent = result.error || 'Failed to register';
-          statusEl.className = 'hotkey-status error';
+          cap.textContent = currentDisplayHotkey;
+          setDesc(row.desc, result.error || 'That shortcut could not be set.', 'bad');
         }
-        setTimeout(function() {
-          statusEl.textContent = '';
-          statusEl.className = 'hotkey-status';
-        }, 3000);
       });
     };
-
-    document.addEventListener('keydown', keydownHandler, true);
+    document.addEventListener('keydown', listener, true);
   });
+  return row;
+}
 
-  hotkeyContainer.appendChild(hotkeyDisplay);
-  hotkeyContainer.appendChild(changeBtn);
-  hotkeyRow.appendChild(hotkeyContainer);
-  hotkeyRow.appendChild(statusEl);
-  container.appendChild(hotkeyRow);
+function autostartRow() {
+  var toggle = el('label', 'toggle');
+  var input = document.createElement('input');
+  input.type = 'checkbox';
+  input.setAttribute('aria-label', 'Start on login');
+  toggle.appendChild(input);
+  toggle.appendChild(el('span'));
+  window.dashboardAPI.getAutostart().then(function(result) { input.checked = result.enabled; });
+  input.addEventListener('change', function() { window.dashboardAPI.setAutostart(input.checked); });
+  return setRow('Start on login', 'Open the widget when you log in.', toggle);
+}
 
-  // Auto-start setting
-  var autoRow = el('div', 'setting-row');
-  var autoInfo = el('div', 'setting-info');
-  autoInfo.appendChild(el('div', 'setting-label', 'Start on login'));
-  autoInfo.appendChild(el('div', 'setting-value', 'Launch automatically when you log in'));
-  autoRow.appendChild(autoInfo);
-  var toggleWrap = el('label', 'toggle');
-  var toggleInput = document.createElement('input');
-  toggleInput.type = 'checkbox';
-  toggleInput.className = 'toggle-input';
-  var toggleSlider = el('span', 'toggle-slider');
-  toggleWrap.appendChild(toggleInput);
-  toggleWrap.appendChild(toggleSlider);
-  autoRow.appendChild(toggleWrap);
-  container.appendChild(autoRow);
-  // Load current state
-  window.dashboardAPI.getAutostart().then(function(result) {
-    toggleInput.checked = result.enabled;
-  });
-  toggleInput.addEventListener('change', function() {
-    window.dashboardAPI.setAutostart(toggleInput.checked);
-  });
+// One update, whichever button started it: the Settings row and the rail's button both show it.
+var updateRowButton = null;
+var updateRunning = false;
 
-  // Check for updates
-  var updateRow = el('div', 'setting-row');
-  var updateInfo = el('div', 'setting-info');
-  updateInfo.appendChild(el('div', 'setting-label', 'Updates'));
-  var updateMeta = el('div', 'setting-value', 'Current version: v' + currentAppVersion);
-  updateInfo.appendChild(updateMeta);
-  updateRow.appendChild(updateInfo);
-  var updateBtn = el('button', 'update-btn', 'Check for Updates');
-  var updateCheckResult = null;
-  updateBtn.addEventListener('click', function() {
-    // If we already found an update, trigger download
-    if (updateCheckResult && updateCheckResult.hasUpdate) {
-      if (!updateCheckResult.downloadUrl) {
-        updateBtn.textContent = 'No installer found';
-        setTimeout(function() {
-          updateBtn.textContent = 'Update to v' + updateCheckResult.latestVersion;
-        }, 3000);
+function setUpdateButtons(text, disabled) {
+  var rail = document.getElementById('updateNowBtn');
+  rail.textContent = text;
+  rail.disabled = disabled;
+  if (updateRowButton) {
+    updateRowButton.textContent = text;
+    updateRowButton.disabled = disabled;
+  }
+}
+
+function showUpdateFound(result) {
+  pendingUpdate = result;
+  setUpdateButtons((result.downloadUrl ? 'Update to v' : 'Get v') + result.latestVersion, false);
+  document.getElementById('updateNowBtn').classList.add('visible');
+  document.getElementById('sidebarVersion').textContent = 'v' + currentAppVersion + ' to v' + result.latestVersion;
+  var banner = document.getElementById('updateBanner');
+  UI.clear(banner);
+  banner.appendChild(el('span', null, 'Version ' + result.latestVersion + (result.downloadUrl ? ' is ready to install.' : ' is out.')));
+  var install = el('button', 'btn small', result.downloadUrl ? 'Update' : 'See the release');
+  install.type = 'button';
+  install.addEventListener('click', startUpdate);
+  banner.appendChild(install);
+  banner.classList.add('visible');
+}
+
+function startUpdate() {
+  if (!pendingUpdate || updateRunning) return;
+  // This system has no installer in the release, so the release page is the way to it.
+  if (!pendingUpdate.downloadUrl) {
+    if (pendingUpdate.url) window.dashboardAPI.openExternal(pendingUpdate.url);
+    return;
+  }
+  updateRunning = true;
+  setUpdateButtons('Downloading...', true);
+  document.getElementById('updateProgress').classList.add('visible');
+  var failed = function() {
+    updateRunning = false;
+    document.getElementById('updateProgress').classList.remove('visible');
+    setUpdateButtons('Failed. Try again', false);
+  };
+  window.dashboardAPI.installUpdate().then(function(result) {
+    if (result && result.success) setUpdateButtons('Installing...', true);
+    else failed();
+  }, failed);
+}
+
+function updateRow() {
+  var button = el('button', 'btn small', 'Check for updates');
+  button.type = 'button';
+  updateRowButton = button;
+  var row = setRow('Updates', 'This is version ' + currentAppVersion + '.', button);
+  button.addEventListener('click', function() {
+    if (pendingUpdate) {
+      startUpdate();
+      return;
+    }
+    button.textContent = 'Checking...';
+    button.disabled = true;
+    window.dashboardAPI.checkForUpdates().then(function(result) {
+      if (result && result.hasUpdate) {
+        showUpdateFound(result);
         return;
       }
-      updateBtn.textContent = 'Downloading...';
-      updateBtn.disabled = true;
-      updateBtn.classList.add('downloading');
-      document.getElementById('updateProgress').classList.add('visible');
-      window.dashboardAPI.installUpdate().then(function(result) {
-        if (result.success) {
-          updateBtn.textContent = 'Installing...';
-          updateBtn.classList.remove('downloading');
-        } else {
-          updateBtn.textContent = 'Failed — retry';
-          updateBtn.classList.remove('downloading');
-          document.getElementById('updateProgress').classList.remove('visible');
-          setTimeout(function() {
-            updateBtn.textContent = 'Update to v' + updateCheckResult.latestVersion;
-            updateBtn.disabled = false;
-          }, 3000);
-        }
-      }).catch(function() {
-        updateBtn.textContent = 'Failed — retry';
-        updateBtn.classList.remove('downloading');
-        document.getElementById('updateProgress').classList.remove('visible');
-        updateBtn.disabled = false;
-      });
-      return;
-    }
-
-    // First click — check for updates
-    updateBtn.textContent = 'Checking...';
-    updateBtn.disabled = true;
-    updateBtn.style.background = '';
-    updateBtn.style.borderColor = '';
-    window.dashboardAPI.checkForUpdates().then(function(result) {
-      var banner = document.getElementById('updateBanner');
-      if (result && result.hasUpdate) {
-        updateCheckResult = result;
-        while (banner.firstChild) banner.removeChild(banner.firstChild);
-        var icon = document.createElement('div');
-        icon.className = 'update-banner-icon';
-        icon.textContent = '\u2B06';
-        banner.appendChild(icon);
-        var txt = document.createElement('div');
-        txt.className = 'update-banner-text';
-        txt.appendChild(document.createTextNode('v' + result.latestVersion + ' available'));
-        var sub = document.createElement('span');
-        sub.textContent = 'New version ready to install';
-        txt.appendChild(sub);
-        banner.appendChild(txt);
-        banner.classList.add('visible');
-        updateBtn.textContent = 'Update to v' + result.latestVersion;
-        updateBtn.disabled = false;
-      } else {
-        updateBtn.textContent = '\u2713 Up to date';
-        updateBtn.style.background = 'rgba(74, 222, 128, 0.12)';
-        updateBtn.style.borderColor = 'rgba(74, 222, 128, 0.25)';
-        updateBtn.style.color = '#4ade80';
-        updateBtn.disabled = true;
-        setTimeout(function() {
-          updateBtn.textContent = 'Check for Updates';
-          updateBtn.style.background = '';
-          updateBtn.style.borderColor = '';
-          updateBtn.style.color = '';
-          updateBtn.disabled = false;
-        }, 5000);
-      }
-    }).catch(function() {
-      updateBtn.textContent = 'Check failed';
-      setTimeout(function() {
-        updateBtn.textContent = 'Check for Updates';
-        updateBtn.disabled = false;
-      }, 3000);
+      setDesc(row.desc, 'Version ' + currentAppVersion + ' is the newest.', 'ok');
+      button.textContent = 'Check for updates';
+      button.disabled = false;
+    }, function() {
+      setDesc(row.desc, 'The check failed. Are you online?', 'bad');
+      button.textContent = 'Check for updates';
+      button.disabled = false;
     });
   });
-  updateRow.appendChild(updateBtn);
-  container.appendChild(updateRow);
+  return row;
+}
 
-  // --- Main Account ---
-  var mainAcctRow = el('div', 'setting-row');
-  mainAcctRow.style.flexDirection = 'column';
-  mainAcctRow.style.alignItems = 'stretch';
+// With several accounts each has its own login folder, so the rows say where each stands.
+// With one, the sign-in buttons act on it directly.
+var settingsAccountsBox = null;
+var settingsAccountsKey = null;
 
-  var mainAcctHeader = el('div', 'setting-info');
-  mainAcctHeader.appendChild(el('div', 'setting-label', 'Main Account'));
-  mainAcctHeader.appendChild(el('div', 'setting-value', 'Your Claude subscription'));
-  mainAcctRow.appendChild(mainAcctHeader);
-
-  var mainAcctBtnRow = el('div');
-  mainAcctBtnRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:12px;';
-
-  var mainSignInBtn = el('button', 'update-btn', 'Re-Sign In');
-  var mainSignOutBtn = el('button', 'update-btn', 'Sign Out');
-  mainSignOutBtn.style.cssText = 'background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.3);color:#ef4444;';
-
-  var mainAcctStatus = el('div');
-  mainAcctStatus.style.cssText = 'font-size:11px;flex:1;color:var(--text-dim);';
-
-  mainAcctBtnRow.appendChild(mainSignInBtn);
-  mainAcctBtnRow.appendChild(mainSignOutBtn);
-  mainAcctBtnRow.appendChild(mainAcctStatus);
-  mainAcctRow.appendChild(mainAcctBtnRow);
-  container.appendChild(mainAcctRow);
-
-  window.dashboardAPI.checkAuthStatus().then(function(result) {
-    if (result && result.authenticated) {
-      mainAcctStatus.textContent = 'Connected';
-      mainAcctStatus.style.color = '#4ade80';
-    } else {
-      mainAcctStatus.textContent = 'Not signed in';
-      mainAcctStatus.style.color = '#ef4444';
-      mainSignInBtn.textContent = 'Sign In';
-    }
-  });
-
-  mainSignInBtn.addEventListener('click', function() {
+function singleAccountRow() {
+  var box = el('div', 'set-actions');
+  var signIn = el('button', 'btn small', 'Sign in');
+  var signOut = el('button', 'btn small danger', 'Sign out');
+  signIn.type = 'button';
+  signOut.type = 'button';
+  box.appendChild(signIn);
+  box.appendChild(signOut);
+  var row = setRow('Account', 'Checking...', box);
+  function show(authenticated) {
+    setDesc(row.desc, authenticated ? 'Signed in.' : 'Not signed in.', authenticated ? 'ok' : 'bad');
+    signIn.textContent = authenticated ? 'Sign in again' : 'Sign in';
+    signIn.disabled = false;
+    signOut.disabled = !authenticated;
+  }
+  window.dashboardAPI.checkAuthStatus().then(function(result) { show(result && result.authenticated); });
+  signIn.addEventListener('click', function() {
     window.dashboardAPI.launchAuthLogin().then(function(result) {
       if (result && result.success) {
-        mainSignInBtn.disabled = true;
-        mainAcctStatus.textContent = 'Sign in with Claude in the browser\u2026';
-        mainAcctStatus.style.color = 'var(--text-dim)';
+        signIn.disabled = true;
+        setDesc(row.desc, 'Finish signing in in your browser.');
       } else {
-        mainAcctStatus.textContent = (result && result.error) || 'Failed to launch sign-in';
-        mainAcctStatus.style.color = '#ef4444';
+        setDesc(row.desc, (result && result.error) || 'Sign-in could not start.', 'bad');
       }
     });
   });
-
-  window.dashboardAPI.onAuthStatusChanged(function(data) {
-    if (data && data.authenticated) {
-      mainSignInBtn.disabled = false;
-      mainSignInBtn.textContent = 'Re-Sign In';
-      mainAcctStatus.textContent = 'Connected';
-      mainAcctStatus.style.color = '#4ade80';
-    } else {
-      mainSignInBtn.textContent = 'Sign In';
-      mainAcctStatus.textContent = 'Not signed in';
-      mainAcctStatus.style.color = '#ef4444';
-    }
+  signOut.addEventListener('click', function() {
+    signOut.disabled = true;
+    setDesc(row.desc, 'Signing out...');
+    window.dashboardAPI.signOut().then(function() { show(false); });
   });
+  row.showAuth = show;
+  return row;
+}
 
-  mainSignOutBtn.addEventListener('click', function() {
-    mainSignOutBtn.disabled = true;
-    mainAcctStatus.textContent = 'Signing out\u2026';
-    mainAcctStatus.style.color = 'var(--text-dim)';
-    window.dashboardAPI.signOut().then(function() {
-      mainSignOutBtn.disabled = false;
-      mainSignInBtn.textContent = 'Sign In';
-      mainAcctStatus.textContent = 'Signed out';
-      mainAcctStatus.style.color = 'var(--text-dim)';
-    });
-  });
+var singleAccount = null;
+window.dashboardAPI.onAuthStatusChanged(function(data) {
+  if (singleAccount) singleAccount.showAuth(Boolean(data && data.authenticated));
+});
 
-  // --- Google Calendar ---
-  var gcalSection = el('div', 'setting-row');
-  gcalSection.style.flexDirection = 'column';
-  gcalSection.style.alignItems = 'stretch';
-
-  var gcalHeader = el('div', 'setting-info');
-  gcalHeader.appendChild(el('div', 'setting-label', 'Google Calendar'));
-  gcalHeader.appendChild(el('div', 'setting-value', 'Sync events from your Google accounts'));
-  gcalSection.appendChild(gcalHeader);
-
-  var gcalAccountsList = el('div');
-  gcalAccountsList.style.cssText = 'margin-top:10px;';
-
-  var gcalBtnRow = el('div');
-  gcalBtnRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:12px;';
-
-  var gcalAddBtn = el('button', 'update-btn', '+ Add Google Account');
-  gcalAddBtn.style.cssText += 'background:linear-gradient(135deg,#4285f4,#34a853);border:none;color:#fff;';
-  var gcalSyncBtn = el('button', 'update-btn', 'Sync Now');
-  var gcalStatus = el('div');
-  gcalStatus.style.cssText = 'font-size:11px;flex:1;color:var(--text-dim);';
-
-  gcalBtnRow.appendChild(gcalAddBtn);
-  gcalBtnRow.appendChild(gcalSyncBtn);
-  gcalBtnRow.appendChild(gcalStatus);
-  gcalSection.appendChild(gcalAccountsList);
-  gcalSection.appendChild(gcalBtnRow);
-  container.appendChild(gcalSection);
-
-  function renderGcalAccounts(accounts, lastSync) {
-    while (gcalAccountsList.firstChild) gcalAccountsList.removeChild(gcalAccountsList.firstChild);
-    if (!accounts || accounts.length === 0) {
-      var empty = el('div');
-      empty.style.cssText = 'font-size:11px;color:var(--text-dim);padding:4px 0;';
-      empty.textContent = 'No Google accounts connected';
-      gcalAccountsList.appendChild(empty);
-      return;
-    }
-    for (var i = 0; i < accounts.length; i++) {
-      (function(acct) {
-        var row = el('div');
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;margin-bottom:4px;background:var(--surface);border:1px solid var(--border);border-radius:6px;';
-
-        var icon = el('span');
-        icon.textContent = '\uD83D\uDCC5';
-        icon.style.cssText = 'font-size:14px;';
-        row.appendChild(icon);
-
-        var emailEl = el('span');
-        emailEl.textContent = acct.email;
-        emailEl.style.cssText = 'flex:1;font-size:12px;color:var(--text);';
-        row.appendChild(emailEl);
-
-        var removeBtn = el('button');
-        removeBtn.textContent = 'Remove';
-        removeBtn.style.cssText = 'padding:3px 10px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.25);border-radius:4px;font-size:10px;color:#ef4444;cursor:pointer;font-family:inherit;';
-        removeBtn.addEventListener('click', function() {
-          removeBtn.disabled = true;
-          removeBtn.textContent = 'Removing\u2026';
-          window.dashboardAPI.gcalRemoveAccount(acct.email).then(function() {
-            window.dashboardAPI.gcalGetStatus().then(function(s) {
-              renderGcalAccounts(s.accounts, s.lastSync);
-            });
-          });
-        });
-        row.appendChild(removeBtn);
-        gcalAccountsList.appendChild(row);
-      })(accounts[i]);
-    }
-    if (lastSync) {
-      gcalStatus.textContent = 'Last sync: ' + formatRelativeTime(lastSync);
-    }
+function renderSettingsAccounts() {
+  var box = settingsAccountsBox;
+  if (!box) return;
+  var several = accountsData.length > 1;
+  var key = several ? JSON.stringify(accountsData.map(function(acc) { return [acc.id, acc.name, acc.needsLogin, acc.login && acc.login.text]; })) : 'one';
+  if (key === settingsAccountsKey) return;
+  settingsAccountsKey = key;
+  UI.clear(box);
+  singleAccount = null;
+  if (!several) {
+    singleAccount = singleAccountRow();
+    box.appendChild(singleAccount);
+    return;
   }
+  accountsData.forEach(function(acc) {
+    var login = acc.login || {};
+    var out = acc.needsLogin || login.state === 'out';
+    var row = setRow(acc.name, login.text || (out ? 'Logged out.' : 'Signed in.'), out || login.state === 'warn' ? buildLoginButton(acc) : null);
+    if (out || login.state === 'warn') setDesc(row.desc, login.text || 'Logged out.', 'bad');
+    box.appendChild(row);
+  });
+}
+
+function googleRows() {
+  var list = el('div');
+  var add = el('button', 'btn small', 'Add a Google account');
+  var sync = el('button', 'btn small', 'Sync now');
+  add.type = 'button';
+  sync.type = 'button';
+  var box = el('div', 'set-actions');
+  box.appendChild(add);
+  box.appendChild(sync);
+  var main = setRow('Google Calendar', 'Show events from your Google accounts.', box);
 
   function formatRelativeTime(ts) {
     var diff = Date.now() - ts;
@@ -2007,79 +1500,78 @@ function renderSettings() {
     return new Date(ts).toLocaleString();
   }
 
-  // Load initial state
-  window.dashboardAPI.gcalGetStatus().then(function(s) {
-    renderGcalAccounts(s.accounts, s.lastSync);
-  });
+  function showAccounts(accounts, lastSync) {
+    UI.clear(list);
+    (accounts || []).forEach(function(account) {
+      var remove = el('button', 'btn small danger', 'Remove');
+      remove.type = 'button';
+      remove.addEventListener('click', function() {
+        remove.disabled = true;
+        remove.textContent = 'Removing...';
+        window.dashboardAPI.gcalRemoveAccount(account.email).then(refresh);
+      });
+      list.appendChild(setRow(account.email, null, remove));
+    });
+    sync.disabled = !accounts || accounts.length === 0;
+    if (lastSync) setDesc(main.desc, 'Last synced ' + formatRelativeTime(lastSync) + '.');
+  }
 
-  // Listen for sync updates
+  function refresh() {
+    window.dashboardAPI.gcalGetStatus().then(function(status) { showAccounts(status.accounts, status.lastSync); });
+  }
+  refresh();
+
   window.dashboardAPI.onGcalSyncStatus(function(data) {
-    renderGcalAccounts(data.accounts, data.lastSync);
-    if (data.errors && data.errors.length > 0) {
-      gcalStatus.textContent = 'Error: ' + data.errors[0].error;
-      gcalStatus.style.color = '#ef4444';
-    } else {
-      gcalStatus.style.color = 'var(--text-dim)';
-    }
+    showAccounts(data.accounts, data.lastSync);
+    if (data.errors && data.errors.length > 0) setDesc(main.desc, data.errors[0].error, 'bad');
   });
 
-  gcalAddBtn.addEventListener('click', function() {
-    gcalAddBtn.disabled = true;
-    gcalAddBtn.textContent = 'Waiting for Google\u2026';
-    gcalStatus.textContent = 'Complete sign-in in your browser';
-    gcalStatus.style.color = '#4285f4';
+  add.addEventListener('click', function() {
+    add.disabled = true;
+    add.textContent = 'Waiting for Google...';
+    setDesc(main.desc, 'Finish signing in in your browser.');
     window.dashboardAPI.gcalAddAccount().then(function(result) {
-      gcalAddBtn.disabled = false;
-      gcalAddBtn.textContent = '+ Add Google Account';
+      add.disabled = false;
+      add.textContent = 'Add a Google account';
       if (result.success) {
-        gcalStatus.textContent = 'Connected: ' + result.email;
-        gcalStatus.style.color = '#4ade80';
-        window.dashboardAPI.gcalGetStatus().then(function(s) {
-          renderGcalAccounts(s.accounts, s.lastSync);
-        });
+        setDesc(main.desc, 'Connected ' + result.email + '.', 'ok');
+        refresh();
       } else {
-        gcalStatus.textContent = result.error || 'Failed';
-        gcalStatus.style.color = '#ef4444';
+        setDesc(main.desc, result.error || 'That did not work.', 'bad');
       }
     });
   });
 
-  gcalSyncBtn.addEventListener('click', function() {
-    gcalSyncBtn.disabled = true;
-    gcalSyncBtn.textContent = 'Syncing\u2026';
-    gcalStatus.textContent = 'Syncing calendars\u2026';
-    gcalStatus.style.color = 'var(--text-dim)';
+  sync.addEventListener('click', function() {
+    sync.disabled = true;
+    sync.textContent = 'Syncing...';
     window.dashboardAPI.gcalSyncNow().then(function(result) {
-      gcalSyncBtn.disabled = false;
-      gcalSyncBtn.textContent = 'Sync Now';
-      if (result.success) {
-        gcalStatus.textContent = 'Last sync: just now';
-        gcalStatus.style.color = '#4ade80';
-      } else {
-        gcalStatus.textContent = result.error || 'Sync failed';
-        gcalStatus.style.color = '#ef4444';
-      }
+      sync.disabled = false;
+      sync.textContent = 'Sync now';
+      if (result.success) setDesc(main.desc, 'Last synced just now.', 'ok');
+      else setDesc(main.desc, result.error || 'The sync failed.', 'bad');
     });
   });
 
-  // Version info
-  var versionEl = document.getElementById('versionInfo');
-  if (versionEl) versionEl.textContent = 'Claude Meter v' + currentAppVersion;
+  return [main, list];
+}
+
+// Built once. Each listener above belongs to these rows for the life of the window.
+function renderSettings() {
+  var container = document.getElementById('settingRows');
+  UI.clear(container);
+  container.appendChild(setGroup('Look', [themeRow()]));
+  container.appendChild(setGroup('Behaviour', [hotkeyRow(), autostartRow()]));
+  settingsAccountsBox = el('div');
+  container.appendChild(setGroup('Accounts', [settingsAccountsBox]));
+  renderSettingsAccounts();
+  container.appendChild(setGroup('Calendar', googleRows()));
+  container.appendChild(setGroup('App', [updateRow()]));
 }
 
 // --- Status tab ---
 
-function formatStatusTime(ts) {
-  if (!ts) return '';
-  var d = new Date(ts);
-  var now = Date.now();
-  var diff = now - ts;
-  var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
-  if (diff < 60000) return 'just now';
-  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
-  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
-  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' ' + d.toLocaleDateString();
-}
+var statusOpenDays = {};
 
 function dateKey(isoStr) {
   var d = new Date(isoStr);
@@ -2099,155 +1591,98 @@ function dateLabel(key) {
 }
 
 function buildIncidentCard(inc) {
-  var impactColors = { minor: 'var(--yellow)', major: 'var(--red)', critical: 'var(--red)' };
-  var card = el('div', 'status-incident-card');
-
-  var row1 = el('div', 'status-inc-row1');
-  var dot = el('div', 'status-inc-dot');
-  dot.style.background = inc.resolvedAt ? 'var(--text-dim)' : (impactColors[inc.impact] || 'var(--yellow)');
-  row1.appendChild(dot);
-  row1.appendChild(el('div', 'status-inc-name', inc.name));
-
-  var badge = el('div', 'status-inc-badge', inc.impact || 'incident');
-  if (inc.impact === 'minor') {
-    badge.style.cssText = 'background:rgba(250,204,21,0.1);color:var(--yellow);';
-  } else {
-    badge.style.cssText = 'background:rgba(248,113,113,0.1);color:var(--red);';
-  }
-  row1.appendChild(badge);
-  card.appendChild(row1);
-
-  // Meta line: components · time · duration
+  var card = el('div', 'status-card card');
+  var top = el('div', 'status-card-top');
+  top.appendChild(el('b', null, inc.name));
+  top.appendChild(el('span', inc.resolvedAt ? 'tag' : 'tag late', inc.resolvedAt ? 'Resolved' : 'Ongoing'));
+  card.appendChild(top);
   var meta = [];
+  if (inc.impact) meta.push(inc.impact.charAt(0).toUpperCase() + inc.impact.slice(1));
   if (inc.components && inc.components.length) meta.push(inc.components.join(', '));
-  var startTs = inc.startedAt ? new Date(inc.startedAt).getTime() : 0;
   if (inc.startedAt) {
-    var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
-    var sd = new Date(inc.startedAt);
-    meta.push(pad(sd.getHours()) + ':' + pad(sd.getMinutes()));
+    var started = new Date(inc.startedAt);
+    meta.push(String(started.getHours()).padStart(2, '0') + ':' + String(started.getMinutes()).padStart(2, '0'));
   }
   if (inc.startedAt && inc.resolvedAt) {
-    var dur = Math.round((new Date(inc.resolvedAt) - new Date(inc.startedAt)) / 60000);
-    meta.push(dur < 60 ? dur + 'm' : Math.floor(dur / 60) + 'h ' + (dur % 60) + 'm');
-  } else if (!inc.resolvedAt) {
-    meta.push('ongoing');
+    var minutes = Math.round((new Date(inc.resolvedAt) - new Date(inc.startedAt)) / 60000);
+    meta.push(minutes < 60 ? minutes + 'm' : Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm');
   }
-  if (meta.length) card.appendChild(el('div', 'status-inc-meta', meta.join(' \u00B7 ')));
-
-  if (inc.latestUpdate) {
-    card.appendChild(el('div', 'status-inc-update', inc.latestUpdate));
-  }
+  if (meta.length) card.appendChild(el('p', null, meta.join(' · ')));
+  if (inc.latestUpdate) card.appendChild(el('p', null, inc.latestUpdate));
   return card;
+}
+
+function renderStatusHealth(card) {
+  var cs = claudeStatusData;
+  var indicator = (cs && cs.indicator) || 'none';
+  var grade = { none: 'healthy', minor: 'intermittent', major: 'degraded', critical: 'degraded' };
+  var words = { none: 'All systems working', minor: 'Minor outage', major: 'Major outage', critical: 'Critical outage' };
+  var health = el('div', 'status-health card raised');
+  health.appendChild(el('div', 'status-dot ' + (cs ? (grade[indicator] || 'intermittent') : '')));
+  var text = el('div');
+  text.appendChild(el('h2', null, cs ? (words[indicator] || indicator) : 'Checking...'));
+  var current = (cs && cs.incidents) || [];
+  if (current.length) {
+    current.forEach(function(inc) {
+      text.appendChild(el('p', 'status-incident-now', inc.name));
+      if (inc.components && inc.components.length) text.appendChild(el('p', null, inc.components.join(', ')));
+    });
+  } else if (cs) {
+    text.appendChild(el('p', null, 'No current incidents.'));
+  }
+  health.appendChild(text);
+  var link = el('button', 'btn small');
+  link.type = 'button';
+  link.appendChild(document.createTextNode('status.claude.com'));
+  link.appendChild(UI.icon('link'));
+  link.querySelector('svg').style.cssText = 'width:14px;height:14px;';
+  link.addEventListener('click', function() { window.dashboardAPI.openExternal('https://status.claude.com'); });
+  health.appendChild(link);
+  card.appendChild(health);
 }
 
 function renderStatusTab() {
   var healthCard = document.getElementById('statusHealthCard');
   var groupsContainer = document.getElementById('statusIncidentGroups');
-  if (!healthCard || !groupsContainer) return;
+  UI.clear(healthCard);
+  UI.clear(groupsContainer);
+  renderStatusHealth(healthCard);
 
-  while (healthCard.firstChild) healthCard.removeChild(healthCard.firstChild);
-  while (groupsContainer.firstChild) groupsContainer.removeChild(groupsContainer.firstChild);
-
-  // --- Current status card ---
-  var officialCard = el('div', 'status-health-card');
   var cs = claudeStatusData;
-  var csIndicator = (cs && cs.indicator) || 'none';
-  var csStatusMap = { none: 'healthy', minor: 'intermittent', major: 'degraded', critical: 'degraded' };
-  var csDotClass = cs ? (csStatusMap[csIndicator] || 'intermittent') : 'unknown';
-  var csLabels = { none: 'Operational', minor: 'Minor outage', major: 'Major outage', critical: 'Critical' };
-
-  var csIndicatorEl = el('div', 'status-health-indicator');
-  var csDot = el('div', 'status-health-dot ' + csDotClass);
-  csDot.appendChild(el('div', 'status-health-dot-inner'));
-  csIndicatorEl.appendChild(csDot);
-  csIndicatorEl.appendChild(el('div', 'status-health-label ' + csDotClass, csLabels[csIndicator] || csIndicator));
-  officialCard.appendChild(csIndicatorEl);
-
-  var csInfo = el('div', 'status-stat');
-  csInfo.style.flex = '1';
-
-  if (!cs) {
-    csInfo.appendChild(el('div', 'status-stat-sub', 'Fetching...'));
-  } else if ((cs.incidents || []).length === 0) {
-    var okEl = el('div', null, 'All Systems Operational');
-    okEl.style.cssText = 'font-size:13px;font-weight:500;color:var(--green);';
-    csInfo.appendChild(okEl);
-  } else {
-    for (var ii = 0; ii < cs.incidents.length; ii++) {
-      var cinc = cs.incidents[ii];
-      var incName = el('div', null, cinc.name);
-      incName.style.cssText = 'font-size:13px;font-weight:600;margin-bottom:2px;';
-      csInfo.appendChild(incName);
-      if (cinc.components && cinc.components.length) {
-        csInfo.appendChild(el('div', 'status-stat-sub', cinc.components.join(', ')));
-      }
-    }
-  }
-
-  var csLink = el('button', null, 'status.claude.com \u2197');
-  csLink.style.cssText = 'background:none;border:none;color:var(--accent);font-size:10px;cursor:pointer;padding:0;font-family:inherit;margin-top:6px;';
-  csLink.addEventListener('click', function() {
-    window.dashboardAPI.openExternal('https://status.claude.com');
-  });
-  csInfo.appendChild(csLink);
-  officialCard.appendChild(csInfo);
-  healthCard.appendChild(officialCard);
-
-  // --- Incidents grouped by date ---
-  var allInc = [].concat(
-    (cs && cs.incidents) || [],
-    (cs && cs.pastIncidents) || []
-  );
-
-  if (allInc.length === 0) {
-    groupsContainer.appendChild(el('div', 'status-empty', 'No incidents in the last 10 days'));
+  var all = [].concat((cs && cs.incidents) || [], (cs && cs.pastIncidents) || []);
+  if (all.length === 0) {
+    if (cs) groupsContainer.appendChild(el('div', 'status-empty', 'No incidents in the last 10 days.'));
     return;
   }
 
-  // Group by date (using startedAt)
   var groups = {};
-  var groupOrder = [];
-  for (var gi = 0; gi < allInc.length; gi++) {
-    var inc = allInc[gi];
+  all.forEach(function(inc) {
     var key = inc.startedAt ? dateKey(inc.startedAt) : dateKey(new Date().toISOString());
-    if (!groups[key]) { groups[key] = []; groupOrder.push(key); }
-    groups[key].push(inc);
-  }
-  // Sort groups newest first
-  groupOrder.sort(function(a, b) { return b.localeCompare(a); });
-
+    (groups[key] = groups[key] || []).push(inc);
+  });
   var todayKey = dateKey(new Date().toISOString());
-
-  for (var di = 0; di < groupOrder.length; di++) {
-    (function(dayKey, dayInc) {
-      var isToday = dayKey === todayKey;
-      var group = el('div', 'status-date-group');
-
-      var header = el('div', 'status-date-header' + (isToday ? ' today' : ''));
-      if (!isToday) header.classList.add('collapsed');
-      var chevron = el('span', 'chevron', '\u25BC');
-      header.appendChild(chevron);
-      header.appendChild(el('span', 'date-label', dateLabel(dayKey)));
-      header.appendChild(el('span', 'date-count', dayInc.length + ' incident' + (dayInc.length > 1 ? 's' : '')));
-      group.appendChild(header);
-
-      var body = el('div', 'status-date-body');
-      if (!isToday) body.classList.add('collapsed');
-      for (var ci = 0; ci < dayInc.length; ci++) {
-        body.appendChild(buildIncidentCard(dayInc[ci]));
-      }
-      group.appendChild(body);
-
-      if (!isToday) {
-        header.addEventListener('click', function() {
-          header.classList.toggle('collapsed');
-          body.classList.toggle('collapsed');
-        });
-      }
-
-      groupsContainer.appendChild(group);
-    })(groupOrder[di], groups[groupOrder[di]]);
-  }
+  Object.keys(groups).sort(function(a, b) { return b.localeCompare(a); }).forEach(function(key) {
+    var list = groups[key];
+    var open = statusOpenDays[key] !== undefined ? statusOpenDays[key] : key === todayKey;
+    var group = el('section');
+    var head = el('button', 'status-day');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    head.appendChild(UI.icon(open ? 'down' : 'next'));
+    head.appendChild(document.createTextNode(dateLabel(key)));
+    head.appendChild(el('small', null, PlanLib.countText(list.length, 'incident', 'incidents')));
+    head.addEventListener('click', function() {
+      statusOpenDays[key] = !open;
+      renderStatusTab();
+    });
+    group.appendChild(head);
+    if (open) {
+      var cards = el('div', 'status-cards');
+      list.forEach(function(inc) { cards.appendChild(buildIncidentCard(inc)); });
+      group.appendChild(cards);
+    }
+    groupsContainer.appendChild(group);
+  });
 }
 
 // --- IPC handlers ---
@@ -2258,6 +1693,8 @@ window.dashboardAPI.onUsageUpdate(function(payload) {
     if (typeof payload.cliLauncher === 'string' && payload.cliLauncher) {
       cliLauncherName = payload.cliLauncher;
     }
+    activeFollowsCli = payload.activeFollowsCli === true;
+    cliMove = payload.cliMove === true;
     activeAccountId = payload.activeAccountId
       || (accountsData[0] ? accountsData[0].id : null);
     var active = null;
@@ -2265,7 +1702,7 @@ window.dashboardAPI.onUsageUpdate(function(payload) {
       if (accountsData[i].id === activeAccountId) active = accountsData[i];
     }
     if (!active && accountsData.length > 0) active = accountsData[0];
-    if (active && active.usage) usageData = active.usage;
+    usageData = active ? active.usage : null;
   } else if (payload && payload.session) {
     // Defensive: a bare usage object (pre-multi-account payload)
     accountsData = [];
@@ -2274,10 +1711,12 @@ window.dashboardAPI.onUsageUpdate(function(payload) {
     return;
   }
   renderOverview();
+  if (currentTab === 'settings') renderSettingsAccounts();
 });
 
 window.dashboardAPI.onHistoryUpdate(function(data) {
   historyData = data;
+  renderWeekChart();
   // Redraw chart if history tab is visible
   var historyTab = document.getElementById('tab-history');
   if (historyTab && historyTab.classList.contains('active')) {
@@ -2309,83 +1748,15 @@ document.getElementById('tbClose').addEventListener('click', function() {
 
 var pendingUpdate = null;
 
-window.dashboardAPI.onUpdateAvailable(function(data) {
-  pendingUpdate = data;
-  var btn = document.getElementById('updateNowBtn');
-  btn.textContent = 'Update to v' + data.latestVersion;
-  btn.classList.add('visible');
-  var ver = document.getElementById('sidebarVersion');
-  ver.textContent = 'v' + currentAppVersion + ' \u2192 v' + data.latestVersion;
-  // Populate overview banner
-  var banner = document.getElementById('updateBanner');
-  while (banner.firstChild) banner.removeChild(banner.firstChild);
-  var icon = document.createElement('div');
-  icon.className = 'update-banner-icon';
-  icon.textContent = '\u2B06';
-  banner.appendChild(icon);
-  var txt = document.createElement('div');
-  txt.className = 'update-banner-text';
-  txt.appendChild(document.createTextNode('v' + data.latestVersion + ' available'));
-  var sub = document.createElement('span');
-  sub.textContent = 'New version ready to install';
-  txt.appendChild(sub);
-  banner.appendChild(txt);
-  banner.classList.add('visible');
-});
+window.dashboardAPI.onUpdateAvailable(showUpdateFound);
 
 window.dashboardAPI.onUpdateProgress(function(pct) {
-  var bar = document.getElementById('updateProgress');
-  var fill = document.getElementById('updateProgressFill');
-  var btn = document.getElementById('updateNowBtn');
-  bar.classList.add('visible');
-  fill.style.width = pct + '%';
-  btn.textContent = pct + '% downloaded';
-  btn.style.backgroundSize = pct + '% 100%, 100% 100%';
-});
-
-document.getElementById('updateNowBtn').addEventListener('click', function() {
-  if (!pendingUpdate) return;
-  var btn = document.getElementById('updateNowBtn');
-
-  if (!pendingUpdate.downloadUrl) {
-    btn.textContent = 'No installer found';
-    setTimeout(function() {
-      btn.textContent = 'Update to v' + pendingUpdate.latestVersion;
-    }, 3000);
-    return;
-  }
-
-  btn.textContent = 'Downloading...';
-  btn.disabled = true;
-  btn.classList.add('downloading');
   document.getElementById('updateProgress').classList.add('visible');
-
-  window.dashboardAPI.installUpdate().then(function(result) {
-    if (result.success) {
-      btn.textContent = 'Installing...';
-      btn.classList.remove('downloading');
-      btn.style.backgroundSize = '';
-      btn.style.background = 'linear-gradient(90deg, #6366f1, #a855f7, #ec4899)';
-    } else {
-      btn.textContent = 'Failed — retry';
-      btn.classList.remove('downloading');
-      btn.style.backgroundSize = '';
-      btn.style.background = '';
-      document.getElementById('updateProgress').classList.remove('visible');
-      setTimeout(function() {
-        btn.textContent = 'Update to v' + pendingUpdate.latestVersion;
-        btn.disabled = false;
-      }, 3000);
-    }
-  }).catch(function() {
-    btn.textContent = 'Failed — retry';
-    btn.classList.remove('downloading');
-    btn.style.backgroundSize = '';
-    btn.style.background = '';
-    document.getElementById('updateProgress').classList.remove('visible');
-    btn.disabled = false;
-  });
+  document.getElementById('updateProgressFill').style.width = pct + '%';
+  setUpdateButtons(pct + '% downloaded', true);
 });
+
+document.getElementById('updateNowBtn').addEventListener('click', startUpdate);
 
 // --- Init ---
 
@@ -2433,32 +1804,14 @@ setInterval(function() {
   updateDashboardTimers();
 }, 10000);
 
-function patchCardCountdowns(metaSpans, sources) {
-  for (var i = 0; i < metaSpans.length && i < sources.length; i++) {
-    var spans = metaSpans[i].querySelectorAll('span');
-    if (spans.length >= 2 && sources[i]) {
-      spans[1].textContent = formatCountdown(sources[i].resetsAt);
-    }
-  }
-}
-
 function updateDashboardTimers() {
-  // Patch countdown text in overview cards — per account group when there is
-  // more than one, so a group never shows another account's reset time.
-  var groups = document.querySelectorAll('#overviewCards .account-group');
-  if (groups.length > 0) {
-    for (var g = 0; g < groups.length && g < accountsData.length; g++) {
-      var u = accountsData[g].usage;
-      if (!u) continue;
-      patchCardCountdowns(groups[g].querySelectorAll('.card-meta'), [u.session, u.weekAll, u.weekSonnet]);
-    }
-    return;
+  var now = Date.now();
+  boardCells.forEach(function(entry) { setRefillText(entry.cell, WL.rowState(entry.acc, now)); });
+  renderSyncText();
+  if (currentTab === 'overview') {
+    renderTimeline();
+    renderOverviewToday();
   }
-  if (!usageData) return;
-  patchCardCountdowns(
-    document.querySelectorAll('#overviewCards .card-meta'),
-    [usageData.session, usageData.weekAll, usageData.weekSonnet]
-  );
 }
 
 // Redraw chart on window resize (debounced to avoid flicker)
@@ -2476,298 +1829,136 @@ window.addEventListener('resize', function() {
 // --- Tasks tab ---
 
 var dashTasks = [];
+var planTasks = PlanTasks.mount(document.getElementById('tasksRoot'), {
+  smartAdd: window.dashboardAPI.smartAddTask,
+  addTask: window.dashboardAPI.addTask,
+  toggleTask: window.dashboardAPI.toggleTask,
+  deleteTask: window.dashboardAPI.deleteTask,
+  setPriority: window.dashboardAPI.setTaskPriority,
+  reorder: window.dashboardAPI.reorderTasks,
+  scheduleTask: window.dashboardAPI.scheduleTask,
+  openTaskNote: window.dashboardAPI.openTaskNote,
+  clearCompleted: window.dashboardAPI.clearCompleted,
+}, { doneOpen: true, placeholder: 'Add a task, like "Call Sam tomorrow 3pm"' });
 
-function renderDashTasks() {
-  var activeContainer = document.getElementById('dashTasksActive');
-  var completedContainer = document.getElementById('dashTasksCompleted');
-  var clearRow = document.getElementById('dashTasksClearRow');
-  var counter = document.getElementById('tasksCounter');
-
-  while (activeContainer.firstChild) activeContainer.removeChild(activeContainer.firstChild);
-  while (completedContainer.firstChild) completedContainer.removeChild(completedContainer.firstChild);
-
-  var active = [];
-  var completed = [];
-  for (var i = 0; i < dashTasks.length; i++) {
-    if (dashTasks[i].done) completed.push(dashTasks[i]);
-    else active.push(dashTasks[i]);
-  }
-
-  var doneCount = completed.length;
-  counter.textContent = dashTasks.length === 0 ? '0 tasks'
-    : doneCount + ' of ' + dashTasks.length + ' completed';
-
-  if (active.length > 0) {
-    var label = el('div', '', 'Active');
-    label.style.cssText = 'font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:8px;font-weight:600;';
-    activeContainer.appendChild(label);
-    for (var a = 0; a < active.length; a++) {
-      activeContainer.appendChild(buildDashTaskItem(active[a]));
-    }
-  }
-
-  if (completed.length > 0) {
-    var cLabel = el('div', '', 'Completed');
-    cLabel.style.cssText = 'font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin:16px 0 8px;font-weight:600;';
-    completedContainer.appendChild(cLabel);
-    for (var c = 0; c < completed.length; c++) {
-      completedContainer.appendChild(buildDashTaskItem(completed[c]));
-    }
-    clearRow.style.display = '';
-  } else {
-    clearRow.style.display = 'none';
-  }
+function takeTasks(data) {
+  dashTasks = data || [];
+  planTasks.update(dashTasks);
+  renderOverviewToday();
 }
-
-function buildDashTaskItem(task) {
-  var row = el('div', '');
-  row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surface);border-radius:6px;border:1px solid var(--border);margin-bottom:4px;' + (task.done ? 'opacity:0.6;' : '');
-
-  var cb = el('button', '');
-  cb.style.cssText = 'width:16px;height:16px;border-radius:4px;border:1.5px solid ' + (task.done ? 'var(--green)' : 'var(--border)') + ';background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:10px;color:' + (task.done ? 'var(--green)' : 'transparent') + ';flex-shrink:0;';
-  cb.textContent = task.done ? '\u2713' : '';
-  cb.addEventListener('click', function() {
-    window.dashboardAPI.toggleTask(task.id);
-  });
-
-  var text = el('span', '', task.text);
-  text.style.cssText = 'font-size:12px;flex:1;' + (task.done ? 'text-decoration:line-through;color:var(--text-dim);' : '');
-
-  var del = el('button', '', '\u00D7');
-  del.style.cssText = 'font-size:12px;color:var(--red);background:none;border:none;cursor:pointer;padding:2px 6px;opacity:0.5;';
-  del.addEventListener('click', function() {
-    window.dashboardAPI.deleteTask(task.id);
-  });
-
-  row.appendChild(cb);
-  row.appendChild(text);
-  row.appendChild(del);
-  return row;
-}
-
-document.getElementById('dashTaskAddBtn').addEventListener('click', function() {
-  var input = document.getElementById('dashTaskInput');
-  var text = input.value.trim();
-  if (text) {
-    window.dashboardAPI.addTask(text);
-    input.value = '';
-  }
-});
-
-document.getElementById('dashTaskInput').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') {
-    var text = this.value.trim();
-    if (text) {
-      window.dashboardAPI.addTask(text);
-      this.value = '';
-    }
-  }
-});
-
-document.getElementById('dashClearCompleted').addEventListener('click', function() {
-  window.dashboardAPI.clearCompleted();
-});
-
-window.dashboardAPI.onTasksUpdate(function(data) {
-  dashTasks = data;
-  renderDashTasks();
-});
-
-window.dashboardAPI.getTasks().then(function(data) {
-  dashTasks = data;
-  renderDashTasks();
-});
+window.dashboardAPI.onTasksUpdate(takeTasks);
+window.dashboardAPI.getTasks().then(takeTasks);
 
 // --- Habits tab ---
 
-var habitsData = { training: [], reading: [], learning: [] };
-var habitsView = {
-  training: { year: null, month: null }, // 0-indexed month
-  reading: { year: null, month: null },
-  learning: { year: null, month: null },
-};
-var habitsInited = false;
+// The old `learning` history stays in the file, unshown. Relax is never toggled here: it ticks itself
+// when the day's last break completes, and shows today's count from the Relax meter instead.
+var HABITS = [
+  { kind: 'training', name: 'Training' },
+  { kind: 'reading', name: 'Read/Write' },
+  { kind: 'relax', name: 'Relax', auto: true },
+];
+var habitsData = { training: [], reading: [], relax: [] };
+var habitsYear = new Date().getFullYear();
+var habitsMonth = new Date().getMonth();
+var relaxToday = null; // { done, total }
 
-function pad2(n) { return n < 10 ? '0' + n : '' + n; }
-
-function ymd(d) {
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+function habitNote(habit, days, todayStr) {
+  var note = el('div', 'habit-note');
+  var streak = PlanLib.habitStreak(habitsData[habit.kind], todayStr);
+  var count = days.filter(function(day) { return day.done; }).length;
+  note.appendChild(el('b', null, String(count)));
+  note.appendChild(document.createTextNode(' this month'));
+  note.appendChild(el('br'));
+  note.appendChild(document.createTextNode(habit.auto && relaxToday
+    ? 'today ' + relaxToday.done + '/' + relaxToday.total
+    : PlanLib.countText(streak, 'day', 'days') + ' in a row'));
+  return note;
 }
 
-function parseYmd(s) {
-  if (!s || typeof s !== 'string') return null;
-  var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
-}
-
-function daysBetween(a, b) {
-  // Calendar days between midnight-aligned dates (b - a).
-  var aMid = new Date(a.getFullYear(), a.getMonth(), a.getDate());
-  var bMid = new Date(b.getFullYear(), b.getMonth(), b.getDate());
-  return Math.round((bMid.getTime() - aMid.getTime()) / 86400000);
-}
-
-function monthLabel(year, month) {
-  var names = ['January', 'February', 'March', 'April', 'May', 'June',
-               'July', 'August', 'September', 'October', 'November', 'December'];
-  return names[month] + ' ' + year;
-}
-
-function streakInMonth(kind, year, month) {
-  // Count of marked days in the given month.
-  var arr = habitsData[kind] || [];
-  var prefix = year + '-' + pad2(month + 1) + '-';
-  var n = 0;
-  for (var i = 0; i < arr.length; i++) {
-    if (arr[i].indexOf(prefix) === 0) n++;
+function habitDayCell(habit, day) {
+  var cls = 'habit-day' + (day.done ? ' done' : '') + (day.today ? ' today' : '') + (day.future ? ' future' : '');
+  var label = PlanLib.dayTitle(day.date) + (day.done ? ', done' : ', not done');
+  // Relax's days can't be changed, so they aren't buttons.
+  if (habit.auto) {
+    var mark = el('span', cls + ' as-text', String(day.day));
+    mark.style.display = 'grid';
+    mark.style.placeItems = 'center';
+    mark.title = label;
+    return mark;
   }
-  return n;
-}
-
-function renderHabitCal(kind) {
-  var view = habitsView[kind];
-  var year = view.year;
-  var month = view.month;
-  var labelEl = document.getElementById(kind + 'Month');
-  var streakEl = document.getElementById(kind + 'Streak');
-  var grid = document.getElementById(kind + 'Grid');
-  if (!labelEl || !grid) return;
-  labelEl.textContent = monthLabel(year, month);
-
-  var marked = {};
-  var arr = habitsData[kind] || [];
-  for (var i = 0; i < arr.length; i++) marked[arr[i]] = true;
-
-  var todayStr = ymd(new Date());
-
-  // Clear grid
-  while (grid.firstChild) grid.removeChild(grid.firstChild);
-
-  // Day-of-week headers (Mon-first)
-  var dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  for (var d = 0; d < 7; d++) {
-    var dow = document.createElement('div');
-    dow.className = 'habit-cal-dow';
-    dow.textContent = dows[d];
-    grid.appendChild(dow);
-  }
-
-  // Compute leading blanks (Mon=0..Sun=6)
-  var first = new Date(year, month, 1);
-  var firstDow = (first.getDay() + 6) % 7;
-  for (var b = 0; b < firstDow; b++) {
-    var blank = document.createElement('div');
-    blank.className = 'habit-cal-day empty';
-    grid.appendChild(blank);
-  }
-
-  // Days in month
-  var daysInMonth = new Date(year, month + 1, 0).getDate();
-  for (var dd = 1; dd <= daysInMonth; dd++) {
-    var dateStr = year + '-' + pad2(month + 1) + '-' + pad2(dd);
-    var cell = document.createElement('div');
-    cell.className = 'habit-cal-day';
-    if (dateStr === todayStr) cell.classList.add('today');
-    if (marked[dateStr]) {
-      cell.classList.add('marked');
-      cell.textContent = '✓';
-      cell.title = dateStr + ' — done';
-    } else {
-      cell.textContent = String(dd);
-      cell.title = dateStr;
-    }
-    if (dateStr > todayStr) cell.classList.add('future');
-    cell.setAttribute('data-date', dateStr);
-    cell.setAttribute('data-kind', kind);
-    grid.appendChild(cell);
-  }
-
-  if (streakEl) {
-    var n = streakInMonth(kind, year, month);
-    streakEl.textContent = n + (n === 1 ? ' day this month' : ' days this month');
-  }
+  var cell = el('button', cls, String(day.day));
+  cell.type = 'button';
+  cell.disabled = day.future;
+  cell.setAttribute('aria-label', habit.name + ', ' + label);
+  cell.setAttribute('aria-pressed', day.done ? 'true' : 'false');
+  cell.addEventListener('click', function() {
+    window.dashboardAPI.toggleHabitDay(habit.kind, day.date).then(function(data) {
+      if (data) habitsData = data;
+      renderHabits();
+      var again = document.querySelector('.habit-row[data-kind="' + habit.kind + '"] .habit-days').children[day.day - 1];
+      if (again) again.focus();
+      renderOverviewToday();
+    });
+  });
+  return cell;
 }
 
 function renderHabits() {
-  if (!habitsInited) initHabitsHandlers();
-  // Default views to current month if not yet set
+  var todayStr = PlanLib.dayString(new Date());
   var now = new Date();
-  if (habitsView.training.year === null) {
-    habitsView.training.year = now.getFullYear();
-    habitsView.training.month = now.getMonth();
-  }
-  if (habitsView.reading.year === null) {
-    habitsView.reading.year = now.getFullYear();
-    habitsView.reading.month = now.getMonth();
-  }
-  if (habitsView.learning.year === null) {
-    habitsView.learning.year = now.getFullYear();
-    habitsView.learning.month = now.getMonth();
-  }
-  renderHabitCal('training');
-  renderHabitCal('reading');
-  renderHabitCal('learning');
-}
-
-function initHabitsHandlers() {
-  habitsInited = true;
-
-  // Month nav
-  var navBtns = document.querySelectorAll('.habit-nav-btn');
-  for (var i = 0; i < navBtns.length; i++) {
-    (function(btn) {
-      btn.addEventListener('click', function() {
-        var kind = btn.getAttribute('data-cal');
-        var dir = parseInt(btn.getAttribute('data-dir'), 10);
-        var v = habitsView[kind];
-        v.month += dir;
-        if (v.month < 0) { v.month = 11; v.year -= 1; }
-        else if (v.month > 11) { v.month = 0; v.year += 1; }
-        renderHabitCal(kind);
-      });
-    })(navBtns[i]);
-  }
-
-  // Day toggle (event delegation on each grid)
-  var grids = ['trainingGrid', 'readingGrid', 'learningGrid'];
-  for (var g = 0; g < grids.length; g++) {
-    (function(gridId) {
-      var grid = document.getElementById(gridId);
-      if (!grid) return;
-      grid.addEventListener('click', function(e) {
-        var cell = e.target;
-        if (!cell || !cell.classList || !cell.classList.contains('habit-cal-day')) return;
-        if (cell.classList.contains('empty') || cell.classList.contains('future')) return;
-        var date = cell.getAttribute('data-date');
-        var kind = cell.getAttribute('data-kind');
-        if (!date || !kind) return;
-        window.dashboardAPI.toggleHabitDay(kind, date).then(function(h) {
-          habitsData = h;
-          renderHabitCal(kind);
-        });
-      });
-    })(grids[g]);
-  }
-}
-
-// Live updates from main process
-if (window.dashboardAPI && window.dashboardAPI.onHabitsUpdate) {
-  window.dashboardAPI.onHabitsUpdate(function(data) {
-    habitsData = data || habitsData;
-    var habitsTab = document.getElementById('tab-habits');
-    if (habitsTab && habitsTab.classList.contains('active')) {
-      renderHabitCal('training');
-      renderHabitCal('reading');
-      renderHabitCal('learning');
-    }
+  document.getElementById('habitsMonth').textContent = PlanLib.monthTitle(habitsYear, habitsMonth);
+  var isThisMonth = habitsYear === now.getFullYear() && habitsMonth === now.getMonth();
+  document.getElementById('habitsToday').hidden = isThisMonth;
+  document.getElementById('habitsNext').disabled = isThisMonth;
+  var board = document.getElementById('habitsBoard');
+  UI.clear(board);
+  HABITS.forEach(function(habit) {
+    var row = el('div', 'habit-row');
+    row.setAttribute('data-kind', habit.kind);
+    row.appendChild(el('div', 'habit-name', habit.name));
+    var days = PlanLib.habitDays(habitsData[habit.kind], habitsYear, habitsMonth, todayStr);
+    var strip = el('div', 'habit-days');
+    days.forEach(function(day) { strip.appendChild(habitDayCell(habit, day)); });
+    row.appendChild(strip);
+    row.appendChild(habitNote(habit, days, todayStr));
+    board.appendChild(row);
   });
 }
 
-// Prime the data so the habit calendars are ready when the tab opens
+function moveHabitsMonth(delta) {
+  habitsMonth += delta;
+  if (habitsMonth < 0) { habitsMonth = 11; habitsYear -= 1; }
+  if (habitsMonth > 11) { habitsMonth = 0; habitsYear += 1; }
+  renderHabits();
+}
+document.getElementById('habitsPrev').addEventListener('click', function() { moveHabitsMonth(-1); });
+document.getElementById('habitsNext').addEventListener('click', function() { moveHabitsMonth(1); });
+document.getElementById('habitsToday').addEventListener('click', function() {
+  habitsYear = new Date().getFullYear();
+  habitsMonth = new Date().getMonth();
+  renderHabits();
+});
+
+window.dashboardAPI.onHabitsUpdate(function(data) {
+  habitsData = data || habitsData;
+  renderOverviewToday();
+  if (currentTab === 'habits') renderHabits();
+});
+
+function takeRelaxToday(v) {
+  if (!v) return;
+  if (relaxToday && relaxToday.done === v.done && relaxToday.total === v.total) return;
+  relaxToday = { done: v.done, total: v.total };
+  if (currentTab === 'habits') renderHabits();
+}
+if (window.dashboardAPI.onRelaxUpdate) window.dashboardAPI.onRelaxUpdate(takeRelaxToday);
+if (window.dashboardAPI.getRelax) window.dashboardAPI.getRelax().then(takeRelaxToday);
+
+// Prime the data so the Today panel and the habits board are ready
 if (window.dashboardAPI && window.dashboardAPI.getHabits) {
   window.dashboardAPI.getHabits().then(function(data) {
-    if (data) habitsData = data;
+    if (data) { habitsData = data; renderOverviewToday(); }
   });
 }
 
@@ -2775,7 +1966,6 @@ if (window.dashboardAPI && window.dashboardAPI.getHabits) {
 if (window.dashboardAPI && window.dashboardAPI.onNavigateTab) {
   window.dashboardAPI.onNavigateTab(function(tab) {
     if (!tab) return;
-    var target = document.querySelector('.sidebar-nav li[data-tab="' + tab + '"]');
-    if (target) target.click();
+    showTab(tab);
   });
 }
