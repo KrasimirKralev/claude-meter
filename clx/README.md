@@ -5,6 +5,8 @@
 `clx` starts Claude Code on whichever of your accounts has the most room left. When that account reaches its limit in the middle of your work, clx moves the same running session to your next account. You don't restart, don't run `--continue`, and don't lose the subagents or background tasks that are running.
 
 > Linux only. Unofficial; not affiliated with Anthropic.
+>
+> **Home: [github.com/KrasimirKralev/clx](https://github.com/KrasimirKralev/clx).** This folder is a copy of the latest clx release, kept here so Claude Meter and clx ship together. Issues and pull requests go to the clx repo.
 
 ## How it works
 
@@ -23,7 +25,7 @@ clx never sees your password. It reads the token Claude Code already has, only t
 You need Linux, `python3` (standard library only) and [Claude Code](https://claude.com/claude-code) logged in at least once.
 
 ```bash
-curl -fsSL https://github.com/KrasimirKralev/claude-meter/releases/latest/download/clx.tar.gz | tar xz
+curl -fsSL https://github.com/KrasimirKralev/clx/releases/latest/download/clx.tar.gz | tar xz
 ./clx/install.sh            # add --alias to make a plain `claude` go through clx
 ```
 
@@ -88,6 +90,7 @@ python3 clx/test/test-dead-auth.py   # a dead login is never a launch choice or 
 python3 clx/test/test-no-5h.py       # decisions when the server reports no 5-hour window
 python3 clx/test/test-move.py        # clx-move, the meter's click
 python3 clx/test/test-launch.py      # which account a launch picks when every one is spent
+python3 clx/test/test-security.py    # one check per fixed security finding
 bash    clx/test/test-install.sh     # install, first launch, second account, folder trust, uninstall
 ```
 

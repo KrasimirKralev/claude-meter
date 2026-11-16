@@ -8,7 +8,7 @@ whichever clx is named (the repo copy by default, `--clx PATH` for another
 one) inside test-dead-auth.py's throw-away HOME: fake tokens, no network,
 and never a real ~/.clx-sessions.
 
-Usage:  python3 clx/test/test-move.py [--clx PATH] [--move PATH] [-v]
+Usage:  python3 test/test-move.py [--clx PATH] [--move PATH] [-v]
 Exit 0 when every assertion passes.
 """
 import argparse

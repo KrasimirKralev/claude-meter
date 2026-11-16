@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """clx-move [--dry-run] <account> - move every running clx session to one account.
 
 What a click on an account in Claude Meter asks for ("if I
@@ -46,6 +46,7 @@ WAIT = 0.1
 
 def load_clx(path=None):
     path = path or os.environ.get("CLX_MOVE_CLX") or os.path.expanduser("~/.local/bin/clx")
+    sys.dont_write_bytecode = True  # no __pycache__ left in ~/.local/bin
     loader = importlib.machinery.SourceFileLoader("clx", path)
     spec = importlib.util.spec_from_loader("clx", loader)
     module = importlib.util.module_from_spec(spec)
@@ -161,6 +162,11 @@ def move_one(clx, sdir, target, accounts, conf, dry_run):
         return "its account is not one clx knows"
     if current.id == target.id:
         return "already"
+    link = os.path.join(sdir, ".credentials.json")
+    if os.path.lexists(link) and not os.path.islink(link):
+        # Claude Code just refreshed this session's login and the watcher has not
+        # copied it home yet: moving now would throw the new token away.
+        return "busy"
     bounce = would_bounce(clx, target, accounts, meta, conf)
     if bounce:
         return LIMIT + bounce

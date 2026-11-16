@@ -74,6 +74,7 @@ jobs:
           python3 -I clx/test/test-no-5h.py
           python3 -I clx/test/test-move.py
           python3 -I clx/test/test-launch.py
+          python3 -I clx/test/test-security.py
           bash clx/test/test-install.sh
 
   # A pull request proves the build. Only main publishes one.

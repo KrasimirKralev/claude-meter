@@ -24,13 +24,14 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 say() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
+[ "$(id -u)" != 0 ] || die "run it as your own user, not root: clx lives in your home dir."
 [ "$(uname -s)" = Linux ] || die "clx runs on Linux only (it relies on /proc and on Claude Code keeping its login in a file)."
 command -v python3 >/dev/null || die "python3 is required."
 
 # settings.json edits go through Python's json module, never sed: the file is the
 # user's whole Claude Code configuration and must stay valid JSON.
 edit_settings() {   # $1 = add | remove
-  python3 - "$1" "$SETTINGS" "$HOOK" <<'PY'
+  python3 -I - "$1" "$SETTINGS" "$HOOK" <<'PY'
 import json, os, shlex, sys
 mode, path, hook = sys.argv[1], sys.argv[2], sys.argv[3]
 events = ("UserPromptSubmit", "Stop", "PostToolUse")
@@ -65,10 +66,15 @@ if not hooks:
     data.pop("hooks", None)
 if changed:
     tmp = real + ".clx-tmp"
-    with open(tmp, "w") as fh:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    # 0600 from the first byte: settings.json can carry secrets in its env block.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as fh:
         json.dump(data, fh, indent=2)
         fh.write("\n")
-    os.chmod(tmp, 0o600)
     os.replace(tmp, real)
 print("changed" if changed else "unchanged")
 PY
@@ -82,9 +88,12 @@ backup_settings() {
 }
 
 remove_alias() {
-  [ -f "$BASHRC" ] && grep -qF "$MARK_BEGIN" "$BASHRC" || return 0
+  [ -f "$BASHRC" ] && grep -qxF "$MARK_BEGIN" "$BASHRC" || return 0
+  # Without its end marker the block's extent is unknown: cutting "to the end"
+  # could drop the rest of the file, so leave it for the user.
+  grep -qxF "$MARK_END" "$BASHRC" || { say "!! $BASHRC has the clx alias start marker but no end marker - remove that block by hand"; return 0; }
   cp -p "$BASHRC" "$BASHRC.bak-clx-$STAMP"
-  python3 - "$BASHRC" "$MARK_BEGIN" "$MARK_END" <<'PY'
+  python3 -I - "$BASHRC" "$MARK_BEGIN" "$MARK_END" <<'PY'
 import sys
 path, begin, end = sys.argv[1:4]
 out, skip = [], False
