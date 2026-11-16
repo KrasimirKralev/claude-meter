@@ -1501,7 +1501,7 @@ def merge_prefs(directory, report):
     """Copy the user's preferences into <dir>/.claude.json so clx never prompts.
 
     Identity (oauthAccount, userID) and anything token/key/secret/account stays
-    the dir's own. Every known project path is pre-trusted.
+    the dir's own. A project the user already trusted is trusted here too.
     """
     src = read_json(os.path.join(HOME, ".claude.json"), {}) or {}
     dst_path = config_json_for(directory)
@@ -1523,7 +1523,11 @@ def merge_prefs(directory, report):
     projects = dst.get("projects") or {}
     for path, entry in (src.get("projects") or {}).items():
         merged = dict(projects.get(path) or {})
-        merged["hasTrustDialogAccepted"] = True
+        # Trust is copied, never granted: a folder the user did not accept in their
+        # own config must still show the trust prompt (its hooks and settings run
+        # only after that), whichever account the session is on.
+        if entry.get("hasTrustDialogAccepted") is True:
+            merged["hasTrustDialogAccepted"] = True
         for pkey in PROJECT_KEYS:
             if pkey in entry:
                 merged[pkey] = copy.deepcopy(entry[pkey])

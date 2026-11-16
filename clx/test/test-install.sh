@@ -27,7 +27,7 @@ creds() {  # $1 dir
   chmod 600 "$1/.credentials.json"
 }
 creds "$HOME/.claude"
-printf '{"oauthAccount":{"emailAddress":"alice@example.com"},"theme":"dark"}' >"$HOME/.claude.json"
+printf '{"oauthAccount":{"emailAddress":"alice@example.com"},"theme":"dark","projects":{"/srv/trusted":{"hasTrustDialogAccepted":true},"/srv/untrusted":{"hasTrustDialogAccepted":false},"/srv/unseen":{}}}' >"$HOME/.claude.json"
 # A user who already has settings and an unrelated hook: both must survive.
 cat >"$HOME/.claude/settings.json" <<'EOF'
 {"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/true"}]}]}}
@@ -71,6 +71,7 @@ printf '{"oauthAccount":{"emailAddress":"bob@example.com"}}' >"$HOME/.claude-wor
 chk "clx --init exits 0 (rc=$rc)" '[ $rc = 0 ]'
 chk "settings.json linked into the account dir" "[ -L '$HOME/.claude-work/settings.json' ]"
 chk "prefs copied, identity kept" "python3 -c \"import json;d=json.load(open('$HOME/.claude-work/.claude.json'));assert d['theme']=='dark' and d['oauthAccount']['emailAddress']=='bob@example.com'\""
+chk "trust copied, never granted" "python3 -c \"import json;p=json.load(open('$HOME/.claude-work/.claude.json'))['projects'];assert p['/srv/trusted'].get('hasTrustDialogAccepted') is True and p['/srv/untrusted'].get('hasTrustDialogAccepted') is not True and p['/srv/unseen'].get('hasTrustDialogAccepted') is not True\""
 "$HOME/.local/bin/clx" --status >"$T/status2.out" 2>&1; rc=$?
 chk "status lists both accounts (rc=$rc)" "grep -qi alice '$T/status2.out' && grep -qi work '$T/status2.out'"
 "$HOME/.local/bin/clx-move" --dry-run work >"$T/move.out" 2>&1; rc=$?
