@@ -19,7 +19,10 @@ if [ "${1:-}" = status ] || [ -z "${1:-}" ]; then
     a=${d#"$HOME"/.claude-}
     found=1
     if [ -f "$d/.credentials.json" ]; then
-      j=$(CLAUDE_CONFIG_DIR="$d" claude auth status --json 2>/dev/null || echo '{}'); cfg="$d/.claude.json"
+      # `auth status` exits non-zero when logged out but still prints its JSON: keep it.
+      j=$(CLAUDE_CONFIG_DIR="$d" claude auth status --json 2>/dev/null) || true
+      [ -n "$j" ] || j='{}'
+      cfg="$d/.claude.json"
       email=$(CFG="$cfg" python3 -c '
 import json,sys,os
 d=json.load(sys.stdin)

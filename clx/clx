@@ -138,6 +138,8 @@ LINK_NAMES = [
     "commands",
     "plans",
 ]
+# The LINK_NAMES that are files; every other one is a directory.
+LINK_FILES = {"settings.json", "settings.local.json", "CLAUDE.md"}
 
 # Preference copy into <dir>/.claude.json: everything from ~/.claude.json except
 # identity. "projects" is merged separately.
@@ -1326,8 +1328,10 @@ def select(accounts, conf, forced=None):
     if forced is not None:
         chosen, reason = forced, "forced"
     elif primary is None:
-        # The old accounts[0] fallback, minus dead logins.
+        # With every account spent, the emptiest live UNPARKED one; the old
+        # accounts[0] fallback only when parked or dead logins are all there is.
         chosen = (best_candidate(accounts, set(), threshold, allow_stale=True)
+                  or least_full(accounts, set())
                   or next((a for a in accounts if not auth_problem(a)), accounts[0]))
         if primary_key:
             notes.append("primary %s: not logged in — run: cm-login %s" % (conf["primary"], conf["primary"]))
@@ -1349,7 +1353,8 @@ def select(accounts, conf, forced=None):
     elif primary.paused:
         # Parked: never launched, not even as the primary. Fall through to the
         # normal "best other account" logic; the banner says why.
-        alt = best_candidate(accounts, {primary.id}, threshold, allow_stale=True)
+        alt = (best_candidate(accounts, {primary.id}, threshold, allow_stale=True)
+               or least_full(accounts, {primary.id}))
         if alt is None:
             chosen = primary
             reason = "%s parked, nowhere else to go" % primary.name
@@ -1520,13 +1525,16 @@ def merge_prefs(directory, report):
         dst[key] = copy.deepcopy(value)
         copied.append(key)
 
+    # Trust mirrors the user's own config and is never granted: a folder not accepted
+    # there must still show the trust prompt (its hooks and settings run only after
+    # that), whichever account the session is on. Every folder this dir knows is
+    # held to it, so a trust revoked there, a folder dropped from it, or a grant left
+    # by an older clx is cleared here too.
+    src_projects = src.get("projects") or {}
     projects = dst.get("projects") or {}
-    for path, entry in (src.get("projects") or {}).items():
+    for path in set(projects) | set(src_projects):
+        entry = src_projects.get(path) or {}
         merged = dict(projects.get(path) or {})
-        # Trust mirrors the user's own config, never granted: a folder not accepted
-        # there must still show the trust prompt (its hooks and settings run only
-        # after that), whichever account the session is on. Mirrored both ways, so
-        # a trust revoked there, or one left by an older clx, is cleared here too.
         if entry.get("hasTrustDialogAccepted") is True:
             merged["hasTrustDialogAccepted"] = True
         else:
@@ -1908,7 +1916,15 @@ def create_session(chosen, threshold):
     for name in LINK_NAMES:
         src = os.path.join(CLAUDE_HOME, name)
         if not os.path.exists(src):
-            continue
+            if name in LINK_FILES:
+                continue
+            # A shared dir that does not exist yet is created and linked anyway:
+            # whatever the session writes there first (a transcript, a plan) would
+            # otherwise live only in this session dir and be deleted with it.
+            try:
+                os.makedirs(src, mode=0o700, exist_ok=True)
+            except OSError:
+                continue
         try:
             os.symlink(src, os.path.join(path, name))
         except OSError:

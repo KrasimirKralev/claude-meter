@@ -31,9 +31,13 @@ command -v python3 >/dev/null || die "python3 is required."
 # user's whole Claude Code configuration and must stay valid JSON.
 edit_settings() {   # $1 = add | remove
   python3 - "$1" "$SETTINGS" "$HOOK" <<'PY'
-import json, os, sys
+import json, os, shlex, sys
 mode, path, hook = sys.argv[1], sys.argv[2], sys.argv[3]
 events = ("UserPromptSubmit", "Stop", "PostToolUse")
+# Claude Code runs the command through a shell, so a HOME with a space in it
+# must be quoted. Either spelling counts as ours when checking or removing.
+command = shlex.quote(hook)
+ours = {hook, command}
 real = os.path.realpath(path)
 try:
     with open(real) as fh:
@@ -44,13 +48,13 @@ hooks = data.setdefault("hooks", {})
 changed = False
 for ev in events:
     groups = hooks.get(ev) or []
-    has = any(h.get("command") == hook for g in groups for h in g.get("hooks", []))
+    has = any(h.get("command") in ours for g in groups for h in g.get("hooks", []))
     if mode == "add" and not has:
-        groups.append({"hooks": [{"type": "command", "command": hook, "timeout": 5}]})
+        groups.append({"hooks": [{"type": "command", "command": command, "timeout": 5}]})
         changed = True
     elif mode == "remove" and has:
         for g in groups:
-            g["hooks"] = [h for h in g.get("hooks", []) if h.get("command") != hook]
+            g["hooks"] = [h for h in g.get("hooks", []) if h.get("command") not in ours]
         groups = [g for g in groups if g.get("hooks")]
         changed = True
     if groups:
@@ -121,10 +125,11 @@ for f in clx clx-move cm-login; do
     say "   kept the old $f as $BIN/$f.bak-$STAMP"
   fi
   # Copy then rename: a running hook must never execute a half-written file.
-  install -m 755 "$HERE/$f" "$BIN/.$f.new" && mv -f "$BIN/.$f.new" "$BIN/$f"
+  install -m 755 "$HERE/$f" "$BIN/.$f.new" || die "could not copy $f into $BIN"
+  mv -f "$BIN/.$f.new" "$BIN/$f" || die "could not replace $BIN/$f"
 done
-install -m 755 "$HERE/cc-handoff.sh" "$(dirname "$HOOK")/.cc-handoff.sh.new"
-mv -f "$(dirname "$HOOK")/.cc-handoff.sh.new" "$HOOK"
+install -m 755 "$HERE/cc-handoff.sh" "$(dirname "$HOOK")/.cc-handoff.sh.new" || die "could not copy the hook"
+mv -f "$(dirname "$HOOK")/.cc-handoff.sh.new" "$HOOK" || die "could not replace $HOOK"
 
 say ">> Registering the hand-off hook in $SETTINGS"
 backup_settings
@@ -133,6 +138,8 @@ say "   UserPromptSubmit, Stop, PostToolUse: $r"
 
 if [ "${1:-}" = --alias ]; then
   remove_alias
+  # A file that does not end in a newline would glue the marker onto its last line.
+  if [ -s "$BASHRC" ] && [ -n "$(tail -c 1 "$BASHRC")" ]; then printf '\n' >>"$BASHRC"; fi
   cat >>"$BASHRC" <<EOF
 $MARK_BEGIN
 # \`claude\` goes through clx, so an interactive session can move to another

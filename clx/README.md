@@ -87,7 +87,8 @@ The tests run in a throw-away `HOME` with fake tokens and no network:
 python3 clx/test/test-dead-auth.py   # a dead login is never a launch choice or a hand-off target
 python3 clx/test/test-no-5h.py       # decisions when the server reports no 5-hour window
 python3 clx/test/test-move.py        # clx-move, the meter's click
-bash    clx/test/test-install.sh     # install, first launch, second account, uninstall
+python3 clx/test/test-launch.py      # which account a launch picks when every one is spent
+bash    clx/test/test-install.sh     # install, first launch, second account, folder trust, uninstall
 ```
 
 MIT licensed, like the rest of this repo.
