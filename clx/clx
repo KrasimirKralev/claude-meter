@@ -1523,11 +1523,14 @@ def merge_prefs(directory, report):
     projects = dst.get("projects") or {}
     for path, entry in (src.get("projects") or {}).items():
         merged = dict(projects.get(path) or {})
-        # Trust is copied, never granted: a folder the user did not accept in their
-        # own config must still show the trust prompt (its hooks and settings run
-        # only after that), whichever account the session is on.
+        # Trust mirrors the user's own config, never granted: a folder not accepted
+        # there must still show the trust prompt (its hooks and settings run only
+        # after that), whichever account the session is on. Mirrored both ways, so
+        # a trust revoked there, or one left by an older clx, is cleared here too.
         if entry.get("hasTrustDialogAccepted") is True:
             merged["hasTrustDialogAccepted"] = True
+        else:
+            merged.pop("hasTrustDialogAccepted", None)
         for pkey in PROJECT_KEYS:
             if pkey in entry:
                 merged[pkey] = copy.deepcopy(entry[pkey])

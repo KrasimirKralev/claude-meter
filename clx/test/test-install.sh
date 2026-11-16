@@ -66,12 +66,13 @@ chk "hook exits 0 outside a session (rc=$rc)" '[ $rc = 0 ]'
 
 echo "== second account"
 mkdir -p -m 700 "$HOME/.claude-work"; creds "$HOME/.claude-work"
-printf '{"oauthAccount":{"emailAddress":"bob@example.com"}}' >"$HOME/.claude-work/.claude.json"
+# A stale grant for a folder the user never accepted (an older clx forced it): --init must clear it.
+printf '{"oauthAccount":{"emailAddress":"bob@example.com"},"projects":{"/srv/untrusted":{"hasTrustDialogAccepted":true}}}' >"$HOME/.claude-work/.claude.json"
 "$HOME/.local/bin/clx" --init >"$T/init.out" 2>&1; rc=$?
 chk "clx --init exits 0 (rc=$rc)" '[ $rc = 0 ]'
 chk "settings.json linked into the account dir" "[ -L '$HOME/.claude-work/settings.json' ]"
 chk "prefs copied, identity kept" "python3 -c \"import json;d=json.load(open('$HOME/.claude-work/.claude.json'));assert d['theme']=='dark' and d['oauthAccount']['emailAddress']=='bob@example.com'\""
-chk "trust copied, never granted" "python3 -c \"import json;p=json.load(open('$HOME/.claude-work/.claude.json'))['projects'];assert p['/srv/trusted'].get('hasTrustDialogAccepted') is True and p['/srv/untrusted'].get('hasTrustDialogAccepted') is not True and p['/srv/unseen'].get('hasTrustDialogAccepted') is not True\""
+chk "trust mirrored: copied, never granted, stale grant cleared" "python3 -c \"import json;p=json.load(open('$HOME/.claude-work/.claude.json'))['projects'];assert p['/srv/trusted'].get('hasTrustDialogAccepted') is True and p['/srv/untrusted'].get('hasTrustDialogAccepted') is not True and p['/srv/unseen'].get('hasTrustDialogAccepted') is not True\""
 "$HOME/.local/bin/clx" --status >"$T/status2.out" 2>&1; rc=$?
 chk "status lists both accounts (rc=$rc)" "grep -qi alice '$T/status2.out' && grep -qi work '$T/status2.out'"
 "$HOME/.local/bin/clx-move" --dry-run work >"$T/move.out" 2>&1; rc=$?
