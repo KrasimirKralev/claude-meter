@@ -13,7 +13,7 @@ meant "has a 5h number", so every account read as UNKNOWN and nothing was ever
 Everything runs in a throw-away HOME with FAKE tokens and no network - the
 sandbox is test-dead-auth.py's Box, loaded from the file next to this one.
 
-Usage:  python3 clx/test/test-no-5h.py [--clx PATH] [-v]
+Usage:  python3 test/test-no-5h.py [--clx PATH] [-v]
 Exit 0 when every assertion passes.
 """
 import argparse

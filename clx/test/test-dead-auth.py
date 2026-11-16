@@ -14,7 +14,7 @@ Everything here runs in a throw-away HOME with FAKE tokens. No network: the
 /usage fetch, the detached refresh and the desktop notice are stubbed, and the
 final exec into claude is intercepted. Nothing outside the sandbox is touched.
 
-Usage:  python3 clx/test/test-dead-auth.py [--clx PATH] [-v]
+Usage:  python3 test/test-dead-auth.py [--clx PATH] [-v]
 Exit 0 when every assertion passes.
 """
 import argparse

@@ -6,7 +6,7 @@ with or without a primary configured: an account at 95% beats breaking a park.
 Only when parked or dead logins are all there is does clx fall back to one.
 
 Everything runs in test-dead-auth.py's throw-away HOME with FAKE tokens and no
-network. Usage:  python3 clx/test/test-launch.py [--clx PATH] [-v]
+network. Usage:  python3 test/test-launch.py [--clx PATH] [-v]
 """
 import argparse
 import importlib.machinery

@@ -2,7 +2,7 @@
 # install.sh and clx on a fresh machine: one login in ~/.claude, no cc.json, no
 # ~/.claude-* dirs, a stub `claude`, and every HTTPS request sent to a closed port,
 # so the fake tokens never leave the box. Nothing outside a throw-away HOME is touched.
-# Usage: bash clx/test/test-install.sh [dir holding install.sh, clx, ...]
+# Usage: bash test/test-install.sh [dir holding install.sh, clx, ...]
 set -u
 SRC="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/clx-stranger-XXXX")"
@@ -90,6 +90,11 @@ chk "clx-move answers JSON (rc=$rc)" "python3 -c \"import json;json.loads(open('
 "$HOME/.local/bin/cm-login" status >"$T/cm.out" 2>&1; rc=$?
 chk "cm-login status lists work (rc=$rc)" "grep -q '^work ' '$T/cm.out'"
 chk "cm-login status reads a logged-out answer" "grep -q '^work .*not logged in' '$T/cm.out'"
+# A cloned repo with a json.py must not run code when cm-login is used inside it.
+evil="$T/evil-repo"; mkdir -p "$evil"
+printf 'import os\nopen(os.path.join(os.environ["HOME"], "PWNED"), "w").close()\nfrom _json import *\n' >"$evil/json.py"
+(cd "$evil" && "$HOME/.local/bin/cm-login" status >/dev/null 2>&1)
+chk "cm-login status in a repo with json.py runs none of its code" "[ ! -e '$HOME/PWNED' ]"
 "$HOME/.local/bin/cm-login" 'Bad Name' >/dev/null 2>&1; rc=$?
 chk "cm-login refuses a bad name" '[ $rc = 1 ]'
 
@@ -101,6 +106,24 @@ chk "hook entries gone, the rest kept" "[ \"\$(hooks)\" = '0 opus 1' ]"
 chk "alias removed, the rest of .bashrc kept" "grep -qx 'export FOO=1' '$HOME/.bashrc' && ! grep -q 'clx claude alias' '$HOME/.bashrc'"
 chk "logins untouched" "[ -f '$HOME/.claude-work/.credentials.json' ] && [ -f '$HOME/.claude/.credentials.json' ]"
 
+printf '# >>> clx claude alias >>>\nkeep me\n' >"$HOME/.bashrc-half"
+cp "$HOME/.bashrc-half" "$HOME/.bashrc"
+bash "$SRC/install.sh" --uninstall >/dev/null 2>&1
+chk "a half alias block (no end marker) is left as it was" "cmp -s '$HOME/.bashrc' '$HOME/.bashrc-half'"
+
+# A full block followed by a stray start marker, and an end before a start: both
+# would let a naive cut drop the user's own lines.
+printf '# >>> clx claude alias >>>\nalias\n# <<< clx claude alias <<<\nmine 1\n# >>> clx claude alias >>>\nmine 2\n' >"$HOME/.bashrc-odd"
+cp "$HOME/.bashrc-odd" "$HOME/.bashrc"
+bash "$SRC/install.sh" --uninstall >/dev/null 2>&1
+chk "unpaired markers after a full block: file left as it was" "cmp -s '$HOME/.bashrc' '$HOME/.bashrc-odd'"
+printf 'mine 0\n# <<< clx claude alias <<<\nmine 1\n# >>> clx claude alias >>>\nmine 2\n' >"$HOME/.bashrc-odd2"
+cp "$HOME/.bashrc-odd2" "$HOME/.bashrc"
+bash "$SRC/install.sh" --uninstall >/dev/null 2>&1
+chk "an end marker before the start: file left as it was" "cmp -s '$HOME/.bashrc' '$HOME/.bashrc-odd2'"
+
 echo "install: $PASS passed, $FAIL failed  (sandbox $T)"
 [ $FAIL = 0 ] || { echo "--- status1"; cat "$T/status1.out"; echo "--- launch2"; cat "$T/launch2.out"; echo "--- install"; cat "$T/install.out"; }
+# Passed: drop the sandbox (it holds fake tokens). Failed: keep it to look at.
+[ $FAIL = 0 ] && rm -rf "$T"
 [ $FAIL = 0 ]

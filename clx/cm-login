@@ -23,7 +23,8 @@ if [ "${1:-}" = status ] || [ -z "${1:-}" ]; then
       j=$(CLAUDE_CONFIG_DIR="$d" claude auth status --json 2>/dev/null) || true
       [ -n "$j" ] || j='{}'
       cfg="$d/.claude.json"
-      email=$(CFG="$cfg" python3 -c '
+      # -I: never import from the current dir (a json.py in a cloned repo would run here).
+      email=$(CFG="$cfg" python3 -I -c '
 import json,sys,os
 d=json.load(sys.stdin)
 if not d.get("loggedIn"): print("not logged in"); sys.exit()
