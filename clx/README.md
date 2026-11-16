@@ -29,7 +29,7 @@ curl -fsSL https://github.com/KrasimirKralev/clx/releases/latest/download/clx.ta
 ./clx/install.sh            # add --alias to make a plain `claude` go through clx
 ```
 
-The installer puts `clx`, `clx-move` and `cm-login` in `~/.local/bin` and the hook in `~/.claude/hooks/`. It registers the hook in `~/.claude/settings.json` (it backs up the file first and keeps everything else). It changes nothing outside those paths. To remove all of it, run `./clx/install.sh --uninstall`.
+The installer puts `clx`, `clx-move` and `cm-login` in `~/.local/bin` and the hook in `~/.claude/hooks/`. It registers the hook in `~/.claude/settings.json` (it backs up the file first and keeps everything else). It also runs `clx --init`, which links your shared settings into every `~/.claude-*` dir. Everything clx writes is listed in [its SECURITY.md](https://github.com/KrasimirKralev/clx/blob/main/SECURITY.md). To remove it, run `./clx/install.sh --uninstall`.
 
 ## Use
 
