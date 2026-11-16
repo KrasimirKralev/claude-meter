@@ -89,24 +89,43 @@ backup_settings() {
 
 remove_alias() {
   [ -f "$BASHRC" ] && grep -qxF "$MARK_BEGIN" "$BASHRC" || return 0
-  # Without its end marker the block's extent is unknown: cutting "to the end"
-  # could drop the rest of the file, so leave it for the user.
-  grep -qxF "$MARK_END" "$BASHRC" || { say "!! $BASHRC has the clx alias start marker but no end marker - remove that block by hand"; return 0; }
   cp -p "$BASHRC" "$BASHRC.bak-clx-$STAMP"
-  python3 -I - "$BASHRC" "$MARK_BEGIN" "$MARK_END" <<'PY'
+  # Cut only well-formed blocks: every start marker closed by an end marker before
+  # the next start. Anything else means the extent is unknown, and cutting could
+  # drop the user's own lines, so the file is left exactly as it was (exit 3).
+  if python3 -I - "$BASHRC" "$MARK_BEGIN" "$MARK_END" <<'PY'
 import sys
 path, begin, end = sys.argv[1:4]
+lines = open(path).readlines()
+depth = 0
+for line in lines:
+    mark = line.rstrip("\n")
+    if mark == begin:
+        if depth:
+            sys.exit(3)
+        depth = 1
+    elif mark == end:
+        if not depth:
+            sys.exit(3)
+        depth = 0
+if depth:
+    sys.exit(3)
 out, skip = [], False
-for line in open(path):
-    if line.rstrip("\n") == begin:
+for line in lines:
+    mark = line.rstrip("\n")
+    if mark == begin:
         skip = True
     if not skip:
         out.append(line)
-    if line.rstrip("\n") == end:
+    if mark == end:
         skip = False
 open(path, "w").write("".join(out))
 PY
-  say "   removed the claude alias from $BASHRC (backup: $BASHRC.bak-clx-$STAMP)"
+  then
+    say "   removed the claude alias from $BASHRC (backup: $BASHRC.bak-clx-$STAMP)"
+  else
+    say "!! $BASHRC has clx alias markers that do not pair up - left it as it was; remove that block by hand"
+  fi
 }
 
 if [ "${1:-}" = --uninstall ]; then

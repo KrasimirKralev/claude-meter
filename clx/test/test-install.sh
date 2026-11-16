@@ -111,6 +111,17 @@ cp "$HOME/.bashrc-half" "$HOME/.bashrc"
 bash "$SRC/install.sh" --uninstall >/dev/null 2>&1
 chk "a half alias block (no end marker) is left as it was" "cmp -s '$HOME/.bashrc' '$HOME/.bashrc-half'"
 
+# A full block followed by a stray start marker, and an end before a start: both
+# would let a naive cut drop the user's own lines.
+printf '# >>> clx claude alias >>>\nalias\n# <<< clx claude alias <<<\nmine 1\n# >>> clx claude alias >>>\nmine 2\n' >"$HOME/.bashrc-odd"
+cp "$HOME/.bashrc-odd" "$HOME/.bashrc"
+bash "$SRC/install.sh" --uninstall >/dev/null 2>&1
+chk "unpaired markers after a full block: file left as it was" "cmp -s '$HOME/.bashrc' '$HOME/.bashrc-odd'"
+printf 'mine 0\n# <<< clx claude alias <<<\nmine 1\n# >>> clx claude alias >>>\nmine 2\n' >"$HOME/.bashrc-odd2"
+cp "$HOME/.bashrc-odd2" "$HOME/.bashrc"
+bash "$SRC/install.sh" --uninstall >/dev/null 2>&1
+chk "an end marker before the start: file left as it was" "cmp -s '$HOME/.bashrc' '$HOME/.bashrc-odd2'"
+
 echo "install: $PASS passed, $FAIL failed  (sandbox $T)"
 [ $FAIL = 0 ] || { echo "--- status1"; cat "$T/status1.out"; echo "--- launch2"; cat "$T/launch2.out"; echo "--- install"; cat "$T/install.out"; }
 # Passed: drop the sandbox (it holds fake tokens). Failed: keep it to look at.

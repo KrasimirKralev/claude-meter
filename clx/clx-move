@@ -40,6 +40,7 @@ EVENT = "manual"
 MANUAL_WINDOW = "manual"        # the synthetic "window" this move is recorded on, like clx's "paused"
 MANUAL_LABEL = "moved by hand"
 LIMIT = "limit: "                # prefix of an outcome that is a "would be moved off again"
+UNSAVED = "unsaved refresh"     # the session's new login is not copied home yet: retried
 RETRIES = 30                    # x WAIT: how long a busy session lock is waited for
 WAIT = 0.1
 
@@ -124,14 +125,20 @@ def move_all(clx, name, dry_run=False, retries=RETRIES, wait=WAIT):
     try:
         for sdir in sessions:
             pid = os.path.basename(sdir)
+            outcome = None
             for _ in range(max(1, retries)):
                 with clx.SessionLock(sdir) as lock:
                     if lock.held:
                         outcome = move_one(clx, sdir, target, accounts, conf, dry_run)
-                        break
+                if outcome is not None and outcome != UNSAVED:
+                    break
+                # The lock is released here, so the watcher can save a fresh login
+                # (its tick is 2 s; the retries span 3 s) before the next try.
                 time.sleep(wait)
-            else:
+            if outcome is None:
                 outcome = "busy: its record is being written, click again"
+            elif outcome == UNSAVED:
+                outcome = "busy: its login was just refreshed and is not saved yet, click again"
             if outcome == "moved":
                 result["moved"].append(pid)
             elif outcome == "already":
@@ -166,7 +173,7 @@ def move_one(clx, sdir, target, accounts, conf, dry_run):
     if os.path.lexists(link) and not os.path.islink(link):
         # Claude Code just refreshed this session's login and the watcher has not
         # copied it home yet: moving now would throw the new token away.
-        return "busy"
+        return UNSAVED
     bounce = would_bounce(clx, target, accounts, meta, conf)
     if bounce:
         return LIMIT + bounce

@@ -76,7 +76,7 @@ HOOK_EVENTS = ("prompt", "stop", "post-tool")
 WATCH_EVENT = "watch"
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-CLX_VERSION = "1.0.0"
+CLX_VERSION = "1.0.1"
 # Say who is asking: clx is not Claude Code, and the usage endpoint answers either way.
 USER_AGENT = "clx/%s (+https://github.com/KrasimirKralev/clx)" % CLX_VERSION
 
@@ -1822,7 +1822,11 @@ def harvest_projects(session_config):
     if not isinstance(existing, dict):
         existing = {}
     launch = read_json(os.path.join(os.path.dirname(session_config), LAUNCH_PROJECTS), None)
-    launch = set(launch) if isinstance(launch, list) else set()
+    if not isinstance(launch, list):
+        # No launch record (a session from an older clx, or a damaged file): its own
+        # folders cannot be told from inherited grants, so nothing goes back.
+        return 0
+    launch = set(launch)
     added = [p for p in projects if p not in existing and p not in launch]
     if not added:
         return 0

@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -137,6 +138,17 @@ def t_harvest_adds_only_new(clx):
         check("a grant the session started with is not copied into ~/.claude.json",
               "/srv/granted-elsewhere" not in main, repr(sorted(main)))
 
+        # A session with no launch record (an older clx) cannot tell its own folders
+        # from inherited grants: nothing of it goes back.
+        os.unlink(os.path.join(sess, box.mod.LAUNCH_PROJECTS))
+        data["projects"]["/srv/second"] = {"hasTrustDialogAccepted": True}
+        box.write_json(cfg, data)
+        box.mod.harvest_projects(cfg)
+        with open(os.path.join(box.home, ".claude.json")) as fh:
+            main = json.load(fh).get("projects", {})
+        check("a session without a launch record harvests nothing",
+              "/srv/second" not in main and "/srv/granted-elsewhere" not in main, repr(sorted(main)))
+
 
 def t_notify_ends_options(clx):
     """An account name starting with '-' could be read as a notify-send option."""
@@ -181,9 +193,24 @@ def t_move_waits_for_heal(clx, move_path):
         meta_conf = box.mod.load_conf()
         target = next(a for a in accts if a.id == "bb")
         got = move.move_one(box.mod, sess, target, accts, meta_conf, False)
-        check("a session with an unsaved refresh is skipped as busy", got == "busy", repr(got))
+        check("a session with an unsaved refresh is not moved yet", got == move.UNSAVED, repr(got))
         check("its refreshed login is untouched",
               os.path.isfile(link) and not os.path.islink(link))
+
+        # The watcher saves the login half a second later: the click's retries pick
+        # the session up instead of skipping it.
+        def watcher_saves():
+            os.unlink(link)
+            box.mod.point_credentials(sess, os.path.join(box.home, ".claude-aa"))
+
+        timer = threading.Timer(0.5, watcher_saves)
+        timer.start()
+        try:
+            res = move.move_all(box.mod, "bb", wait=0.1)
+        finally:
+            timer.join()
+        check("once the login is saved, the retried move goes through",
+              res.get("moved") == [os.path.basename(sess)], repr(res))
 
 
 def main():
