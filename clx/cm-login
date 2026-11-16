@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# cm-login <name> [email]  - log one Claude account into its own config dir, ~/.claude-<name>
+# cm-login status          - list every ~/.claude-<name> dir and who is logged in there
+#
+# One account per dir is what clx (and Claude Meter) count on: clx picks among
+# the ~/.claude-* dirs that hold a login. <name> becomes the account's name
+# everywhere (clx --status, the hand-off notes, the meter's tabs), so pick a
+# short one: work, personal, team.
+set -euo pipefail
+
+dir_for() { echo "$HOME/.claude-$1"; }
+
+if [ "${1:-}" = status ] || [ -z "${1:-}" ]; then
+  printf '%-16s %-8s %s\n' ACCOUNT STATE EMAIL
+  found=0
+  for d in "$HOME"/.claude-*/; do
+    [ -d "$d" ] || continue
+    d=${d%/}
+    a=${d#"$HOME"/.claude-}
+    found=1
+    if [ -f "$d/.credentials.json" ]; then
+      # `auth status` exits non-zero when logged out but still prints its JSON: keep it.
+      j=$(CLAUDE_CONFIG_DIR="$d" claude auth status --json 2>/dev/null) || true
+      [ -n "$j" ] || j='{}'
+      cfg="$d/.claude.json"
+      email=$(CFG="$cfg" python3 -c '
+import json,sys,os
+d=json.load(sys.stdin)
+if not d.get("loggedIn"): print("not logged in"); sys.exit()
+e=d.get("email")
+if not e:
+    try: e=json.load(open(os.environ["CFG"])).get("oauthAccount",{}).get("emailAddress")
+    except Exception: e=None
+print(e or "logged in")' <<<"$j" 2>/dev/null || echo '?')
+      printf '%-16s %-8s %s\n' "$a" "ok" "$email"
+    else
+      printf '%-16s %-8s %s\n' "$a" "--" "(no login yet)"
+    fi
+  done
+  [ "$found" = 1 ] || echo "(no ~/.claude-<name> dirs yet - run: cm-login <name> [email])"
+  exit 0
+fi
+
+name=$1; email=${2:-}
+# ~/.claude is Claude Code's own default dir; a plain `claude` logs in there.
+# cm-login is only for the extra ~/.claude-<name> dirs.
+[ "$name" = default ] && { echo "cm-login: use a name, not 'default' - ~/.claude is Claude Code's own dir" >&2; exit 1; }
+case "$name" in
+  *[!a-z0-9_-]*|-*) echo "cm-login: account names are lowercase letters, digits, '-' and '_' (got: $name)" >&2; exit 1 ;;
+esac
+d=$(dir_for "$name"); mkdir -p -m 700 "$d"
+echo ">> Logging '$name' into $d"
+echo ">> If your browser is already signed in to another Claude account, open the URL"
+echo ">> below in a private window, or this dir gets that account instead."
+CLAUDE_CONFIG_DIR="$d" claude auth login --claudeai ${email:+--email "$email"}
+echo
+CLAUDE_CONFIG_DIR="$d" claude auth status --text

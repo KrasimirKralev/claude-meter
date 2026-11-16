@@ -93,6 +93,19 @@ If you're not logged into Claude Code, the usage bars will be empty.
 
 ---
 
+## clx: move a running session to another account (Linux)
+
+[`clx`](clx/) starts Claude Code on whichever account has the most room. When that account runs out mid-task, clx moves the **same running session** to the next account. You don't restart and don't lose any subagents. With clx installed, the meter's **Active** badge follows your sessions, and a click on an account moves every session there.
+
+```bash
+curl -fsSL https://github.com/KrasimirKralev/claude-meter/releases/latest/download/clx.tar.gz | tar xz
+./clx/install.sh
+```
+
+See [`clx/README.md`](clx/README.md) for how it works, the commands and the limits. The meter works fine without it.
+
+---
+
 ## Configuration
 
 ### Settings

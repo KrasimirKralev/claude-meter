@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""clx-move [--dry-run] <account> - move every running clx session to one account.
+
+What a click on an account in Claude Meter asks for ("if I
+click an account, change all my claude sessions to that account").
+
+It IMPORTS clx and uses clx's own parts - account discovery, the session lock,
+the session lookup, perform_handoff - so the
+move is the same re-pointed credentials link, the same records and the same log
+line as an automatic hand-off, and clx itself needs no change. The event is
+"manual" in clx-session.json and ~/.claude/clx-handoff.log.
+
+Refused outright when clx has no such account, its login is dead, or it is
+parked. Otherwise each session is judged for the model IT runs:
+  * a session the account can keep is moved;
+  * a session clx would move off again - the account is at or over clx's
+    threshold on a window that binds that session's model - stays where it is
+    and is reported with the reason. clx hands such a session on ten minutes
+    later (HANDOFF_MIN_GAP), and a move that quietly reverses is worse than a
+    "no" that says why. When no session could be moved for that reason the
+    answer is a refusal (ok false) carrying it.
+A session whose lock stays busy is reported and left for the next click.
+
+stdout: one JSON object
+  {"ok": true,  "target": "Bob", "sessions": 3, "moved": ["123"], "already": ["456"],
+   "skipped": [{"pid": "789", "why": "busy"}], "dry_run": false}
+  {"ok": false, "error": "Alice is at 98% of its 7d limit ...", "skipped": [...]}
+exit:   0 decided and done (also when nothing had to move), 1 refused,
+        2 clx could not be loaded / no account named / a crash
+env:    CLX_MOVE_CLX   path of clx (default ~/.local/bin/clx)
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+import time
+
+EVENT = "manual"
+MANUAL_WINDOW = "manual"        # the synthetic "window" this move is recorded on, like clx's "paused"
+MANUAL_LABEL = "moved by hand"
+LIMIT = "limit: "                # prefix of an outcome that is a "would be moved off again"
+RETRIES = 30                    # x WAIT: how long a busy session lock is waited for
+WAIT = 0.1
+
+
+def load_clx(path=None):
+    path = path or os.environ.get("CLX_MOVE_CLX") or os.path.expanduser("~/.local/bin/clx")
+    loader = importlib.machinery.SourceFileLoader("clx", path)
+    spec = importlib.util.spec_from_loader("clx", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def live_sessions(clx):
+    """The session dirs of clx sessions whose process is alive, oldest pid first."""
+    try:
+        entries = sorted((e for e in os.listdir(clx.SESSIONS_ROOT) if e.isdigit()), key=int)
+    except OSError:
+        return []
+    return [os.path.join(clx.SESSIONS_ROOT, e) for e in entries
+            if os.path.isdir(os.path.join(clx.SESSIONS_ROOT, e)) and clx.pid_alive(e)]
+
+
+def session_threshold(meta, conf):
+    try:
+        return float(meta.get("threshold"))
+    except (TypeError, ValueError):
+        return conf["threshold"]
+
+
+def for_session(clx, accounts, meta):
+    """Judge the accounts for the model THIS session runs - a cap scoped to
+    another model must not count (clx's watcher does the same)."""
+    clx.apply_model(accounts, clx.session_model({"transcript_path": (meta or {}).get("transcript_path")}))
+
+
+def refusal(clx, target):
+    """Why NO session may be sent to `target`, or None."""
+    dead = clx.auth_problem(target)
+    if dead:
+        return "%s cannot take a session: %s" % (target.name, dead)
+    if target.paused is not None:
+        return "%s is parked (clx --resume %s brings it back)" % (target.name, target.id)
+    return None
+
+
+def would_bounce(clx, target, accounts, meta, conf):
+    """Why clx would move THIS session off `target` again, or None. The accounts
+    must already be judged for the session's model (for_session)."""
+    threshold = session_threshold(meta, conf)
+    spent = clx.over_threshold(target, threshold) if clx.known(target) else None
+    if not spent:
+        return None
+    return ("%s is at %s%% of its %s limit; clx switches away at %g%% and would move it off again"
+            % (target.name, clx.fmt_pct(spent[2]), spent[1], threshold))
+
+
+def move_all(clx, name, dry_run=False, retries=RETRIES, wait=WAIT):
+    """Move every live session to the account `name` names. -> the result dict."""
+    name = (name or "").strip()
+    conf = clx.load_conf()
+    accounts = clx.discover()
+    if not accounts:
+        return {"ok": False, "error": "clx sees no account"}
+    accounts, _ = clx.dedupe(accounts, conf["primary"].strip().lower())
+    clx.refresh(accounts, force=False, only="__none__")     # the cache only: a click never waits on the network
+    clx.apply_pauses(accounts, conf)
+    target = clx.match_account(accounts, name) if name else None
+    if target is None:
+        return {"ok": False, "error": "clx has no account %r (it has: %s)"
+                % (name, ", ".join(a.name for a in accounts))}
+    sessions = live_sessions(clx)
+    why = refusal(clx, target)
+    if why:
+        return {"ok": False, "target": target.name, "sessions": len(sessions), "error": why}
+
+    result = {"ok": True, "target": target.name, "sessions": len(sessions), "moved": [], "already": [],
+              "skipped": [], "dry_run": bool(dry_run)}
+    say = clx.notify
+    clx.notify = lambda *a, **kw: False         # whoever asked for the move is looking at its answer
+    try:
+        for sdir in sessions:
+            pid = os.path.basename(sdir)
+            for _ in range(max(1, retries)):
+                with clx.SessionLock(sdir) as lock:
+                    if lock.held:
+                        outcome = move_one(clx, sdir, target, accounts, conf, dry_run)
+                        break
+                time.sleep(wait)
+            else:
+                outcome = "busy: its record is being written, click again"
+            if outcome == "moved":
+                result["moved"].append(pid)
+            elif outcome == "already":
+                result["already"].append(pid)
+            elif outcome.startswith(LIMIT):
+                result["skipped"].append({"pid": pid, "why": outcome[len(LIMIT):], "limit": True})
+            else:
+                result["skipped"].append({"pid": pid, "why": outcome})
+    finally:
+        clx.notify = say
+    full = [s["why"] for s in result["skipped"] if s.get("limit")]
+    if full and not result["moved"] and not result["already"]:
+        result["ok"] = False        # nothing could go there: the click is refused, with the reason
+        result["error"] = full[0]
+    return result
+
+
+def move_one(clx, sdir, target, accounts, conf, dry_run):
+    """One session, inside its lock. -> "moved" | "already" | why it was skipped."""
+    if not clx.pid_alive(os.path.basename(sdir)):
+        return "ended"
+    meta = clx.read_session_meta(sdir)      # never act on a record read before the lock
+    if not meta:
+        return "no session record"
+    for_session(clx, accounts, meta)
+    current = clx.session_account(sdir, meta, accounts)
+    if current is None:
+        return "its account is not one clx knows"
+    if current.id == target.id:
+        return "already"
+    bounce = would_bounce(clx, target, accounts, meta, conf)
+    if bounce:
+        return LIMIT + bounce
+    if not dry_run:
+        clx.perform_handoff(sdir, meta, current, target, accounts, session_threshold(meta, conf), EVENT,
+                            (MANUAL_WINDOW, MANUAL_LABEL, None))
+    return "moved"
+
+
+def main(argv):
+    args = [a for a in argv if a != "--dry-run"]
+    if len(args) != 1 or args[0].startswith("-"):
+        sys.stderr.write(__doc__.split("\n\n")[0] + "\n")
+        return 2
+    try:
+        clx = load_clx()
+    except Exception as exc:  # no clx, no move: say so in the same shape as every other answer
+        print(json.dumps({"ok": False, "error": "clx could not be loaded: %s" % exc}))
+        return 2
+    try:
+        result = move_all(clx, args[0], dry_run="--dry-run" in argv)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": "the move failed: %s: %s" % (type(exc).__name__, exc)}))
+        return 2
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
