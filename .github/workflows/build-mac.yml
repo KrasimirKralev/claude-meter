@@ -60,9 +60,24 @@ jobs:
           name: claude-meter-macos
           path: dist/*.dmg
 
+  # clx is Linux only (it reads /proc), so its tests run here, not on the Mac runner.
+  clx-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run the clx tests
+        run: |
+          python3 -I clx/test/test-dead-auth.py
+          python3 -I clx/test/test-no-5h.py
+          python3 -I clx/test/test-move.py
+          bash clx/test/test-install.sh
+
   # A pull request proves the build. Only main publishes one.
   publish:
-    needs: build-mac
+    needs: [build-mac, clx-tests]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -74,13 +89,24 @@ jobs:
           name: claude-meter-macos
           path: dist
 
+      # Packing files runs none of the project's code, so this job may still hold the token.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: src
+
+      - name: Pack clx
+        run: tar -C src -czf dist/clx.tar.gz --exclude='__pycache__' clx
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.build-mac.outputs.version }}
           name: Claude Meter for macOS v${{ needs.build-mac.outputs.version }}
           make_latest: true
-          files: dist/*.dmg
+          files: |
+            dist/*.dmg
+            dist/clx.tar.gz
           body: |
             **Claude Meter — macOS build (unsigned)**
 
@@ -99,3 +125,11 @@ jobs:
             xattr -cr "/Applications/Claude Meter.app"
             ```
             then open it normally. After the first open it launches like any other app.
+
+            ### clx (Linux)
+            `clx.tar.gz` holds clx, the launcher that moves a running Claude Code session to another account when one runs out:
+            ```
+            curl -fsSL https://github.com/KrasimirKralev/claude-meter/releases/latest/download/clx.tar.gz | tar xz
+            ./clx/install.sh
+            ```
+            See [clx/README.md](https://github.com/KrasimirKralev/claude-meter/blob/main/clx/README.md).

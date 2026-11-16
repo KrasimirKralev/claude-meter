@@ -1,0 +1,3634 @@
+#!/usr/bin/env python3
+"""clx - auto-switching Claude Code launcher across several subscription accounts.
+
+Each account is one Claude Code config dir:
+    ~/.claude            the default dir (config file is ~/.claude.json, NOT inside it)
+    ~/.claude-<name>     one per extra account (config file is <dir>/.claude.json)
+
+`clx` picks the account with head-room left on the 5-hour limit and execs the real
+`claude` with CLAUDE_CONFIG_DIR pointed at a per-session dir ~/.clx-sessions/<pid>
+whose .credentials.json is a SYMLINK into the chosen account's dir.
+
+Why a session dir: Claude Code re-reads <CLAUDE_CONFIG_DIR>/.credentials.json on
+EVERY request and never falls back to a cached token (proven 2026-09-03 against a
+long-lived process), so re-pointing that one symlink moves a RUNNING session to
+another account - no restart, no --continue, subagents and background tasks keep
+going. `clx --handoff-check` (the hook) does exactly that when the account this
+session runs on has spent its 5-hour limit.
+
+Why not a token: CLAUDE_CODE_OAUTH_TOKEN / apiKeyHelper were tested and are static
+or hang. CLAUDE_CONFIG_DIR keeps Claude Code's own login and token refresh.
+
+Files it owns (all 0600):
+    ~/.claude/cc.json               {"threshold": 90, "primary": "<name>", "paused": {...}}
+    ~/.claude/cc-usage-cache.json   per-account /usage snapshot, 180 s TTL
+    ~/.claude/active-account.json   what the last launch chose, read by the statusline
+    ~/.claude/clx-handoff.log       one line per in-process hand-off and heal
+    ~/.clx-sessions/<pid>/          one live REPL's CLAUDE_CONFIG_DIR (0700)
+
+No third-party dependencies: stdlib only.
+"""
+
+import copy
+import fcntl
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+CLAUDE_HOME = os.path.join(HOME, ".claude")
+CONF_FILE = os.path.join(CLAUDE_HOME, "cc.json")
+CACHE_FILE = os.path.join(CLAUDE_HOME, "cc-usage-cache.json")
+ACTIVE_FILE = os.path.join(CLAUDE_HOME, "active-account.json")
+HANDOFF_LOG = os.path.join(CLAUDE_HOME, "clx-handoff.log")
+META_KEY = "__meta__"  # cache bookkeeping; never an account id
+
+# --- session dirs / hand-off -------------------------------------------------
+# One interactive REPL == one dir under SESSIONS_ROOT named after the Claude Code
+# pid (os.execve keeps the pid, so the launcher's pid IS the child's). Inside it,
+# .credentials.json is a symlink into an account dir and SESSION_META - not the
+# symlink - is the source of truth for which account the session is on.
+SESSIONS_ROOT = os.path.join(HOME, ".clx-sessions")
+SESSION_META = "clx-session.json"
+SESSION_LOCK = ".clx.lock"          # one writer per session at a time
+GC_LEFTOVER = re.compile(r"^\d+\.gc-\d+$")  # a session dir renamed aside for removal
+INSIDE_ENV = "CLX_INSIDE"          # recursion guard for the `claude` shell function
+NO_SESSION_ENV = "CLX_NO_SESSION"  # kill switch: exec into the account dir as before
+
+# Loop guard: at most one hand-off per this many seconds. The same window is how
+# long the model is told "this session moved" and how long the statusline shows it.
+HANDOFF_MIN_GAP = float(os.environ.get("CC_HANDOFF_MIN_GAP") or 600)
+# Hook payloads embed whole tool results; we only need the leading scalars.
+PAYLOAD_LIMIT = 262144
+
+HOOK_EVENTS = ("prompt", "stop", "post-tool")
+# The watcher runs the SAME decision on a timer and labels it with this event.
+# Deliberately not in HOOK_EVENTS: --event may never ask for it, it is what the
+# heal watcher passes in-process (finding-blocked-session.md, item 1).
+WATCH_EVENT = "watch"
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+USER_AGENT = "claude-code/2.1.258"
+
+# The /usage rate limit is per token and aggressive, so never poll an account
+# more often than this. --sync is the one explicit, user-driven exception.
+TTL = int(os.environ.get("CC_CACHE_TTL") or 180)
+HTTP_TIMEOUT = float(os.environ.get("CC_HTTP_TIMEOUT") or 10)
+# Adaptive freshness, for the WATCHER only - the hook path never fetches. An
+# account whose worst applicable window is within NEAR_MARGIN of the threshold is
+# refreshed every NEAR_TTL seconds instead of every TTL: usage climbed two points
+# a minute on 2026-09-05, so a number read at 90 % can describe a spent account
+# three minutes later. NEAR_TTL is also the floor - no account is ever polled
+# more often than this, whatever the caller asks for.
+NEAR_TTL = max(30, int(os.environ.get("CC_NEAR_TTL") or 30))
+NEAR_MARGIN = float(os.environ.get("CC_NEAR_MARGIN") or 15)
+# How old a cached number may be before it stops being evidence at all. An
+# account's entry is refreshed only by the sessions sitting ON it, and a
+# hand-off always LEAVES an account at >= threshold - so the entry of every
+# account worth moving to freezes at 90 %+ the second the session leaves, and
+# nobody ever touches it again. Reading that frozen number as "over" is what
+# pinned two sessions to an account at 100 % for four hours on 2026-09-07
+# (finding-stale-candidates.md). Past this age an entry is UNKNOWN, which is a
+# last resort - never "over", which is a refusal.
+STALE_FACTOR = int(os.environ.get("CC_STALE_FACTOR") or 10)
+# One lock file, one byte range per account, guarding the right to call /usage.
+# Every live session runs a watcher and every watcher now keeps every account
+# fresh; without the claim, N sessions waking in the same second would make N
+# calls for one account and multiply the rate limit by the number of terminals.
+USAGE_LOCK = os.path.join(CLAUDE_HOME, "cc-usage.lock")
+LOCK_SLOTS = 64
+# The watcher is the only thing that GCs its own session dir, so "tried once and
+# the lock was busy" must not be the end of it (~/.clx-sessions/<pid> survived
+# two days that way).
+GC_RETRIES = int(os.environ.get("CC_GC_RETRIES") or 30)
+
+DEFAULT_CONF = {"threshold": 90, "primary": ""}  # no primary: the account with most room
+# cc.json may also carry "paused" - see parse_pauses(). A parked account is
+# never launched on and never handed a session, but it is still discovered,
+# still polled and still refreshed: parking must not touch credentials.
+
+# Shared from ~/.claude into every account dir, as absolute symlinks.
+# Deliberately NOT shared: .credentials.json, .claude.json, statsig, todos, debug.
+LINK_NAMES = [
+    "settings.json",
+    "settings.local.json",
+    "CLAUDE.md",
+    "skills",
+    "agents",
+    "plugins",
+    "hooks",
+    "projects",
+    "channels",   # channel plugins (telegram/discord) keep token + pairing here
+    # Everything else Claude Code writes under CLAUDE_CONFIG_DIR that must outlive the
+    # session: a session dir is GC'd when its pid dies, and whatever was written only
+    # there goes with it.
+    "workflows",            # saved /workflows
+    "dev-mods",             # plugin-authoring writes new mods here
+    "rules",                # user-level ~/.claude/rules
+    "agent-memory",         # subagent `memory:` stores
+    "output-styles",
+    "commands",
+    "plans",
+]
+
+# Preference copy into <dir>/.claude.json: everything from ~/.claude.json except
+# identity. "projects" is merged separately.
+PREF_EXCLUDE_EXACT = {"oauthAccount", "userID", "projects"}
+PREF_EXCLUDE_SUBSTR = ("token", "key", "secret", "account")
+PROJECT_KEYS = (
+    "allowedTools",
+    "enabledMcpjsonServers",
+    "disabledMcpjsonServers",
+    "hasClaudeMdExternalIncludesApproved",
+)
+
+
+# --------------------------------------------------------------------------- io
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {} if default is None else default
+
+
+def write_json_atomic(path, obj, mode=0o600):
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def warn(msg):
+    sys.stderr.write(msg + "\n")
+
+
+# ------------------------------------------------------------- desktop notice
+# A hand-off is invisible to a user who is staring at "continuing automatically
+# at 3:40am": nothing is printed until the session takes a turn, and a blocked
+# session never takes one. This is the only channel that reaches them.
+#
+# Best effort in the strictest sense - it never blocks (the child is detached and
+# never waited on), never raises, and never changes what the caller returns. It
+# stays silent with CLX_NO_NOTIFY=1, with no notify-send on PATH, and on a tty or
+# ssh session with no desktop bus.
+NOTIFY_BIN = "notify-send"
+NOTIFY_APP = "clx"
+NOTIFY_CONTINUE = ("If this terminal is waiting on a usage limit: "
+                   "press Esc, then type continue")
+_NOTIFY_PROCS = []  # detached children, reaped on the next notify()
+
+
+def notify(summary, body="", urgency="normal"):
+    """Fire a desktop notification. -> True when one was actually spawned."""
+    if os.environ.get("CLX_NO_NOTIFY"):
+        return False
+    if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return False  # no session bus: a tty, a cron job, an ssh login
+    try:
+        binary = shutil.which(NOTIFY_BIN)
+        if not binary:
+            return False
+        # --transient: a banner only, never kept in GNOME's notification list
+        # (owner, 2026-10-15) - a hand-off notice is stale minutes later.
+        argv = [binary, "-a", NOTIFY_APP, "-u", urgency, "--transient", summary]
+        if body:
+            argv.append(body)
+        _NOTIFY_PROCS[:] = [p for p in _NOTIFY_PROCS if p.poll() is None]
+        _NOTIFY_PROCS.append(subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True))
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------- config
+
+
+def load_conf():
+    conf = dict(DEFAULT_CONF)
+    conf.update(read_json(CONF_FILE, {}) or {})
+    if os.environ.get("CC_THRESHOLD"):
+        conf["threshold"] = os.environ["CC_THRESHOLD"]
+    if os.environ.get("CC_PRIMARY"):
+        conf["primary"] = os.environ["CC_PRIMARY"]
+    try:
+        conf["threshold"] = float(conf["threshold"])
+    except (TypeError, ValueError):
+        conf["threshold"] = float(DEFAULT_CONF["threshold"])
+    conf["primary"] = str(conf.get("primary") or DEFAULT_CONF["primary"])
+    conf["paused"] = parse_pauses(conf.get("paused"))
+    return conf
+
+
+# ------------------------------------------------------------ parked accounts
+# cc.json:
+#     "paused": {"bob":   {"until": 1788800000, "since": 1788600000,
+#                          "reason": "lent to a colleague"}}
+# `until` may be null for an indefinite park. An entry whose `until` has passed
+# is expired: ignored everywhere, and pruned the next time cc.json is written -
+# which only --pause / --resume ever do, never a hook path.
+PAUSE_WINDOW = "paused"          # the synthetic "window" a park hands off on
+PAUSE_LABEL = "parked"
+PAUSE_DEFAULT_DAYS = 3
+
+
+def parse_pauses(raw, now=None):
+    """cc.json's "paused" -> {account key: entry}, expired entries dropped.
+
+    Keys are matched the way --use matches (id / name / email / local part), so
+    they are lowercased here. Anything unparseable counts as NOT parked: a
+    damaged cc.json must never silently take an account out of service.
+    """
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    now = time.time() if now is None else now
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        if value is None or value is False:
+            continue
+        entry = value if isinstance(value, dict) else {}
+        until = entry.get("until")
+        if isinstance(until, bool) or not isinstance(until, (int, float)):
+            until = None  # missing, null or junk: an indefinite park
+        if until is not None and until <= now:
+            continue  # expired
+        since = entry.get("since")
+        if isinstance(since, bool) or not isinstance(since, (int, float)):
+            since = None
+        out[key.strip().lower()] = {"until": until, "since": since,
+                                    "reason": str(entry.get("reason") or "")}
+    return out
+
+
+def pause_left(entry, now=None):
+    """Seconds left on a park, or None when it never expires."""
+    until = (entry or {}).get("until")
+    if not isinstance(until, (int, float)):
+        return None
+    return max(0, int(until - (time.time() if now is None else now)))
+
+
+def apply_pauses(accounts, conf):
+    """Tell every account whether it is parked. -> the parked ones.
+
+    The mirror of apply_model(): decisions are made against acct.paused, so an
+    account list that never came through here behaves exactly as it did before.
+    """
+    pauses = (conf or {}).get("paused") or {}
+    parked = []
+    for acct in accounts:
+        entry = None
+        for key in sorted(acct.keys()):  # sorted: stable if two keys both match
+            if key in pauses:
+                entry = pauses[key]
+                break
+        acct.paused = entry
+        if entry:
+            parked.append(acct)
+    return parked
+
+
+def pause_tag(acct):
+    """"parked 2d 4h" / "parked" - the --status STATUS cell."""
+    left = pause_left(acct.paused)
+    return PAUSE_LABEL if left is None else "%s %s" % (PAUSE_LABEL, fmt_span(left))
+
+
+def pause_phrase(acct):
+    """"Bob is parked for 2d 4h" - the launch banner note."""
+    left = pause_left(acct.paused)
+    return "%s is parked %s" % (acct.name,
+                                "indefinitely" if left is None else "for " + fmt_span(left))
+
+
+# -------------------------------------------------------------------- accounts
+
+
+class Account(object):
+    def __init__(self, aid, name, directory, email):
+        self.id = aid
+        self.name = name
+        self.dir = directory
+        self.email = email or ""
+        self.five_hour = None
+        self.seven_day = None
+        self.resets_at = None
+        # Every limit window /usage reported, keyed as parse_usage() keys them:
+        # {"five_hour"|"seven_day"|"weekly_<model>"|<kind>:
+        #  {"utilization", "resets_at", "label"}}
+        self.windows = {}
+        # The model this session runs; a model-scoped cap only counts for its own.
+        self.model = None
+        self.fetched_at = 0
+        self.status = "unknown"
+        # The cc.json "paused" entry parking this account, or None. Set by
+        # apply_pauses(); None - the default - is the old, unparked behaviour.
+        self.paused = None
+        # Token-free facts about .credentials.json (creds_facts), set by
+        # discover(); None means "not inspected" and never makes an account dead.
+        self.creds = None
+        # The credentials mtime the cached /usage status was measured against.
+        self.creds_checked = None
+
+    @property
+    def is_default(self):
+        return self.dir == CLAUDE_HOME
+
+    def worst(self):
+        """(key, label, utilization) of the fullest known window, else (None,)*3.
+
+        A spent weekly cap stops an account just as dead as a spent 5-hour one,
+        so every decision clx makes is made against this - never against
+        five_hour alone. Ties break on the key so the answer is stable.
+        """
+        known_windows = [
+            (key, win) for key, win in (self.windows or {}).items()
+            if isinstance(win, dict) and isinstance(win.get("utilization"), (int, float))
+            and applies_to(key, win, self.model)
+        ]
+        if not known_windows:
+            return (None, None, None)
+        key, win = min(known_windows, key=lambda kv: (-kv[1]["utilization"], kv[0]))
+        return (key, win.get("label") or window_header(key), win["utilization"])
+
+    def applied_windows(self):
+        """The window keys this account's decisions were actually made on."""
+        return sorted(key for key, win in (self.windows or {}).items()
+                      if applies_to(key, win, self.model))
+
+    def keys(self):
+        """Everything --use / primary may be matched against, lowercased."""
+        out = {self.id.lower(), self.name.lower()}
+        if self.email:
+            out.add(self.email.lower())
+            out.add(self.email.split("@", 1)[0].lower())
+        return out
+
+
+def config_json_for(directory):
+    # The default dir's config file lives beside it, not inside it.
+    return os.path.join(HOME, ".claude.json") if directory == CLAUDE_HOME else os.path.join(directory, ".claude.json")
+
+
+def email_of(directory):
+    j = read_json(config_json_for(directory), {})
+    return ((j or {}).get("oauthAccount") or {}).get("emailAddress") or ""
+
+
+def titlecase(s):
+    return s[:1].upper() + s[1:] if s else s
+
+
+def discover():
+    """Every config dir that actually holds credentials. Emails are read live."""
+    found = []
+    if os.path.isfile(os.path.join(CLAUDE_HOME, ".credentials.json")):
+        email = email_of(CLAUDE_HOME)
+        # Never assume who the default dir belongs to: /login rewrites it.
+        name = titlecase(email.split("@", 1)[0]) if email else "Default"
+        found.append(Account("default", name, CLAUDE_HOME, email))
+    for entry in sorted(os.listdir(HOME)):
+        if not entry.startswith(".claude-"):
+            continue
+        path = os.path.join(HOME, entry)
+        # Skips ~/.claude-prelinux-restore.tgz (a file) and empty scratch dirs.
+        if not os.path.isdir(path) or not os.path.isfile(os.path.join(path, ".credentials.json")):
+            continue
+        aid = entry[len(".claude-"):]
+        found.append(Account(aid, titlecase(aid), path, email_of(path)))
+    # Every decision path starts here, so every one of them sees whether a login
+    # is dead - no caller has to remember a separate apply step.
+    reload_creds(found)
+    return found
+
+
+# ------------------------------------------------------------------ dead logins
+# 2026-10-02: One account's OAuth grant hit its hard refreshTokenExpiresAt (30
+# days after its cm-login - rotation does NOT extend it). The next request could
+# not refresh, Claude Code blanked both tokens, and every session on it showed
+# "Login expired · Please run /login". The usage CACHE still said "5h 1%", so clx
+# kept launching on it and the watcher handed a spent session TO it as a stale
+# last resort. A dead login is now never a launch choice or a hand-off target,
+# and a session sitting on one is moved off at once (trigger window "auth").
+# Polling keeps running, so the account comes back the moment it is re-logged.
+AUTH_WINDOW = "auth"
+AUTH_FAIL_STATUSES = ("http-401", "http-403")
+RENEW_WARN = 3 * 86400  # --status warns this long before a refresh token's hard expiry
+
+
+def creds_facts(directory):
+    """Token-free facts about <directory>/.credentials.json, or None.
+
+    Presence flags and timestamps only: a token value never leaves this
+    function. None ("could not read it") is NOT evidence of a dead login - a
+    damaged or half-written file must never take an account out of service.
+    """
+    path = os.path.join(directory, ".credentials.json")
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        return None
+    doc = read_json(path, {})
+    oauth = doc.get("claudeAiOauth") if isinstance(doc, dict) else None
+    if not isinstance(oauth, dict):
+        return None
+
+    def stamp(value):
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    return {
+        "access": bool(oauth.get("accessToken")),
+        "refresh": bool(oauth.get("refreshToken")),
+        "expires_at": stamp(oauth.get("expiresAt")),                   # ms
+        "refresh_expires_at": stamp(oauth.get("refreshTokenExpiresAt")),  # ms
+        "mtime": mtime,
+    }
+
+
+def reload_creds(accounts):
+    """Re-read every account's credential facts (after a heal may have changed one)."""
+    for acct in accounts:
+        acct.creds = creds_facts(acct.dir)
+    return accounts
+
+
+def auth_problem(acct, now=None):
+    """Why this account cannot authenticate - or None when it can, or we cannot tell.
+
+    An expired ACCESS token alone is fine: Claude Code refreshes it on the next
+    request. Dead means nothing can be refreshed either:
+      * "logged out": both tokens blank - what Claude Code leaves behind after a
+        refresh it could not do;
+      * "login expired": the access token has expired and the refresh token is
+        missing or past refreshTokenExpiresAt;
+      * "token rejected (http-401|403)": /usage refused an access token that has
+        not expired, measured against THIS file (credsMtime) - so a re-login
+        clears the verdict at once rather than one poll later.
+    """
+    facts = getattr(acct, "creds", None)
+    if not facts:
+        return None
+    now_ms = (time.time() if now is None else now) * 1000.0
+    exp, rexp = facts.get("expires_at"), facts.get("refresh_expires_at")
+    access_ok = facts.get("access") and (exp is None or exp > now_ms)
+    refresh_ok = facts.get("refresh") and (rexp is None or rexp > now_ms)
+    if not facts.get("access") and not facts.get("refresh"):
+        return "logged out"
+    if not access_ok and not refresh_ok:
+        return "login expired"
+    if (access_ok and acct.status in AUTH_FAIL_STATUSES
+            and getattr(acct, "creds_checked", None) == facts.get("mtime")):
+        return "token rejected (%s)" % acct.status
+    return None
+
+
+def login_command(acct):
+    """"cm-login carol carol@example.com" - the one fix for a dead login."""
+    return "cm-login %s%s" % (acct.id, " " + acct.email if acct.email else "")
+
+
+def login_hint(acct):
+    """"Carol logged out - run: cm-login carol carol@example.com"."""
+    return "%s %s - run: %s" % (acct.name, auth_problem(acct) or "needs a login",
+                                login_command(acct))
+
+
+def renewal_due(acct, now=None):
+    """Seconds until a LIVE login's refresh token hard-expires, when that is soon."""
+    facts = getattr(acct, "creds", None) or {}
+    rexp = facts.get("refresh_expires_at")
+    if not rexp or auth_problem(acct, now):
+        return None
+    left = rexp / 1000.0 - (time.time() if now is None else now)
+    return left if left < RENEW_WARN else None
+
+
+def dedupe(accounts, primary_key):
+    """One dir per account.
+
+    Two dirs holding the same login both refresh it, and each refresh rotates the
+    refresh token, so the loser's credentials go stale and its next launch fails.
+    Prefer the named ~/.claude-<name> dir; for the primary prefer the default dir,
+    so a bare `claude` and `clx` agree on which login is primary.
+    """
+    groups = {}
+    order = []
+    for acct in accounts:
+        key = acct.email.lower() if acct.email else "dir:" + acct.dir
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(acct)
+
+    kept, notes = [], []
+    for key in order:
+        group = groups[key]
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        is_primary = any(primary_key in a.keys() for a in group)
+        named = [a for a in group if not a.is_default]
+        default = [a for a in group if a.is_default]
+        if is_primary and default:
+            winner = default[0]
+        else:
+            winner = (named or default)[0]
+        losers = [a for a in group if a is not winner]
+        kept.append(winner)
+        notes.append(
+            "clx: %s is logged in to %d dirs - using %s, ignoring %s (two dirs refreshing one "
+            "account fight over the rotated refresh token)"
+            % (group[0].email or key, len(group), winner.dir, ", ".join(a.dir for a in losers))
+        )
+    return kept, notes
+
+
+def find_primary(accounts, primary_key):
+    for acct in accounts:
+        if primary_key in acct.keys():
+            return acct
+    return None
+
+
+def match_account(accounts, needle):
+    n = (needle or "").strip().lower()
+    for acct in accounts:
+        if n in acct.keys():
+            return acct
+    return None
+
+
+# ----------------------------------------------------------------------- usage
+
+
+def access_token(directory):
+    creds = read_json(os.path.join(directory, ".credentials.json"), {})
+    return ((creds or {}).get("claudeAiOauth") or {}).get("accessToken") or ""
+
+
+def iso_to_epoch(value):
+    if not value:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(datetime.fromisoformat(str(value)).astimezone(timezone.utc).timestamp())
+    except Exception:
+        return None
+
+
+WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d"}
+
+# limits[] kinds that are another name for a window we already parse. Measured
+# 2026-09-03 on live accounts: `session` repeats five_hour and `weekly_all`
+# repeats seven_day, so without this they became duplicate columns.
+LIMIT_ALIASES = {"session": "five_hour", "weekly_all": "seven_day"}
+
+
+def model_slug(name):
+    return re.sub(r"[^a-z0-9]+", "-", (name or "model").lower()).strip("-") or "model"
+
+
+def window_header(key):
+    """The short label / --status column title for a window key."""
+    if key in WINDOW_LABELS:
+        return WINDOW_LABELS[key]
+    if key.startswith("weekly_"):
+        return "WK-" + key[len("weekly_"):].upper().replace("_", "-")
+    return (key or "?").upper().replace("_", "-")
+
+
+def parse_usage(data):
+    """/api/oauth/usage -> {key: {"utilization", "resets_at", "label"}}.
+
+    Field names follow claude-meter's buildUsage() (~/claude-meter/main.js), the
+    reference implementation: five_hour and seven_day carry `utilization`, while
+    a model-scoped weekly cap arrives in the `limits` array as kind
+    "weekly_scoped" carrying `percent` and scope.model.display_name (Fable
+    today). The old fixed seven_day_sonnet field is null on current plans and is
+    kept only as a fallback. Any other limits[] entry with a number becomes a
+    window under its own kind, so a new cap starts counting the day it appears.
+    """
+    windows = {}
+
+    def add(key, label, utilization, resets_at, model=None):
+        if not key or key in windows or not isinstance(utilization, (int, float)):
+            return
+        windows[key] = {
+            "utilization": utilization,
+            "resets_at": iso_to_epoch(resets_at),
+            "label": label,
+        }
+        # A model-scoped cap records WHICH model, so a session on another one can
+        # ignore it without having to guess from the key.
+        if model:
+            windows[key]["model"] = model
+            windows[key]["model_family"] = model_family(model)
+
+    five = data.get("five_hour") or {}
+    seven = data.get("seven_day") or {}
+    add("five_hour", "5h", five.get("utilization"), five.get("resets_at"))
+    add("seven_day", "7d", seven.get("utilization"), seven.get("resets_at"))
+
+    for entry in (data.get("limits") or []):
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind") or ""
+        value = entry.get("utilization")
+        if not isinstance(value, (int, float)):
+            value = entry.get("percent")
+        if kind == "weekly_scoped":
+            model = ((entry.get("scope") or {}).get("model") or {}).get("display_name") or "model"
+            add("weekly_" + model_slug(model), "Weekly (%s)" % model, value,
+                entry.get("resets_at"), model=model)
+        else:
+            key = LIMIT_ALIASES.get(kind, kind)
+            add(key, window_header(key), value, entry.get("resets_at"))
+
+    legacy = data.get("seven_day_sonnet") or {}
+    add("weekly_sonnet", "Weekly (Sonnet)", legacy.get("utilization"), legacy.get("resets_at"),
+        model="Sonnet")
+    return windows
+
+
+def derive_windows(entry):
+    """Windows for a cache entry written before clx knew about them."""
+    windows = {}
+    if isinstance(entry.get("five_hour"), (int, float)):
+        windows["five_hour"] = {"utilization": entry["five_hour"],
+                                "resets_at": entry.get("resets_at"), "label": "5h"}
+    if isinstance(entry.get("seven_day"), (int, float)):
+        windows["seven_day"] = {"utilization": entry["seven_day"], "resets_at": None, "label": "7d"}
+    return windows
+
+
+def window_keys(accounts):
+    """Every window any account has: 5h and 7d first, the rest alphabetical."""
+    keys = set()
+    for acct in accounts:
+        keys.update((acct.windows or {}).keys())
+    ordered = [k for k in ("five_hour", "seven_day") if k in keys]
+    return (ordered + sorted(k for k in keys if k not in ("five_hour", "seven_day"))) \
+        or ["five_hour", "seven_day"]
+
+
+def lock_slot(text):
+    """A stable byte offset for an account id. A collision only costs a tick."""
+    value = 0
+    for ch in text or "":
+        value = (value * 131 + ord(ch)) & 0xFFFFFFFF
+    return value % LOCK_SLOTS
+
+
+class FetchClaim(object):
+    """Non-blocking, cross-process claim on ONE account's /usage call.
+
+    Whoever takes the claim fetches; everybody else re-reads the cache and uses
+    the answer the winner writes. That is what keeps the call rate a property of
+    the account list rather than of how many terminals happen to be open.
+
+    A byte range in one file rather than a file per account: no clutter, and the
+    kernel drops the lock when the holder dies, so a crash never wedges it. If
+    the lock file cannot be opened at all the claim reports HELD - a broken lock
+    must never stop clx from refreshing.
+    """
+
+    def __init__(self, account_id):
+        self.offset = lock_slot(account_id)
+        self.fd = None
+        self.held = False
+
+    def __enter__(self):
+        try:
+            self.fd = os.open(USAGE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            self.held = True  # no lock file: behave exactly as clx did before
+            return self
+        try:
+            fcntl.lockf(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, self.offset)
+            self.held = True
+        except OSError:
+            self._close()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._close()
+        return False
+
+    def _close(self):
+        if self.fd is not None:
+            try:
+                fcntl.lockf(self.fd, fcntl.LOCK_UN, 1, self.offset)
+            except OSError:
+                pass
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+        self.held = False
+
+
+def entry_due(entry, now, window):
+    """Is this cache entry old enough to poll again?
+
+    checkedAt gates the polling; fetchedAt is how old the numbers are. A 429
+    bumps checkedAt only, so a rate-limited account is not re-hammered - and a
+    429'd account always waits the FULL TTL, whatever window the caller asked
+    for: the rate limiter has just said no, and a shorter window argues with it.
+    """
+    last_try = max(entry.get("checkedAt") or 0, entry.get("fetchedAt") or 0)
+    if entry.get("status") == "429":
+        window = max(window, TTL)
+    return now - last_try >= window
+
+
+def fetch_usage(directory):
+    """(entry, status). Never raises: a failure is 'unknown', not an error."""
+    token = access_token(directory)
+    if not token:
+        return None, "no-token"
+    req = urllib.request.Request(
+        USAGE_URL,
+        headers={
+            "Authorization": "Bearer " + token,
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        # 429 is routine here (the limit is per token) - it means "unknown", so the
+        # caller keeps whatever it already had.
+        return None, "429" if exc.code == 429 else "http-%d" % exc.code
+    except Exception as exc:
+        return None, "err-" + type(exc).__name__
+    windows = parse_usage(data)
+    five = windows.get("five_hour") or {}
+    seven = windows.get("seven_day") or {}
+    return (
+        {
+            # The two flat fields stay for compatibility with everything that
+            # already reads this cache; `windows` is the whole truth.
+            "five_hour": five.get("utilization"),
+            "seven_day": seven.get("utilization"),
+            "resets_at": five.get("resets_at"),
+            "windows": windows,
+            "fetchedAt": int(time.time()),
+            "status": "ok",
+        },
+        "ok",
+    )
+
+
+def refresh(accounts, force=False, only=None, ttl=None):
+    """Fill each account from the cache, refetching only what is stale.
+
+    Returns the number of HTTP calls made. `ttl` overrides how old an entry may
+    be before it is refetched - the watcher passes NEAR_TTL for an account that
+    is close to its threshold; everything else keeps the 180 s default.
+    """
+    cache = read_json(CACHE_FILE, {}) or {}
+    now = int(time.time())
+    calls = 0
+    updated = set()
+    window = TTL if ttl is None else ttl
+    for acct in accounts:
+        entry = cache.get(acct.id) or {}
+        wanted = only is None or acct.id == only
+        if wanted and (force or entry_due(entry, now, window)):
+            with FetchClaim(acct.id) as claim:
+                # Somebody else is calling /usage for this account this instant:
+                # take their answer rather than make a second identical call.
+                # --sync (force) is the one deliberate, user-driven exception.
+                fresh_entry = (read_json(CACHE_FILE, {}) or {}).get(acct.id)
+                if fresh_entry:
+                    entry = fresh_entry
+                if (claim.held or force) and (force or entry_due(entry, now, window)):
+                    # Which credentials file this answer is about: a 401 only
+                    # condemns the file it was measured against (auth_problem).
+                    # Stat BEFORE the token is read, so a file replaced mid-call
+                    # can only make the verdict not apply - never wrongly apply.
+                    try:
+                        creds_mtime = os.stat(os.path.join(acct.dir, ".credentials.json")).st_mtime
+                    except OSError:
+                        creds_mtime = None
+                    fresh, status = fetch_usage(acct.dir)
+                    calls += 1
+                    if fresh:
+                        entry = fresh
+                    else:
+                        entry = dict(entry)
+                        entry["status"] = status
+                    entry["checkedAt"] = int(time.time())
+                    entry["credsMtime"] = creds_mtime
+                    entry["email"] = acct.email
+                    entry["dir"] = acct.dir
+                    cache[acct.id] = entry
+                    updated.add(acct.id)
+        acct.five_hour = entry.get("five_hour")
+        acct.seven_day = entry.get("seven_day")
+        acct.resets_at = entry.get("resets_at")
+        # Old cache entries predate `windows`; derive them from the two flat fields.
+        acct.windows = entry.get("windows") or derive_windows(entry)
+        acct.fetched_at = entry.get("fetchedAt") or 0
+        acct.status = entry.get("status") or "unknown"
+        acct.creds_checked = entry.get("credsMtime")
+        if acct.id in updated:
+            # For readers that must never open a credentials file (a desktop
+            # panel, say): the verdict, as a string or null.
+            entry["auth"] = auth_problem(acct)
+    if calls:
+        # Re-read before writing: a background --refresh-one may have landed.
+        merged = read_json(CACHE_FILE, {}) or {}
+        merged.update({k: v for k, v in cache.items() if k in updated})
+        meta = merged.get(META_KEY) or {}
+        meta["usageCalls"] = (meta.get("usageCalls") or 0) + calls
+        meta["lastCallAt"] = now
+        merged[META_KEY] = meta
+        write_json_atomic(CACHE_FILE, merged)
+    return calls
+
+
+def spawn_refresh(account_id, *more):
+    """Detached refresh, so no caller ever blocks on the network.
+
+    Takes several account ids on purpose: the hook has a 100 ms budget and a
+    stuck session asks about every candidate at once. One child that refreshes
+    all of them is one fork; one child each was three, and measured 15-20 ms of
+    the budget on a loaded machine.
+    """
+    ids = [str(a) for a in (account_id,) + more if a]
+    if not ids:
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--refresh-one"] + ids,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------- selection
+
+
+# --- which model is this session actually running? ---------------------------
+# The weekly cap /usage reports is MODEL-SCOPED ("Weekly (Fable)"). Counting it
+# while the session runs Opus made clx conclude "no account with every window
+# under 90% - staying put" with two accounts wide open (2026-09-04). A window
+# only constrains a session that is actually using the model it is scoped to.
+MODEL_TAIL = int(os.environ.get("CC_MODEL_TAIL") or 65536)
+# What to suggest when a model's own cap is what is blocking everything.
+MODEL_ALTERNATIVE = {"fable": "opus", "opus": "sonnet", "sonnet": "opus", "haiku": "opus"}
+_MODEL_MEMO = {}
+
+
+def model_family(name):
+    """"claude-opus-5[1m]" / "fable-5-1" / "opus[1m]" -> "opus" / "fable".
+
+    Everything before a leading `claude-` is dropped (so a bedrock-style id works
+    too), then the first alphabetic run is the family. "<synthetic>" and anything
+    else that does not start with a letter yields None.
+    """
+    text = (name or "").strip().lower()
+    if "claude-" in text:
+        text = text.split("claude-", 1)[1]
+    match = re.match(r"[a-z]+", text)
+    return match.group(0) if match else None
+
+
+def transcript_model(path):
+    """The newest assistant model named in a transcript, or None.
+
+    Only the last MODEL_TAIL bytes are read - one seek and one read - because
+    this runs on every hook event. A partial first line is dropped, and
+    "<synthetic>" entries are skipped: they are Claude Code's own bookkeeping
+    messages, not a model that answered.
+    """
+    if not path:
+        return None
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    # Keyed on the size too: a transcript that grew has a newer answer in it, and
+    # the watcher lives for hours.
+    key = (path, size)
+    if key in _MODEL_MEMO:
+        return _MODEL_MEMO[key]
+    name = None
+    try:
+        with open(path, "rb") as fh:
+            if size > MODEL_TAIL:
+                fh.seek(size - MODEL_TAIL)
+                fh.readline()  # the first line is almost certainly cut in half
+            blob = fh.read()
+        for line in reversed(blob.split(b"\n")):
+            if b'"assistant"' not in line or b'"model"' not in line:
+                continue
+            try:
+                entry = json.loads(line.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "assistant":
+                continue
+            candidate = ((entry.get("message") or {}).get("model") or "").strip()
+            if candidate and candidate != "<synthetic>":
+                name = candidate
+                break
+    except (OSError, ValueError):
+        name = None
+    # The watcher lives for hours and now asks for the model every 30 s, so the
+    # memo must not grow with the transcript. Consecutive lookups share a key;
+    # dropping the rest costs nothing that matters.
+    if len(_MODEL_MEMO) > 256:
+        _MODEL_MEMO.clear()
+    _MODEL_MEMO[key] = name
+    return name
+
+
+def settings_model():
+    """The `model` pin from the settings file this session actually reads."""
+    for path in (os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or CLAUDE_HOME, "settings.json"),
+                 os.path.join(CLAUDE_HOME, "settings.json")):
+        value = (read_json(path, {}) or {}).get("model")
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def session_model(payload=None):
+    """The live model family, or None when nothing says which model is running."""
+    return model_family(
+        transcript_model((payload or {}).get("transcript_path"))
+        or os.environ.get("ANTHROPIC_MODEL")
+        or settings_model()
+    )
+
+
+def window_model_family(key, win):
+    """The model family a window is scoped to, or None when it binds every model."""
+    family = (win or {}).get("model_family")
+    if family:
+        return str(family).lower()
+    if key.startswith("weekly_"):
+        return model_family(key[len("weekly_"):])
+    return None
+
+
+def applies_to(key, win, model):
+    """Does this window constrain a session running `model`?
+
+    5h and 7d always do. A model-scoped cap only does when the session is on that
+    model. An unknown model counts everything, which is the old behaviour.
+    """
+    if not model:
+        return True
+    family = window_model_family(key, win)
+    return family is None or family == model
+
+
+def apply_model(accounts, model):
+    """Tell every account which model the decision is being made for."""
+    for acct in accounts:
+        acct.model = model
+    return model
+
+
+def model_block(accounts, exclude_ids, threshold, model):
+    """Model-scoped caps that are the ONLY thing standing in the way.
+
+    -> {"label", "model", "suggest", "accounts": [(name, value), ...]} or None.
+
+    Switching accounts cannot fix a cap that follows the model, so when every
+    candidate is blocked ONLY by one of those, the answer is to change the model,
+    not the account. If any candidate is also over a window that binds every
+    model, a model switch would not free it and this returns None.
+    """
+    if not model:
+        return None
+    label = None
+    freed = []
+    for acct in accounts:
+        if not known(acct) or is_stale(acct):
+            continue  # a frozen number cannot prove anything about this account
+        scoped = over = None
+        for key, win in (acct.windows or {}).items():
+            value = (win or {}).get("utilization")
+            if not isinstance(value, (int, float)):
+                continue
+            if not applies_to(key, win, model):
+                continue
+            if window_model_family(key, win):
+                if value >= threshold and scoped is None:
+                    scoped = (win.get("label") or window_header(key), value)
+            elif value >= threshold:
+                over = True
+        if acct.id in exclude_ids or acct.paused or auth_problem(acct):
+            continue  # a parked or logged-out account cannot take this session, on any model
+        if over or scoped is None:
+            continue  # blocked for every model, or not blocked at all
+        freed.append(acct)
+        label = label or scoped[0]
+    if not freed:
+        return None
+    named = []
+    for acct in accounts:
+        for key, win in (acct.windows or {}).items():
+            if (window_model_family(key, win) == model
+                    and isinstance((win or {}).get("utilization"), (int, float))
+                    and win["utilization"] >= threshold):
+                named.append((acct.name, win["utilization"]))
+                break
+    return {"label": label, "model": model, "suggest": MODEL_ALTERNATIVE.get(model, "opus"),
+            "accounts": named}
+
+
+def nowhere_reason(current, accounts, now=None):
+    """Why there is nowhere to go, candidate by candidate, ages included.
+
+    "every other account is over 90% — Alice 5h 90% (3h old), Carol 7d 94%"
+    is actionable; "all accounts are full" on its own is a shrug. The age is the
+    part that matters: it says whether the answer was measured or remembered.
+    """
+    parts = []
+    for acct in candidate_pool(accounts or [], {current.id}):
+        parts.append("%s %s%s" % (acct.name, window_tag(acct), stale_note(acct, now)))
+    for acct in (accounts or []):
+        if acct.id == current.id:
+            continue
+        if auth_problem(acct):
+            parts.append("%s %s" % (acct.name, auth_problem(acct)))
+        elif acct.paused:
+            parts.append("%s parked" % acct.name)
+    return ", ".join(parts)
+
+
+def stuck_notice(current, spent, nxt, block, accounts=None):
+    """(key, summary, body) when this session is spent with nowhere to go, else None.
+
+    The key is what "once per distinct state" is keyed on: the account and the
+    window that filled - never the percentage, which ticks up every minute and
+    would notify on every watcher tick. The BODY carries the reason, so the one
+    popup the user gets says which accounts were checked and how old each answer
+    was, instead of leaving them to guess.
+    """
+    if not spent or nxt is not None:
+        return None
+    body = nowhere_reason(current, accounts) if accounts else ""
+    if block:
+        # NOT "all accounts are full": only this MODEL's cap is, and no account
+        # change can fix that. Saying the wrong thing is worse than saying nothing.
+        return ("model:%s" % block["model"],
+                "%s is spent on every account — switch the model (/model %s)"
+                % (block["label"], block["suggest"]),
+                body)
+    if spent[0] == AUTH_WINDOW:
+        return ("auth:%s" % current.id,
+                "%s — and no other account can take this session" % login_hint(current),
+                body)
+    if spent[0] == PAUSE_WINDOW:
+        return ("parked:%s" % current.id,
+                "All accounts are full or parked — %s is parked" % current.name,
+                body)
+    return ("%s:%s" % (current.id, spent[0]),
+            "All accounts are full — %s is at %s%%" % (current.name, fmt_pct(spent[2])),
+            body)
+
+
+def model_block_message(block):
+    return (
+        "[clx] %s is spent on every account (%s). Switching accounts will not help - "
+        "switch the model instead (/model %s).\n"
+        % (block["label"],
+           ", ".join("%s %s%%" % (name, fmt_pct(value)) for name, value in block["accounts"]),
+           block["suggest"])
+    )
+
+
+def known(acct):
+    """Has /usage answered with at least one window that binds this session?
+
+    NOT "is there a 5-hour number". The feed stopped carrying a 5h window
+    (2026-11-09: five_hour null on every account, 7d and Weekly (Fable) still
+    there), which made every account read as unknown - so nothing was ever
+    spent, no hand-off fired, and targets were picked in list order.
+    """
+    return acct.worst()[0] is not None
+
+
+def five_rank(acct):
+    """The 5h tie-break as a number: no 5h window means none of it is used.
+
+    Comparing None with a float raises, and a tie on the worst window between an
+    account that reports 5h and one that does not is an ordinary state now.
+    """
+    return acct.five_hour if isinstance(acct.five_hour, (int, float)) else 0.0
+
+
+def launch_tag(acct, bare=False):
+    """What the launch banner says about an account's usage.
+
+    The 5h figure when there is one (the text every banner has always carried),
+    otherwise the worst window that was measured - never "5h ?" for an account
+    whose 7d and model caps are known.
+    """
+    if isinstance(acct.five_hour, (int, float)):
+        return fmt_usage(acct.five_hour) if bare else "5h %s" % fmt_usage(acct.five_hour)
+    if acct.worst()[0] is None:
+        return "?" if bare else "5h ?"
+    return window_tag(acct)
+
+
+def over_threshold(acct, threshold):
+    """(key, label, value) of a window that is spent, or None.
+
+    "Spent" is ANY window at or over the threshold - the 5-hour one, the 7-day
+    one, or a model-scoped weekly cap. worst() is the maximum, so testing it
+    tests every window at once.
+    """
+    key, label, value = acct.worst()
+    if key is None or value < threshold:
+        return None
+    return (key, label, value)
+
+
+def under_threshold(acct, threshold):
+    """True only when EVERY known window of this account is under the threshold."""
+    key, _, value = acct.worst()
+    return key is not None and value < threshold
+
+
+def near_threshold(acct, threshold, margin=None):
+    """Is the fullest APPLICABLE window close enough to spending to matter?
+
+    What the watcher tests before it fetches: at 70 % a three-minute-old number
+    is fine, at 90 % it is a decision made about the past.
+    """
+    key, _, value = acct.worst()
+    if key is None:
+        return False
+    return value >= threshold - (NEAR_MARGIN if margin is None else margin)
+
+
+def stale_ttl():
+    """The age at which a cached number stops counting as a measurement.
+
+    Read at call time, not frozen at import: TTL itself is an env override and
+    the suites pin it on the module.
+    """
+    raw = os.environ.get("CC_STALE_TTL")
+    if raw:
+        try:
+            return max(NEAR_TTL, int(raw))
+        except ValueError:
+            pass
+    return max(NEAR_TTL, int(TTL * STALE_FACTOR))
+
+
+def entry_age(acct, now=None):
+    """Seconds since this account's numbers were fetched, or None if never."""
+    if not acct.fetched_at:
+        return None
+    return max(0, int((time.time() if now is None else now) - acct.fetched_at))
+
+
+def is_stale(acct, now=None):
+    """Are this account's numbers too old to conclude anything from?
+
+    Staleness is a STATE, not a value. Nobody polls an account no session is
+    sitting on, so the number frozen there describes the moment the last session
+    LEFT it - which by definition was at or over the threshold.
+    """
+    age = entry_age(acct, now)
+    return age is None or age >= stale_ttl()
+
+
+def stale_note(acct, now=None):
+    """" (3h old)" for a frozen entry, "" for a current one."""
+    age = entry_age(acct, now)
+    if age is None:
+        return " (never measured)"
+    return " (%s old)" % fmt_age(age) if age >= stale_ttl() else ""
+
+
+def window_tag(acct, key=None):
+    """"7d 91%" for a named window, else "worst 5h 12%" for the account's worst."""
+    win = (acct.windows or {}).get(key) if key else None
+    if isinstance(win, dict) and isinstance(win.get("utilization"), (int, float)):
+        return "%s %s%%" % (win.get("label") or window_header(key), fmt_pct(win["utilization"]))
+    wkey, label, value = acct.worst()
+    if wkey is None:
+        return "usage unknown"
+    return "worst %s %s%%" % (label, fmt_pct(value))
+
+
+def candidate_pool(accounts, exclude_ids):
+    """Every account a session could be handed to right now.
+
+    Never a parked account, and never a DEAD login (auth_problem): its cached
+    numbers may look like head-room, but every request on it fails with "Login
+    expired". This is the one filter best_candidate(), stale_candidates() and
+    the launch fallback all share.
+    """
+    return [a for a in accounts
+            if a.id not in exclude_ids and not a.paused and not auth_problem(a)]
+
+
+def stale_candidates(accounts, exclude_ids, max_age=None, now=None):
+    """Candidates whose numbers are older than `max_age` (default: stale_ttl()).
+
+    These are the accounts a "nowhere to go" answer would be built on, and the
+    ones nobody refreshes - the two facts that made the bug.
+    """
+    limit = stale_ttl() if max_age is None else max_age
+    out = []
+    for acct in candidate_pool(accounts, exclude_ids):
+        age = entry_age(acct, now)
+        if age is None or age >= limit:
+            out.append(acct)
+    return out
+
+
+def best_candidate(accounts, exclude_ids, threshold, allow_stale=False, now=None):
+    """The account with the most head-room, or None.
+
+    EVERY window must be under the threshold: an account whose 5h is 0% but
+    whose weekly cap sits at 95% has no head-room at all and handing a session
+    to it would fail on the next request. Ranked by the worst window, then 5h,
+    then name, so the choice is stable. Unknowns are the last resort.
+
+    A PARKED account is never a candidate, whatever its head-room: it is lent
+    out, and clx must not put a session on it. Nor is a DEAD login
+    (auth_problem): its frozen numbers look like head-room and it cannot answer
+    one request - both filters live in candidate_pool().
+
+    A STALE entry proves nothing in either direction. It is not head-room, and -
+    this is the whole finding - it is not "over" either: it is the number that
+    account had when the last session LEFT it, which was by definition at or over
+    the threshold. So None here does not mean "everywhere is full", it means
+    "nothing is KNOWN to be free", and every caller must re-measure before acting
+    on it (watch_refresh_candidates / request_candidate_refresh).
+
+    `allow_stale` is what a caller passes once measuring has been tried and has
+    failed - at launch, right after refresh(), or on the tick after a 429. Then
+    an account that was UNDER the threshold when it was last seen is offered as a
+    last resort: it still beats sitting on an account that is spent right now. An
+    account last seen at or over the threshold is never offered, whatever its
+    age: nothing about it says it has room.
+    """
+    pool = candidate_pool(accounts, exclude_ids)
+    under = [a for a in pool
+             if known(a) and not is_stale(a, now) and under_threshold(a, threshold)]
+    if under:
+        return min(under, key=lambda a: (a.worst()[2], five_rank(a), a.name))
+    unknown = [a for a in pool if not known(a)]
+    if unknown:
+        return unknown[0]
+    if allow_stale:
+        stale_under = [a for a in pool
+                       if known(a) and is_stale(a, now) and under_threshold(a, threshold)]
+        if stale_under:
+            return min(stale_under, key=lambda a: (a.worst()[2], five_rank(a), a.name))
+    return None
+
+
+def select(accounts, conf, forced=None):
+    """-> (chosen, next_account, reason, notes)"""
+    threshold = conf["threshold"]
+    primary_key = conf["primary"].strip().lower()
+    primary = find_primary(accounts, primary_key)
+    notes = []
+
+    if forced is not None:
+        chosen, reason = forced, "forced"
+    elif primary is None:
+        # The old accounts[0] fallback, minus dead logins.
+        chosen = (best_candidate(accounts, set(), threshold, allow_stale=True)
+                  or next((a for a in accounts if not auth_problem(a)), accounts[0]))
+        if primary_key:
+            notes.append("primary %s: not logged in — run: cm-login %s" % (conf["primary"], conf["primary"]))
+            reason = "primary %s not logged in" % conf["primary"]
+        else:
+            # No primary configured: a fresh install just takes the most room.
+            reason = "most room (no primary set)"
+    elif auth_problem(primary):
+        # A dead login is launched on only when nothing else can authenticate:
+        # the session would open straight onto "Login expired". An account over
+        # the threshold still beats that - it works until it is actually spent.
+        alt = (best_candidate(accounts, {primary.id}, threshold, allow_stale=True)
+               or least_full(accounts, {primary.id}))
+        if alt is None:
+            chosen = primary
+            reason = "%s %s, nowhere else to go" % (primary.name, auth_problem(primary))
+        else:
+            chosen, reason = alt, "%s %s" % (primary.name, auth_problem(primary))
+    elif primary.paused:
+        # Parked: never launched, not even as the primary. Fall through to the
+        # normal "best other account" logic; the banner says why.
+        alt = best_candidate(accounts, {primary.id}, threshold, allow_stale=True)
+        if alt is None:
+            chosen = primary
+            reason = "%s parked, nowhere else to go" % primary.name
+            notes.append("clx: every account is parked or spent - launching on %s anyway"
+                         % primary.name)
+        else:
+            chosen, reason = alt, "%s parked" % primary.name
+    else:
+        spent = over_threshold(primary, threshold) if known(primary) else None
+        if spent is None:
+            chosen, reason = primary, "primary under threshold"
+        else:
+            alt = best_candidate(accounts, {primary.id}, threshold, allow_stale=True)
+            if alt is None:
+                chosen, reason = primary, "every account at/over threshold or unknown"
+                notes.append("clx: no account with every window under %g%% - staying on %s"
+                             % (threshold, primary.name))
+            else:
+                chosen = alt
+                reason = "%s %s %s%% ≥ %g%s" % (
+                    primary.name, spent[1], fmt_pct(spent[2]), threshold,
+                    " (on %s)" % primary.model if primary.model else "")
+                if not known(alt):
+                    notes.append("clx: %s usage unknown - picked as a last resort" % alt.name)
+                elif is_stale(alt):
+                    notes.append("clx: %s was last measured %s ago - picked as a last resort"
+                                 % (alt.name, fmt_age(entry_age(alt))))
+
+    # Name every parked account: "why not Bob?" is the first question a launch
+    # on a different account raises. A dead login is named with its fix, every
+    # launch, until someone runs it.
+    for acct in accounts:
+        if auth_problem(acct):
+            notes.append("clx: " + login_hint(acct))
+        elif acct.paused and acct is not chosen:
+            notes.append("clx: " + pause_phrase(acct))
+
+    nxt = best_candidate(accounts, {chosen.id}, threshold, allow_stale=True)
+    return chosen, nxt, reason, notes
+
+
+def least_full(accounts, exclude_ids):
+    """Launch-only last resort: the live, unparked account with the emptiest worst window.
+
+    For when no account is under the threshold but the alternative is a dead
+    login - an account at 95 % still answers requests; a logged-out one never
+    does. Never used for a hand-off: moving a running session onto another
+    account that is just as spent is churn, not a fix.
+    """
+    pool = candidate_pool(accounts, exclude_ids)
+    if not pool:
+        return None
+    return min(pool, key=lambda a: (a.worst()[2] if a.worst()[0] is not None else 101, a.name))
+
+
+# ------------------------------------------------------------------ formatting
+
+
+def fmt_pct(value):
+    if not isinstance(value, (int, float)):
+        return "?"
+    return "%g" % round(float(value))
+
+
+def fmt_usage(value):
+    """A percentage, or "?" when /usage never answered for this account."""
+    return fmt_pct(value) + "%" if isinstance(value, (int, float)) else "?"
+
+
+def fmt_age(seconds):
+    if seconds is None:
+        return "-"
+    seconds = int(seconds)
+    if seconds < 90:
+        return "%ds" % seconds
+    if seconds < 5400:
+        return "%dm" % round(seconds / 60.0)
+    return "%dh" % round(seconds / 3600.0)
+
+
+RED = "\033[31m"
+COLOUR_OFF = "\033[0m"
+
+
+def paint(text, colour=RED):
+    """Colour on a terminal, plain text down a pipe, a file or a test."""
+    try:
+        if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+            return text
+    except Exception:
+        return text
+    return colour + text + COLOUR_OFF
+
+
+def fmt_span(seconds):
+    """A duration a human reads at a glance: "2d 4h", "5h 10m", "12m", "40s".
+
+    Rounded to the nearest minute once it is over a minute: a park set for three
+    days is 259199 s by the time it is printed, and that must read "3d", not
+    "2d 23h".
+    """
+    seconds = max(0, int(seconds or 0))
+    if seconds < 60:
+        return "%ds" % seconds
+    days, rest = divmod(int(round(seconds / 60.0)), 1440)
+    hours, minutes = divmod(rest, 60)
+    if days:
+        return "%dd %dh" % (days, hours) if hours else "%dd" % days
+    if hours:
+        return "%dh %dm" % (hours, minutes) if minutes else "%dh" % hours
+    return "%dm" % minutes
+
+
+def fmt_reset(epoch):
+    if not epoch:
+        return "-"
+    left = epoch - int(time.time())
+    return fmt_age(left) if left > 0 else "now"
+
+
+# ------------------------------------------------------- shared profile layout
+
+
+def ensure_links(directory, report):
+    for name in LINK_NAMES:
+        src = os.path.join(CLAUDE_HOME, name)
+        dst = os.path.join(directory, name)
+        if not os.path.exists(src):
+            report.append("skip %s: no ~/.claude/%s" % (name, name))
+            continue
+        if os.path.islink(dst):
+            if os.path.realpath(dst) == os.path.realpath(src):
+                continue
+            os.unlink(dst)
+            report.append("relinked %s (pointed elsewhere)" % dst)
+        elif os.path.exists(dst):
+            aside = dst + ".pre-clx"
+            n = 1
+            while os.path.exists(aside):
+                n += 1
+                aside = "%s.pre-clx.%d" % (dst, n)
+            os.rename(dst, aside)
+            report.append("moved aside %s -> %s" % (dst, aside))
+        os.symlink(src, dst)
+        report.append("linked %s -> %s" % (dst, src))
+
+
+def merge_prefs(directory, report):
+    """Copy the user's preferences into <dir>/.claude.json so clx never prompts.
+
+    Identity (oauthAccount, userID) and anything token/key/secret/account stays
+    the dir's own. Every known project path is pre-trusted.
+    """
+    src = read_json(os.path.join(HOME, ".claude.json"), {}) or {}
+    dst_path = config_json_for(directory)
+    dst = read_json(dst_path, {}) or {}
+
+    if os.path.exists(dst_path) and not os.path.exists(dst_path + ".pre-clx"):
+        shutil.copy2(dst_path, dst_path + ".pre-clx")
+        os.chmod(dst_path + ".pre-clx", 0o600)
+
+    copied = []
+    for key, value in src.items():
+        if key in PREF_EXCLUDE_EXACT:
+            continue
+        if any(bad in key.lower() for bad in PREF_EXCLUDE_SUBSTR):
+            continue
+        dst[key] = copy.deepcopy(value)
+        copied.append(key)
+
+    projects = dst.get("projects") or {}
+    for path, entry in (src.get("projects") or {}).items():
+        merged = dict(projects.get(path) or {})
+        merged["hasTrustDialogAccepted"] = True
+        for pkey in PROJECT_KEYS:
+            if pkey in entry:
+                merged[pkey] = copy.deepcopy(entry[pkey])
+        projects[path] = merged
+    dst["projects"] = projects
+
+    write_json_atomic(dst_path, dst)
+    report.append("prefs: %d keys + %d project paths -> %s" % (len(copied), len(projects), dst_path))
+    return copied
+
+
+def needs_init(directory):
+    return not os.path.islink(os.path.join(directory, "settings.json"))
+
+
+def init_dirs(directories, quiet=False):
+    copied = []
+    for directory in directories:
+        report = []
+        ensure_links(directory, report)
+        copied = merge_prefs(directory, report)
+        if not quiet:
+            print("== %s" % directory)
+            for line in report:
+                print("   " + line)
+    return copied
+
+
+def cmd_init(quiet=False):
+    targets = [a.dir for a in discover() if not a.is_default]
+    if not targets:
+        print("clx --init: no ~/.claude-* account dirs with credentials yet")
+        return 0
+    init_dirs(targets, quiet=quiet)
+    return 0
+
+
+def auto_init(accounts):
+    """Set up any account dir that has credentials but no shared profile yet."""
+    pending = [a.dir for a in accounts if not a.is_default and needs_init(a.dir)]
+    if pending:
+        init_dirs(pending, quiet=True)
+        warn("clx: initialised shared profile for %s" % ", ".join(os.path.basename(d) for d in pending))
+
+
+# ----------------------------------------------------------------- active file
+
+
+def active_payload(chosen, nxt, reason, model_block=None):
+    nxt_worst = nxt.worst() if nxt is not None else (None, None, None)
+    return {
+        "id": chosen.id,
+        "name": chosen.name,
+        "email": chosen.email,
+        "dir": chosen.dir,
+        "chosenAt": int(time.time()),
+        "launcher": "clx",
+        "reason": reason,
+        "five_hour": chosen.five_hour,
+        "seven_day": chosen.seven_day,
+        "windows": copy.deepcopy(chosen.windows or {}),
+        "model": chosen.model,
+        "windows_applied": chosen.applied_windows(),
+        # For the statusline and the widget: is this account parked right now?
+        "paused": bool(chosen.paused),
+        "model_block": model_block,
+        "next": None
+        if nxt is None
+        else {
+            "id": nxt.id,
+            "name": nxt.name,
+            "five_hour": nxt.five_hour,
+            "worst": None if nxt_worst[0] is None else {
+                "window": nxt_worst[0], "label": nxt_worst[1], "value": nxt_worst[2]},
+        },
+    }
+
+
+# --------------------------------------------------------------- session dirs
+
+
+def iso_now(epoch=None):
+    return datetime.fromtimestamp(time.time() if epoch is None else epoch).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def pid_alive(pid):
+    """/proc, not os.kill(pid, 0): EPERM would call a stranger's pid our session."""
+    try:
+        return os.path.isdir("/proc/%d" % int(pid))
+    except (TypeError, ValueError):
+        return False
+
+
+def session_path(pid=None):
+    return os.path.join(SESSIONS_ROOT, str(os.getpid() if pid is None else pid))
+
+
+def point_credentials(session_dir, account_dir):
+    """Point <session>/.credentials.json at <account_dir>/.credentials.json.
+
+    A tmp symlink renamed over the old one: rename(2) is atomic, so a request that
+    opens the path at that instant reads either the old account's file or the new
+    one, never a missing path. This single call IS the hand-off.
+    """
+    link = os.path.join(session_dir, ".credentials.json")
+    target = os.path.join(account_dir, ".credentials.json")
+    tmp = "%s.tmp-%d" % (link, os.getpid())
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    os.symlink(target, tmp)
+    os.replace(tmp, link)
+    return target
+
+
+def copy_over(src, dst, mode=0o600):
+    """Atomic copy with an explicit mode. Never inspects or logs the content."""
+    with open(src, "rb") as fh:
+        blob = fh.read()
+    tmp = "%s.tmp-%d" % (dst, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.write(fd, blob)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, mode)
+    os.replace(tmp, dst)
+
+
+def creds_expires_at(path):
+    """expiresAt (ms) from a credentials file, or None. Never returns a token."""
+    doc = read_json(path, {}) or {}
+    value = (doc.get("claudeAiOauth") or {}).get("expiresAt")
+    return value if isinstance(value, (int, float)) else None
+
+
+def session_copy_is_newer(session_file, canonical_file):
+    """True when the session's regular file holds FRESHER tokens than the account.
+
+    claude-meter refreshes accounts from the canonical files every few minutes,
+    so between a session's own refresh and this check the canonical file may
+    already be the newer of the two - and copying the older one over it would
+    hand that account a rotated, dead refresh token. An unreadable expiry on the
+    session copy counts as "not newer": the canonical file is the safe default.
+    """
+    session_exp = creds_expires_at(session_file)
+    if session_exp is None:
+        return False
+    canonical_exp = creds_expires_at(canonical_file)
+    return canonical_exp is None or session_exp > canonical_exp
+
+
+def read_session_meta(session_dir):
+    meta = read_json(os.path.join(session_dir, SESSION_META), {})
+    return meta if isinstance(meta, dict) and meta else None
+
+
+def write_session_meta(session_dir, meta):
+    write_json_atomic(os.path.join(session_dir, SESSION_META), meta)
+
+
+def remember_transcript(session_dir, meta, payload):
+    """Keep the hook payload's transcript path in clx-session.json. -> the meta.
+
+    The watcher has no payload, so without this its decision would be made for an
+    unknown model - and an unknown model counts EVERY window, so a weekly cap
+    scoped to Fable would move a session that is running Opus. Written only when
+    it changes, which in practice is once per session.
+    """
+    path = (payload or {}).get("transcript_path")
+    if not isinstance(path, str) or not path or meta.get("transcript_path") == path:
+        return meta
+    meta = dict(meta)
+    meta["transcript_path"] = path
+    try:
+        write_session_meta(session_dir, meta)
+    except Exception:
+        pass
+    return meta
+
+
+def log_handoff(line):
+    """Append one line to ~/.claude/clx-handoff.log. Never raises, never blocks."""
+    try:
+        fd = os.open(HANDOFF_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, (line + "\n").encode("utf-8", "replace"))
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
+def harvest_projects(session_config):
+    """Fold a dead session's NEW project entries back into ~/.claude.json.
+
+    Only paths ~/.claude.json does not know yet are added - never removed, never
+    overwritten: the live file is the user's and a session copy is a stale
+    snapshot of it. Any parse problem means "do nothing".
+    """
+    src = read_json(session_config, {})
+    projects = (src or {}).get("projects")
+    if not isinstance(projects, dict) or not projects:
+        return 0
+    main_path = os.path.join(HOME, ".claude.json")
+    dst = read_json(main_path, {})
+    if not isinstance(dst, dict) or not dst:
+        return 0  # unreadable or empty: never rewrite it from a session copy
+    existing = dst.get("projects")
+    if not isinstance(existing, dict):
+        existing = {}
+    added = [p for p in projects if p not in existing]
+    if not added:
+        return 0
+    for path in added:
+        existing[path] = copy.deepcopy(projects[path])
+    dst["projects"] = existing
+    try:
+        mode = os.stat(main_path).st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    write_json_atomic(main_path, dst, mode=mode)
+    return len(added)
+
+
+class SessionLock(object):
+    """Exclusive, non-blocking lock over one session's state.
+
+    Every read-modify-write of clx-session.json - the hook's hand-off, the
+    watcher's heal, the GC - happens inside this, and the metadata is re-read
+    from disk INSIDE it. Without that, a hand-off landing between the watcher's
+    read and its write was silently undone: the watcher "repaired" the link back
+    to its stale account and wrote its stale metadata over the fresh one
+    (finding-handoff-race.md, run 2, 2026-09-04).
+
+    Non-blocking on purpose: a hook that waits is a turn that stalls. Whoever
+    loses simply skips this event - the next hook event or watcher tick retries,
+    and the state on disk is always consistent because the winner finished.
+    """
+
+    def __init__(self, session_dir):
+        self.path = os.path.join(session_dir, SESSION_LOCK)
+        self.fd = None
+        self.held = False
+
+    def __enter__(self):
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.held = True
+        except OSError:
+            self._close()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._close()
+        return False
+
+    def _close(self):
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+        self.held = False
+
+
+def account_owning(credentials_path, accounts):
+    """The account whose dir holds this credentials file, or None."""
+    directory = os.path.dirname(os.path.abspath(credentials_path))
+    return next((a for a in accounts if os.path.abspath(a.dir) == directory), None)
+
+
+def rehome_meta(session_dir, meta, owner):
+    """Point clx-session.json at the account the link already resolves to.
+
+    The link is the truth: it is what Claude Code reads on its next request. If
+    the metadata disagrees, the metadata is what is wrong.
+    """
+    meta = dict(meta)
+    meta["account_id"] = owner.id
+    meta["account_dir"] = owner.dir
+    meta["account_name"] = owner.name
+    meta.pop("foreign_login_email", None)
+    write_session_meta(session_dir, meta)
+    return meta
+
+
+def drop_session_dir(path):
+    """Rename the dir aside (one atomic step), then delete it. -> True when gone.
+
+    rmtree in place can be interrupted, and one session dir was found with its
+    clx-session.json already deleted and everything else still there - a state no
+    reader can make sense of. After the rename the session dir simply does not
+    exist any more, whatever happens next.
+    """
+    aside = "%s.gc-%d" % (path, os.getpid())
+    try:
+        os.rename(path, aside)
+    except OSError:
+        aside = path  # already gone, or cannot be renamed: delete in place
+    shutil.rmtree(aside, ignore_errors=True)
+    return not os.path.exists(path)
+
+
+def gc_one(path):
+    """Fold a dead session's new project keys back into ~/.claude.json, then drop it.
+
+    Never touches a live session, and holds the session lock while it works, so
+    it cannot delete state another process is in the middle of writing.
+    """
+    name = os.path.basename(path)
+    if name.isdigit() and pid_alive(name):
+        return False
+    with SessionLock(path) as lock:
+        if not lock.held:
+            return False
+        try:
+            harvest_projects(os.path.join(path, ".claude.json"))
+        except Exception:
+            pass
+        return drop_session_dir(path)
+
+
+def gc_sessions(keep=None):
+    """Drop every session dir whose pid is gone, harvesting its projects first."""
+    removed = []
+    try:
+        entries = os.listdir(SESSIONS_ROOT)
+    except OSError:
+        return removed
+    for entry in entries:
+        path = os.path.join(SESSIONS_ROOT, entry)
+        if GC_LEFTOVER.match(entry):
+            shutil.rmtree(path, ignore_errors=True)  # an interrupted GC: always garbage
+            continue
+        if not entry.isdigit() or entry == str(keep):
+            continue
+        if not os.path.isdir(path) or pid_alive(entry):
+            continue
+        if gc_one(path):
+            removed.append(entry)
+    return removed
+
+
+def create_session(chosen, threshold):
+    """Build ~/.clx-sessions/<own pid>/ for this launch and return its path."""
+    os.makedirs(SESSIONS_ROOT, exist_ok=True)
+    try:
+        os.chmod(SESSIONS_ROOT, 0o700)
+    except OSError:
+        pass
+    path = session_path()
+    if os.path.exists(path):
+        shutil.rmtree(path, ignore_errors=True)  # a recycled pid
+    os.makedirs(path)
+    os.chmod(path, 0o700)
+
+    point_credentials(path, chosen.dir)
+
+    # The config file carries oauthAccount and the prefs/trust map. It is a COPY:
+    # Claude Code rewrites it constantly and the account dirs must not drift.
+    dst_cfg = os.path.join(path, ".claude.json")
+    try:
+        copy_over(config_json_for(chosen.dir), dst_cfg)
+    except Exception:
+        write_json_atomic(dst_cfg, {})
+
+    for name in LINK_NAMES:
+        src = os.path.join(CLAUDE_HOME, name)
+        if not os.path.exists(src):
+            continue
+        try:
+            os.symlink(src, os.path.join(path, name))
+        except OSError:
+            pass
+    history = os.path.join(CLAUDE_HOME, "history.jsonl")
+    if not os.path.exists(history):
+        try:
+            open(history, "a").close()
+        except OSError:
+            pass
+    try:
+        os.symlink(history, os.path.join(path, "history.jsonl"))
+    except OSError:
+        pass
+
+    write_session_meta(path, {
+        "pid": os.getpid(),
+        "started_at": int(time.time()),
+        "account_id": chosen.id,
+        "account_dir": chosen.dir,
+        "account_name": chosen.name,
+        "threshold": threshold,
+        "handoffs": [],
+        "last_handoff_at": 0,
+    })
+    # Start the heal watcher BEFORE Claude Code does: the first token refresh can
+    # land seconds after launch, and until it is healed the account dir holds a
+    # rotated, dead refresh token that the widget may replay.
+    spawn_heal_watch(path)
+    return path
+
+
+def session_context():
+    """(session_dir, meta) when CLAUDE_CONFIG_DIR is a clx session dir, else (None, None)."""
+    raw = os.environ.get("CLAUDE_CONFIG_DIR") or ""
+    if not raw:
+        return None, None
+    path = os.path.abspath(raw)
+    if not (path + os.sep).startswith(os.path.abspath(SESSIONS_ROOT) + os.sep):
+        return None, None
+    meta = read_session_meta(path)
+    return (path, meta) if meta else (None, None)
+
+
+def session_identity_email(session_dir):
+    """oauthAccount.emailAddress in the session's OWN .claude.json, lowercased.
+
+    Claude Code rewrites that file, so after a /login inside a session dir this
+    is the account the user actually signed in as - which is not necessarily the
+    account clx-session.json still names.
+    """
+    return (email_of(session_dir) or "").strip().lower()
+
+
+def heal_session(session_dir, current, accounts):
+    """Put <session>/.credentials.json back to a symlink into an account dir.
+
+    -> (note for the log or None, account this session now belongs to or None,
+        foreign email that could not be adopted or None)
+
+    Three things break the link, and the fix differs for each:
+      * a token REFRESH renamed a new regular file over it. Those are the newest
+        tokens and the refresh token may have rotated, so they are copied back
+        into the account dir FIRST and only then re-linked - dropping them would
+        strand the account with a dead refresh token.
+      * someone re-pointed the link by hand: clx-session.json wins.
+      * the user ran /login INSIDE the session and signed in as somebody else.
+        Then the file holds a DIFFERENT account's tokens, and copying it into the
+        account this session started on would destroy that account's login. The
+        invariant: never copy tokens into an account dir whose email differs from
+        the session's own oauthAccount. Instead adopt the session into the dir
+        that owns that email, or - when no dir owns it - touch nothing at all.
+    """
+    link = os.path.join(session_dir, ".credentials.json")
+    try:
+        is_link = os.path.islink(link)
+        exists = os.path.exists(link)  # follows the link: False for a dangling one
+        login_email = session_identity_email(session_dir)
+        mine = (current.email or "").strip().lower()
+
+        if login_email and login_email != mine:
+            owner = next((a for a in accounts if (a.email or "").strip().lower() == login_email), None)
+            if owner is None:
+                # No dir owns this login. Leave the file exactly as it is: it is
+                # the only copy of those tokens and it is not ours to move.
+                return ("login: foreign account %s, not adopted" % login_email, None, login_email)
+            if is_link:
+                # Write-through: whatever the link points at already holds these
+                # tokens. Nothing to copy - just re-home this session.
+                if os.path.abspath(os.readlink(link)) != os.path.abspath(
+                        os.path.join(owner.dir, ".credentials.json")):
+                    point_credentials(session_dir, owner.dir)
+                return ("login: %s -> %s adopted (write-through, nothing copied)"
+                        % (current.name, owner.name), owner, None)
+            if exists:
+                canonical = os.path.join(owner.dir, ".credentials.json")
+                if session_copy_is_newer(link, canonical):
+                    copy_over(link, canonical)
+                    point_credentials(session_dir, owner.dir)
+                    return ("login: %s -> %s adopted" % (current.name, owner.name), owner, None)
+                point_credentials(session_dir, owner.dir)
+                return ("login: %s -> %s adopted (canonical newer, session copy dropped)"
+                        % (current.name, owner.name), owner, None)
+            point_credentials(session_dir, owner.dir)
+            return ("login: %s -> %s adopted (link recreated)" % (current.name, owner.name), owner, None)
+
+        # Same account (or the session config names none): the old repairs apply.
+        target = os.path.join(current.dir, ".credentials.json")
+        if is_link:
+            was = os.readlink(link)
+            if os.path.abspath(was) == os.path.abspath(target):
+                return (None, None, None)
+            point_credentials(session_dir, current.dir)
+            return ("heal relink: was %s, now %s" % (os.path.dirname(was) or "?", current.dir), None, None)
+        if exists:
+            if session_copy_is_newer(link, target):
+                copy_over(link, target)
+                point_credentials(session_dir, current.dir)
+                return ("heal adopt: a refresh replaced the link; new tokens kept in %s" % current.dir,
+                        None, None)
+            point_credentials(session_dir, current.dir)
+            return ("heal relink: canonical newer, session copy dropped", None, None)
+        point_credentials(session_dir, current.dir)
+        return ("heal recreate: the link was missing", None, None)
+    except Exception as exc:
+        return ("heal failed: %s" % type(exc).__name__, None, None)
+
+
+def mirror_identity(session_dir, account_dir):
+    """Copy the new account's oauthAccount into the session's .claude.json.
+
+    Best effort and cosmetic: Claude Code may overwrite this file from memory.
+    Nothing about the hand-off depends on it - the credentials symlink is what
+    authenticates the next request.
+    """
+    try:
+        src = read_json(config_json_for(account_dir), {}) or {}
+        identity = src.get("oauthAccount")
+        dst_path = os.path.join(session_dir, ".claude.json")
+        dst = read_json(dst_path, {}) or {}
+        if identity is None:
+            dst.pop("oauthAccount", None)
+        else:
+            dst["oauthAccount"] = copy.deepcopy(identity)
+        write_json_atomic(dst_path, dst)
+        return True
+    except Exception:
+        return False
+
+
+def sessions_report():
+    """One line per live session dir, for --status."""
+    rows = []
+    now = int(time.time())
+    try:
+        entries = sorted((e for e in os.listdir(SESSIONS_ROOT) if e.isdigit()), key=int)
+    except OSError:
+        return rows
+    for entry in entries:
+        if not pid_alive(entry):
+            continue
+        path = os.path.join(SESSIONS_ROOT, entry)
+        meta = read_session_meta(path) or {}
+        handoffs = meta.get("handoffs") or []
+        last = handoffs[-1] if handoffs else None
+        # The watcher decides on a timer now, so a session that never fires a hook
+        # event is still checked - and --status has to be able to say when.
+        watching = watcher_pid(path) is not None
+        decided = meta.get("last_decide_at") or 0
+        if not watching:
+            due = "next check -"
+        elif decided:
+            every = meta.get("decide_every")
+            if not isinstance(every, (int, float)) or every <= 0:
+                every = WATCH_DECIDE
+            due = "next check in %ds" % max(0, int(every - (now - decided)))
+        else:
+            due = "next check pending"
+        tail = "" if not last else "  last: %s → %s" % (last.get("from"), last.get("to"))
+        if meta.get("full_notice"):
+            since = meta.get("full_notice_at") or 0
+            tail += "  STUCK%s: %s" % (" %s" % fmt_age(now - since) if since else "",
+                                       meta.get("full_notice_why")
+                                       or meta.get("full_notice"))
+        rows.append(
+            "  %-8s %-16s started %-5s hand-offs %d  heal-watch %-3s  %-18s "
+            "decided %-8s%s"
+            % (
+                entry,
+                meta.get("account_name") or "?",
+                fmt_age(now - (meta.get("started_at") or now)),
+                len(handoffs),
+                "on" if watching else "OFF",
+                due,
+                "%s ago" % fmt_age(now - decided) if decided else "-",
+                tail,
+            )
+        )
+    return rows
+
+
+# --- the heal watcher ---------------------------------------------------------
+# Measured 2026-09-03 with clx-briefs/refresh-probe.py: a token refresh RENAMES a
+# new regular file over the session's symlink (no write-through) AND the refresh
+# token ROTATES. From that instant the account dir holds a rotated, dead refresh
+# token - and claude-meter refreshes accounts from those canonical files every
+# few minutes, so it can replay the old one and reuse detection can revoke the
+# whole grant. The hook only runs on prompts and tool calls, which can be minutes
+# apart; this daemon closes the window to one tick.
+WATCH_TICK = float(os.environ.get("CC_HEAL_TICK") or 2)
+WATCH_PID_NAME = "heal-watch.pid"
+# ...and every WATCH_DECIDE seconds the same daemon runs the hook's own hand-off
+# decision. The hook fires on prompts, stops and tool results only: a parent
+# waiting on background agents produces none of those (a background Agent call
+# returns at LAUNCH, so its PostToolUse fired minutes earlier and its completion
+# arrives as a task notification, not a tool result), and a session already in a
+# rate-limit countdown produces none either. On 2026-09-05 that was nine minutes
+# and zero checks while the account went 90 % -> 100 %.
+WATCH_DECIDE = float(os.environ.get("CC_WATCH_DECIDE") or 30)
+
+
+def watcher_pid_file(session_dir):
+    return os.path.join(session_dir, WATCH_PID_NAME)
+
+
+def watcher_pid(session_dir):
+    """The pid of THIS session's live watcher, or None.
+
+    The cmdline is checked as well: a recycled pid must never pass for a watcher.
+    """
+    try:
+        with open(watcher_pid_file(session_dir), "r", encoding="utf-8") as fh:
+            pid = int((fh.read() or "0").strip())
+    except (OSError, ValueError):
+        return None
+    if pid <= 0 or not pid_alive(pid):
+        return None
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as fh:
+            cmdline = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    return pid if ("--heal-watch" in cmdline and os.path.abspath(session_dir) in cmdline) else None
+
+
+def spawn_heal_watch(session_dir):
+    """Start the per-session heal daemon unless one is already running."""
+    if os.environ.get("CLX_NO_WATCH") or watcher_pid(session_dir):
+        return False
+    env = dict(os.environ)
+    env.pop("CLAUDE_CONFIG_DIR", None)  # the watcher is not itself inside a session
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--heal-watch", os.path.abspath(session_dir)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, env=env,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def watch_heal_once(session_dir):
+    """One watcher pass. Returns a one-word outcome, which the tests assert on.
+
+    The watcher exists for ONE case: a token refresh renamed a regular file over
+    the symlink. It must never second-guess a symlink that already resolves into
+    a known account dir - that is a hand-off, possibly one landing this very
+    instant, and "repairing" it back to a stale clx-session.json is exactly how a
+    hand-off got silently undone (finding-handoff-race.md, run 2). When the link
+    and the metadata disagree, the LINK wins: the metadata is re-homed to it.
+    """
+    conf = load_conf()
+    accounts = discover()
+    if not accounts:
+        return "no-accounts"
+    accounts, _ = dedupe(accounts, conf["primary"].strip().lower())
+    refresh(accounts, force=False, only="__none__")  # cache only: no HTTP, no fork
+    apply_model(accounts, session_model())
+    apply_pauses(accounts, conf)  # keeps a parked account out of the "next" record
+
+    with SessionLock(session_dir) as lock:
+        if not lock.held:
+            return "busy"  # the hook owns this session right now; the next tick retries
+        meta = read_session_meta(session_dir)  # never act on a meta read before the lock
+        if not meta:
+            return "no-meta"
+        tag = meta.get("pid") or os.path.basename(session_dir)
+        link = os.path.join(session_dir, ".credentials.json")
+        if os.path.islink(link) and os.path.exists(link):
+            owner = account_owning(os.path.realpath(link), accounts)
+            if owner is not None:
+                # A healthy link into a real account: not the watcher's business.
+                if os.path.abspath(owner.dir) == os.path.abspath(meta.get("account_dir") or ""):
+                    return "ok"
+                rehome_meta(session_dir, meta, owner)
+                log_handoff("%s  %s  re-home: metadata caught up to the link (%s)  watch"
+                            % (iso_now(), tag, owner.name))
+                return "rehomed"
+        # Regular file, missing, dangling, or pointing outside every account dir.
+        current = session_account(session_dir, meta, accounts)
+        if current is None:
+            return "no-account"
+        apply_heal(session_dir, meta, current, accounts, conf, "watch")
+        return "healed"
+
+
+def watch_refresh_usage(accounts, current, threshold):
+    """Refresh THIS session's account when it is near its threshold.
+
+    -> the TTL that was applied, or None when the tick left it to the normal
+    cache path (usage_from_cache, which forks spawn_refresh at the 180 s TTL).
+
+    The only place clx fetches outside a launch, and the reason it is safe: it
+    runs in the watcher daemon and OUTSIDE the session lock, so a slow /usage
+    call can never make a hook event skip its turn.
+
+    After a 429 the full TTL comes back. The rate limiter has just said no, and
+    polling it six times as often is how a soft limit becomes a hard one - the
+    429 backoff is the one thing this must not defeat.
+    """
+    if not near_threshold(current, threshold):
+        return None
+    entry = (read_json(CACHE_FILE, {}) or {}).get(current.id) or {}
+    ttl = TTL if entry.get("status") == "429" else NEAR_TTL
+    refresh(accounts, force=False, only=current.id, ttl=ttl)
+    return ttl
+
+
+def watch_refresh_all(accounts):
+    """Keep EVERY account's entry fresh on the normal TTL. -> calls made.
+
+    The watcher's second job, and the one this whole finding is about. An
+    account is polled only while a session sits on it, and a hand-off always
+    leaves at >= threshold - so without this the entry of every account worth
+    moving TO freezes at 90 %+ the moment the session leaves, and hours later
+    best_candidate() reads those frozen numbers, finds everything "over" and
+    keeps the session on an account at 100 % (finding-stale-candidates.md).
+
+    It is cheap because it is shared: the cache's own timestamps dedupe it and
+    FetchClaim dedupes the races, so N sessions cost what one costs - at most one
+    /usage call per account per TTL in total, not per session. Runs OUTSIDE the
+    session lock, so a slow call can never make a hook event skip its turn.
+    """
+    return refresh(accounts, force=False)
+
+
+def watch_refresh_candidates(accounts, current, threshold):
+    """Re-measure the candidates before concluding there is nowhere to go.
+
+    -> the accounts that were actually refetched.
+
+    Only reached when this session is spent AND best_candidate() says None. That
+    answer is worth acting on only if it was computed from numbers younger than
+    NEAR_TTL, and the accounts it is about are precisely the ones no session is
+    sitting on. The 429 backoff is honoured inside refresh().
+    """
+    refreshed = []
+    for acct in stale_candidates(accounts, {current.id}, max_age=NEAR_TTL):
+        if refresh(accounts, force=False, only=acct.id, ttl=NEAR_TTL):
+            refreshed.append(acct)
+    return refreshed
+
+
+def watch_decide_once(session_dir):
+    """One periodic hand-off decision. -> a one-word outcome the tests assert on.
+
+    It runs the SAME handoff_in_session path the hook runs, labelled WATCH_EVENT:
+    the decision, the loop guard, the lock and the records are the hook's, not a
+    second implementation that can drift from it. All this adds is a clock.
+    """
+    conf = load_conf()
+    accounts = discover()
+    if not accounts:
+        return "no-accounts"
+    accounts, _ = dedupe(accounts, conf["primary"].strip().lower())
+    refresh(accounts, force=False, only="__none__")  # cache only, for the near test
+    meta = read_session_meta(session_dir)  # advisory: re-read under the lock below
+    if not meta:
+        return "no-meta"
+    # No hook payload out here, so the model comes from the transcript path the
+    # hook recorded - see remember_transcript().
+    apply_model(accounts, session_model({"transcript_path": meta.get("transcript_path")}))
+    apply_pauses(accounts, conf)
+    current = session_account(session_dir, meta, accounts)
+    if current is None:
+        return "no-account"
+    try:
+        threshold = float(meta.get("threshold"))
+    except (TypeError, ValueError):
+        threshold = conf["threshold"]
+    # Every account on the normal TTL, then this one on the near-threshold fast
+    # path. Both outside the session lock.
+    watch_refresh_all(accounts)
+    watch_refresh_usage(accounts, current, threshold)
+    # "Nowhere to go" is only an answer if it was measured. If this session is
+    # spent and nothing looks available, re-measure the candidates first: their
+    # entries are the ones nobody refreshes.
+    spent = (current.paused is not None or auth_problem(current) is not None
+             or (known(current) and over_threshold(current, threshold) is not None))
+    if spent and best_candidate(accounts, {current.id}, threshold) is None:
+        watch_refresh_candidates(accounts, current, threshold)
+    # handoff_in_session has to keep returning 0 - it is the hook's exit code - so
+    # the stamp it writes under the lock is the only honest evidence that this
+    # tick ran. Without it a tick the hook locked out would still say "decided".
+    floor = int(time.time())
+    handoff_in_session(session_dir, meta, accounts, conf, WATCH_EVENT)
+    after = read_session_meta(session_dir) or {}
+    # A dead session's dir is GC'd by its own watcher - and by nothing else if
+    # that watcher died first, which is how ~/.clx-sessions/<pid> survived two
+    # days. Every watcher now sweeps every dead dir, every decide tick.
+    try:
+        gc_sessions(keep=os.path.basename(session_dir))
+    except Exception:
+        pass
+    if (after.get("last_decide_at") or 0) < floor:
+        return "busy"  # the hook owns the session right now; the next tick retries
+    return "decided"
+
+
+def heal_watch_loop(session_dir):
+    """One lstat per tick; nothing is parsed until the link actually changes.
+
+    On top of that, every WATCH_DECIDE seconds the hand-off decision runs here
+    too - see watch_decide_once(). The clock is measured from the END of the last
+    decision, so a decision that had to fetch can never shorten the next gap.
+    """
+    link = os.path.join(session_dir, ".credentials.json")
+    session_pid = os.path.basename(session_dir)
+    signature = "start"  # never equal to a real stat tuple, so the first tick checks
+    last_decide = time.monotonic()  # the launcher just chose: first decision in 30 s
+
+    def look():
+        try:
+            st = os.lstat(link)
+            return (stat.S_ISLNK(st.st_mode), st.st_ino, st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def gone():
+        return not os.path.isdir(session_dir) or not pid_alive(session_pid)
+
+    def finish():
+        """The session is over: merge its projects back and drop the dir.
+
+        gc_one takes the session lock non-blockingly and answers False whenever
+        somebody else holds it for those few milliseconds - and this watcher is
+        the only thing that will ever GC this dir, so one attempt is not enough.
+        Treating that False as done is what left ~/.clx-sessions/<pid> behind
+        for two days.
+        """
+        for _ in range(GC_RETRIES):
+            if not os.path.isdir(session_dir) or gc_one(session_dir):
+                return True
+            time.sleep(WATCH_TICK)
+        return False
+
+    while True:
+        if not os.path.isdir(session_dir):
+            return
+        if not pid_alive(session_pid):
+            finish()
+            return
+        seen = look()
+        if seen != signature:
+            try:
+                watch_heal_once(session_dir)
+            except Exception:
+                pass
+            signature = look()  # the heal moves the link itself, so re-read after it
+        if time.monotonic() - last_decide >= WATCH_DECIDE:
+            try:
+                watch_decide_once(session_dir)
+            except Exception:
+                pass
+            last_decide = time.monotonic()
+            signature = look()  # a hand-off moves the link: do not "heal" it next tick
+            if gone():
+                continue  # the session exited mid-tick: GC it now, not in 2 s
+        time.sleep(WATCH_TICK)
+
+
+def cmd_heal_watch(session_dir):
+    """Detached per-session heal daemon. Never prints, never exits non-zero."""
+    session_dir = os.path.abspath(session_dir or "")
+    if os.environ.get("CLX_NO_WATCH") or not os.path.isdir(session_dir):
+        return 0
+    if watcher_pid(session_dir):
+        return 0  # cheap fast path; the flock below is what actually decides
+    try:
+        if os.fork() > 0:
+            return 0  # the launcher's direct child returns at once: no zombie
+    except OSError:
+        return 0
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    try:
+        if os.fork() > 0:
+            os._exit(0)  # the session leader exits: the daemon can never get a tty
+    except OSError:
+        os._exit(0)
+    try:
+        fd = os.open(os.devnull, os.O_RDWR)
+        for stream in (0, 1, 2):
+            os.dup2(fd, stream)
+        if fd > 2:
+            os.close(fd)
+    except OSError:
+        pass
+    try:
+        # One watcher per session, decided atomically: whoever holds the flock on
+        # the pid file owns it. A pre-fork check alone loses the race when two
+        # launches land together, and the kernel drops this lock when we die, so
+        # a crashed watcher never blocks its replacement.
+        pidfile = watcher_pid_file(session_dir)
+        fd = os.open(pidfile, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            os._exit(0)  # another watcher already owns this session
+        os.ftruncate(fd, 0)
+        os.write(fd, ("%d\n" % os.getpid()).encode("ascii"))
+        heal_watch_loop(session_dir)  # fd stays open: the lock is the liveness proof
+    except Exception:
+        pass
+    os._exit(0)
+
+
+# ------------------------------------------------------------------- commands
+
+
+def sessions_on(acct):
+    """The pids of live clx sessions currently running on this account."""
+    out = []
+    try:
+        entries = sorted((e for e in os.listdir(SESSIONS_ROOT) if e.isdigit()), key=int)
+    except OSError:
+        return out
+    for entry in entries:
+        if not pid_alive(entry):
+            continue
+        meta = read_session_meta(os.path.join(SESSIONS_ROOT, entry)) or {}
+        if meta.get("account_id") == acct.id:
+            out.append(entry)
+    return out
+
+
+def write_conf(update):
+    """Read cc.json, apply `update`, write it back 0600. -> the new raw document.
+
+    The FILE is what is edited, never the dict load_conf() returns: that one
+    carries defaults and CC_THRESHOLD / CC_PRIMARY overrides, and writing it back
+    would bake this shell's environment into the config.
+    """
+    raw = read_json(CONF_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    raw.update(update)
+    write_json_atomic(CONF_FILE, raw, 0o600)
+    return raw
+
+
+def stored_pauses():
+    """(raw pause map from cc.json, live entries) - the raw one is what we write.
+
+    Rewriting the file from parse_pauses() output would normalise away anything a
+    later version stores, so the raw entries are kept verbatim and only expired
+    ones are dropped.
+    """
+    raw = read_json(CONF_FILE, {})
+    raw_pauses = raw.get("paused") if isinstance(raw, dict) else None
+    if not isinstance(raw_pauses, dict):
+        raw_pauses = {}
+    return raw_pauses, parse_pauses(raw_pauses)
+
+
+def pause_key(acct):
+    """The cc.json key a park is stored under.
+
+    The account id, except for the DEFAULT dir: its id is "default", which names
+    a directory rather than a person, and a /login there would silently park
+    whoever moved in. Its email local part is the same thing --use matches on.
+    """
+    if acct.is_default:
+        local = (acct.email or "").split("@", 1)[0].strip().lower()
+        if local:
+            return local
+    return acct.id.strip().lower()
+
+
+def prune_expired(raw_pauses, live, drop_keys=()):
+    """The raw map minus every expired entry (and minus `drop_keys`)."""
+    drop = {str(k).strip().lower() for k in drop_keys}
+    return {k: v for k, v in raw_pauses.items()
+            if isinstance(k, str) and k.strip().lower() in live
+            and k.strip().lower() not in drop}
+
+
+def parse_until(days, until, now=None):
+    """--days / --until -> (epoch or None for indefinite, error message or None).
+
+    Both name the moment the park ENDS. A bare date is local midnight, i.e. the
+    account comes back at the start of that day; "never" parks it indefinitely.
+    """
+    now = time.time() if now is None else now
+    text = "" if until is None else str(until).strip()
+    if text:
+        if text.lower() in ("never", "forever", "indefinite", "indefinitely", "none"):
+            return None, None
+        try:
+            when = datetime.fromisoformat(text.replace("/", "-"))
+        except ValueError:
+            return None, ("--until wants YYYY-MM-DD, YYYY-MM-DDTHH:MM or 'never', got %r"
+                          % until)
+        if when.tzinfo is None:
+            epoch = int(when.timestamp())  # naive == local time, which is what was typed
+        else:
+            epoch = int(when.astimezone(timezone.utc).timestamp())
+        if epoch <= now:
+            return None, "--until %s is already in the past" % text
+        return epoch, None
+    text = "" if days is None else str(days).strip()
+    if text:
+        try:
+            value = float(text)
+        except ValueError:
+            return None, "--days wants a number, got %r" % days
+        if value <= 0:
+            return None, "--days wants a positive number of days, got %r" % days
+        return int(now + value * 86400), None
+    return int(now + PAUSE_DEFAULT_DAYS * 86400), None
+
+
+def cmd_pause(acct, days=None, until=None, reason=None):
+    """clx --pause <name>: park an account. Touches cc.json and nothing else.
+
+    Parking deliberately does NOT touch credentials, the cache or the account
+    dir: the account keeps being polled and refreshed (its refresh token rotates
+    and expires in ~30 days), it is simply never launched on or handed a session.
+    """
+    epoch, err = parse_until(days, until)
+    if err:
+        warn("clx: " + err)
+        return 2
+    raw_pauses, live = stored_pauses()
+    already = next((k for k in sorted(acct.keys()) if k in live), None)
+    if already:
+        left = pause_left(live[already])
+        print("clx: %s is already parked (%s) - nothing changed. To change it: clx --resume %s"
+              % (acct.name, "indefinitely" if left is None else "%s left" % fmt_span(left),
+                 acct.id))
+        return 0
+    entry = {"until": epoch, "since": int(time.time())}
+    if reason:
+        entry["reason"] = str(reason)
+    fresh = prune_expired(raw_pauses, live)  # opportunistic prune: we are writing anyway
+    key = pause_key(acct)
+    fresh[key] = entry
+    try:
+        write_conf({"paused": fresh})
+    except Exception as exc:
+        # Never report a park that is not on disk: the next launch would use the
+        # account and the owner would never know.
+        warn("clx: could not write %s (%s) - %s is NOT parked" % (CONF_FILE, exc, acct.name))
+        return 1
+
+    left = pause_left(entry)
+    print("clx: %s is parked %s%s"
+          % (acct.name,
+             "indefinitely" if left is None
+             else "for %s - until %s" % (fmt_span(left), iso_now(epoch)),
+             " (reason: %s)" % reason if reason else ""))
+    print("     launches and hand-offs skip it; usage polling and the token refresh keep "
+          "running. Undo: clx --resume %s" % key)
+    live_pids = sessions_on(acct)
+    if live_pids:
+        print("     %d live session%s on it (%s) will move at the next hook event"
+              % (len(live_pids), "" if len(live_pids) == 1 else "s", ", ".join(live_pids)))
+    return 0
+
+
+def cmd_resume(acct):
+    """clx --resume <name> (alias --unpause): put a parked account back in service."""
+    raw_pauses, live = stored_pauses()
+    mine = [k for k in sorted(acct.keys()) if k in live]
+    if not mine:
+        stale = [k for k in raw_pauses
+                 if isinstance(k, str) and k.strip().lower() in acct.keys()]
+        if stale:
+            try:
+                write_conf({"paused": prune_expired(raw_pauses, live, drop_keys=acct.keys())})
+            except Exception as exc:
+                warn("clx: could not write %s (%s)" % (CONF_FILE, exc))
+                return 1
+            print("clx: %s is not parked - its park had already expired, cc.json cleaned up"
+                  % acct.name)
+        else:
+            print("clx: %s is not parked - nothing to do" % acct.name)
+        return 0
+    left = pause_left(live[mine[0]])
+    try:
+        write_conf({"paused": prune_expired(raw_pauses, live, drop_keys=acct.keys())})
+    except Exception as exc:
+        # Never report a resume that is not on disk: the owner would think the
+        # account is back while clx still refuses to launch on it.
+        warn("clx: could not write %s (%s) - %s is STILL parked" % (CONF_FILE, exc, acct.name))
+        return 1
+    print("clx: %s is back in service - %s"
+          % (acct.name, "cancelled an indefinite park" if left is None
+             else "cancelled the %s that was left of its park" % fmt_span(left)))
+    return 0
+
+
+def cmd_status(conf, accounts, calls):
+    primary_key = conf["primary"].strip().lower()
+    primary = find_primary(accounts, primary_key)
+    active_dir = (read_json(ACTIVE_FILE, {}) or {}).get("dir")
+    now = int(time.time())
+    model = accounts[0].model if accounts else None
+
+    # One column per window ANY account reports, so a new cap (a model-scoped
+    # weekly limit, say) shows up here the first time /usage mentions it. A value
+    # that does not bind the live model is marked with a trailing dot: it is real,
+    # it is just not part of any decision while this model is in use.
+    keys = window_keys(accounts)
+    ignored = []
+    stale_rows = set()
+    cache_col = 4 + len(keys)  # marks, ACCOUNT, EMAIL, <windows>, RESET-IN, CACHE
+    rows = [tuple([""] + ["ACCOUNT", "EMAIL"] + [window_header(k).upper() for k in keys]
+                  + ["RESET-IN", "CACHE", "STATUS"])]
+    for acct in accounts:
+        if is_stale(acct):
+            stale_rows.add(len(rows))
+        marks = "*" if acct.dir == active_dir else " "
+        if primary is acct:
+            marks = marks.strip() + "P" if marks.strip() else "P"
+        cells = []
+        for key in keys:
+            win = (acct.windows or {}).get(key) or {}
+            text = fmt_usage(win.get("utilization"))
+            if win and not applies_to(key, win, model):
+                text += "·"
+                label = win.get("label") or window_header(key)
+                if label not in ignored:
+                    ignored.append(label)
+            cells.append(text)
+        rows.append(
+            tuple(
+                [marks, acct.name, acct.email or "-"]
+                + cells
+                + [
+                    fmt_reset(acct.resets_at),
+                    fmt_age(now - acct.fetched_at) if acct.fetched_at else "-",
+                    # A dead login outranks everything: "429" or "no-token" next
+                    # to a 5h 1% read as head-room, which is how it got launched on.
+                    auth_problem(acct) or (pause_tag(acct) if acct.paused else acct.status),
+                ]
+            )
+        )
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for index, row in enumerate(rows):
+        cells = [cell.ljust(widths[i]) for i, cell in enumerate(row)]
+        if index in stale_rows:
+            # The age, not the percentage: the number itself may be perfectly
+            # true, it is just not current, and nothing may be decided on it.
+            cells[cache_col] = paint(cells[cache_col])
+        print("  ".join(cells).rstrip())
+
+    stale = [a for a in accounts if is_stale(a)]
+    if stale:
+        print("stale (over %s old): %s - counted as UNKNOWN, never as over; the watcher "
+              "refreshes every account every %ds"
+              % (fmt_span(stale_ttl()),
+                 ", ".join("%s %s" % (a.name, fmt_age(entry_age(a))
+                                      if entry_age(a) is not None else "never")
+                           for a in stale),
+                 TTL))
+
+    print("")
+    print("model: %s%s" % (model or "unknown",
+                           "  (%s ignored · )" % ", ".join(ignored) if ignored
+                           else "  (every window counts)"))
+    if primary is not None:
+        print("primary: %s (%s)" % (primary.name, primary.email or primary.dir))
+    parked = [a for a in accounts if a.paused]
+    if parked:
+        print("parked: %s" % ", ".join(
+            "%s (%s)" % (a.name, "indefinite" if pause_left(a.paused) is None
+                         else "%s left" % fmt_span(pause_left(a.paused)))
+            for a in parked))
+    dead = [a for a in accounts if auth_problem(a)]
+    for acct in dead:
+        print(paint("login: %s (never launched on or handed to until then)" % login_hint(acct)))
+    for acct in accounts:
+        left = renewal_due(acct)
+        if left is not None:
+            print("login: %s's refresh token hard-expires in %s - renew early: %s"
+                  % (acct.name, fmt_span(left), login_command(acct)))
+    chosen, nxt, reason, notes = select(accounts, conf)  # notes carry a missing primary
+    said = {"clx: " + pause_phrase(a) for a in parked}   # the line above said it better
+    said |= {"clx: " + login_hint(a) for a in dead}
+    for note in notes:
+        if note not in said:
+            print(note)
+    blocked = model_block(accounts, {chosen.id}, conf["threshold"], model) \
+        if nxt is None and over_threshold(chosen, conf["threshold"]) else None
+    if blocked:
+        print("%s is spent on every account - switch the model (/model %s), not the account"
+              % (blocked["label"], blocked["suggest"]))
+    print(
+        "threshold %g%%  |  would launch: %s (%s)%s"
+        % (
+            conf["threshold"],
+            chosen.name,
+            reason,
+            "" if nxt is None else "  |  next: %s (%s)" % (nxt.name, window_tag(nxt)),
+        )
+    )
+    total = ((read_json(CACHE_FILE, {}) or {}).get(META_KEY) or {}).get("usageCalls") or 0
+    print(
+        "* = active (last clx launch)   P = primary   |  /usage calls: %d this run, %d since the cache was created"
+        % (calls, total)
+    )
+
+    rows = sessions_report()
+    if rows:
+        print("")
+        print("sessions (live ~/.clx-sessions/<pid>):")
+        for row in rows:
+            print(row)
+    return 0
+
+
+# ------------------------------------------------------------ hook plumbing
+
+
+def hook_payload():
+    """The hook's JSON payload from stdin.
+
+    Field names are the documented ones (code.claude.com/docs/en/hooks): every
+    event carries session_id, prompt_id, transcript_path, cwd, permission_mode
+    and hook_event_name; PostToolUse adds tool_name/tool_input/tool_result and
+    Stop adds stop_hook_active. We only use hook_event_name, transcript_path
+    and cwd.
+
+    The read is capped because a PostToolUse payload embeds the entire tool
+    result. When the cap truncates the JSON, fall back to a regex over the
+    scalars we need - all of which precede the bulky fields - rather than
+    silently behaving as if there were no payload at all.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        raw = sys.stdin.buffer.read(PAYLOAD_LIMIT)
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    text = raw.decode("utf-8", "replace")
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except ValueError:
+        pass
+    out = {}
+    for key in ("session_id", "transcript_path", "cwd", "hook_event_name", "tool_name"):
+        match = re.search(r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"' % key, text)
+        if match:
+            try:
+                out[key] = json.loads('"%s"' % match.group(1))
+            except ValueError:
+                out[key] = match.group(1)
+    return out
+
+
+def usage_from_cache(accounts, current):
+    """Fill the accounts from the cache only - zero HTTP calls on the hook path.
+
+    A stale entry for the CURRENT account forks a detached refresh that lands in
+    the cache for the next event, so no hook ever waits on the network.
+    """
+    refresh(accounts, force=False, only="__none__")
+    entry = (read_json(CACHE_FILE, {}) or {}).get(current.id) or {}
+    last_try = max(entry.get("checkedAt") or 0, entry.get("fetchedAt") or 0)
+    if int(time.time()) - last_try >= TTL:
+        spawn_refresh(current.id)
+
+
+def request_candidate_refresh(accounts, current):
+    """Ask for a fresh number for every candidate nobody has measured lately.
+
+    The hook path may not touch the network, so it forks the detached refresh and
+    lets the NEXT event decide on the answer. Without this, "nowhere to go" is
+    computed from entries that froze the moment the last session left those
+    accounts - and nothing would ever unfreeze them.
+    """
+    asked = [a.id for a in stale_candidates(accounts, {current.id}, max_age=NEAR_TTL)]
+    if asked:
+        spawn_refresh(*asked)  # one child, not one per account: the hook is timed
+    return asked
+
+
+def cmd_handoff_check(event="prompt"):
+    """Hook body for UserPromptSubmit / Stop / PostToolUse.
+
+    Must stay fast: never blocks on the network, and always exits 0 - a non-zero
+    UserPromptSubmit hook blocks the prompt and a non-zero Stop hook blocks the
+    turn from ending, and a usage nudge must never cost the user their turn.
+    """
+    payload = hook_payload()  # also drains stdin: the writer must never see EPIPE
+    try:
+        conf = load_conf()
+        accounts = discover()
+        if not accounts:
+            return 0
+        accounts, _ = dedupe(accounts, conf["primary"].strip().lower())
+        # Which model is answering decides which windows count at all.
+        apply_model(accounts, session_model(payload))
+        apply_pauses(accounts, conf)  # a parked account is never a target
+        session_dir, meta = session_context()
+        if session_dir:
+            return handoff_in_session(session_dir, meta, accounts, conf, event, payload)
+        return handoff_outside_session(accounts, conf, event)
+    except Exception:
+        return 0
+
+
+def handoff_outside_session(accounts, conf, event):
+    """Sessions clx did not launch: keep the record honest and nudge, as before.
+
+    There is no symlink to re-point here, so the hand-off has to be done by the
+    user - /exit and `clx -c` - exactly as it was before session dirs existed.
+    """
+    cur_dir = os.path.abspath(os.environ.get("CLAUDE_CONFIG_DIR") or CLAUDE_HOME)
+    current = next((a for a in accounts if os.path.abspath(a.dir) == cur_dir), None)
+    if current is None:
+        # The dir may have been deduped away; fall back to its email.
+        email = email_of(cur_dir).lower()
+        current = next((a for a in accounts if a.email.lower() == email and email), None)
+    if current is None:
+        return 0
+
+    usage_from_cache(accounts, current)
+    threshold = conf["threshold"]
+    nxt = best_candidate(accounts, {current.id}, threshold)
+    dead = auth_problem(current)
+    if dead:
+        spent = (AUTH_WINDOW, dead, None)
+    else:
+        spent = over_threshold(current, threshold) if known(current) else None
+    if spent and nxt is None:
+        # Ask for the candidates to be measured (the hook never fetches), then
+        # fall back to whatever WAS measured about them - an account last seen
+        # under the threshold beats one that is spent right now.
+        request_candidate_refresh(accounts, current)
+        nxt = best_candidate(accounts, {current.id}, threshold, allow_stale=True)
+    block = model_block(accounts, {current.id}, threshold, current.model) \
+        if (spent and nxt is None and not dead) else None
+
+    # Keep the statusline's hint fresh even when we print nothing. Only ever touch
+    # the file when it actually describes THIS session's account: with two sessions
+    # open on different accounts, writing our `next` into the other one's record
+    # produced `next == active`, i.e. "hand off to where you already are".
+    active = read_json(ACTIVE_FILE, {}) or {}
+    same = active.get("dir") and os.path.abspath(active["dir"]) in (cur_dir, os.path.abspath(current.dir))
+    fresh = active_payload(current, nxt, "session", block)
+    try:
+        if not same:
+            # A session that was NOT started by clx (plain `claude`, or a /login switch)
+            # is sending prompts on another account: make the record follow the live
+            # session so the statusline and the widget's CLI tag show where the CLI
+            # really is. Last prompt wins when several sessions are open.
+            fresh["dir"] = cur_dir
+            write_json_atomic(ACTIVE_FILE, fresh)
+        elif any(fresh[k] != active.get(k) for k in
+                 ("next", "windows", "model", "windows_applied", "model_block", "paused")):
+            for key in ("next", "windows", "five_hour", "seven_day", "model",
+                        "windows_applied", "model_block", "paused"):
+                active[key] = fresh[key]
+            active.setdefault("launcher", "clx")
+            write_json_atomic(ACTIVE_FILE, active)
+    except Exception:
+        pass
+
+    if event == "prompt" and dead:
+        sys.stdout.write(
+            "[clx] %s. Tell the user: not /login here (it signs in as whoever the browser "
+            "holds) - %s\n"
+            % (login_hint(current),
+               "type /exit and run: clx -c  (resumes this conversation on %s)" % nxt.name
+               if nxt is not None else "run that command in a terminal first"))
+    elif event == "prompt" and spent and nxt is not None:
+        sys.stdout.write(
+            "[clx] %s is at %s%% of its %s limit. Hand off now: tell the user to type /exit "
+            "and then run: clx -c  (resumes this conversation on %s, %s).\n"
+            % (current.name, fmt_pct(spent[2]), spent[1], nxt.name, window_tag(nxt))
+        )
+    elif event == "prompt" and block and (active.get("model_block") or {}).get("model") != block["model"]:
+        # No account can be handed to, but the only thing in the way is a cap that
+        # follows the model. Moving accounts cannot fix that; changing model can.
+        sys.stdout.write(model_block_message(block))
+    return 0
+
+
+def session_account(session_dir, meta, accounts):
+    """Which account this session is on: clx-session.json first, then the link."""
+    wanted = os.path.abspath(meta.get("account_dir") or "") if meta.get("account_dir") else None
+    if wanted:
+        found = next((a for a in accounts if os.path.abspath(a.dir) == wanted), None)
+        if found is not None:
+            return found
+    try:
+        guess = os.path.dirname(os.path.realpath(os.path.join(session_dir, ".credentials.json")))
+    except OSError:
+        guess = ""
+    if guess:
+        found = next((a for a in accounts if os.path.abspath(a.dir) == os.path.abspath(guess)), None)
+        if found is not None:
+            return found
+    # Last resort: the session's own config copy still names an account.
+    email = email_of(session_dir).lower()
+    return next((a for a in accounts if email and a.email.lower() == email), None)
+
+
+def sync_active_for_session(session_dir, current, nxt, block=None):
+    """Keep active-account.json following this session ("last prompt wins").
+
+    A hand-off badge younger than HANDOFF_MIN_GAP survives the update: the
+    statusline shows it for that long and a routine Stop event must not erase it.
+    """
+    try:
+        active = read_json(ACTIVE_FILE, {}) or {}
+        record = active_payload(current, nxt, "session", block)
+        record["session_dir"] = session_dir
+        previous = active.get("handoff")
+        if (active.get("session_dir") == session_dir and isinstance(previous, dict)
+                and time.time() - (previous.get("at") or 0) < HANDOFF_MIN_GAP):
+            record["handoff"] = previous
+            record["reason"] = "handoff"
+        keys = ("id", "dir", "session_dir", "five_hour", "seven_day", "next", "handoff",
+                "model", "windows_applied", "model_block", "paused")
+        if any(active.get(key) != record.get(key) for key in keys):
+            write_json_atomic(ACTIVE_FILE, record)
+    except Exception:
+        pass
+
+
+def record_move(session_dir, meta, frm, to, five_from, five_to, event, accounts, threshold,
+                trigger=None, from_tag=None, to_tag=None):
+    """clx-session.json + active-account.json for a session that changed account.
+
+    Metadata first, then the record, then the caller logs: the log is the audit
+    trail and must never be the only trace of a move.
+    """
+    now = int(time.time())
+    entry = {
+        "at": now,
+        "from": frm,
+        "to": to.name,
+        "five_hour_from": five_from,
+        "five_hour_to": five_to,
+        "event": event,
+    }
+    if trigger:
+        entry["trigger"] = dict(trigger)
+    if from_tag:
+        entry["from_tag"] = from_tag
+    if to_tag:
+        entry["to_tag"] = to_tag
+
+    meta = dict(meta)
+    meta["account_id"] = to.id
+    meta["account_dir"] = to.dir
+    meta["account_name"] = to.name
+    meta["handoffs"] = list(meta.get("handoffs") or []) + [entry]
+    meta["last_handoff_at"] = now
+    meta.pop("foreign_login_email", None)
+    write_session_meta(session_dir, meta)
+
+    try:
+        record = active_payload(to, best_candidate(accounts, {to.id}, threshold), "handoff")
+        record["session_dir"] = session_dir
+        record["handoff"] = {"from": frm, "to": to.name, "at": now}
+        record["trigger"] = dict(trigger) if trigger else None
+        write_json_atomic(ACTIVE_FILE, record)
+    except Exception:
+        pass
+    return meta
+
+
+def perform_handoff(session_dir, meta, current, nxt, accounts, threshold, event, spent):
+    """Move a RUNNING session to another account. Returns the new meta.
+
+    `spent` is the window that triggered it - (key, label, value) - and it is
+    named everywhere the move is reported, because "Bob is full" is useless
+    when the reader cannot tell which limit filled up. A park is reported the
+    same way, as the synthetic window ("paused", "parked", None).
+
+    Order matters: the symlink first (that is the part Claude Code reads on the
+    very next request), then the cosmetic identity, then the records.
+    """
+    trigger = {"window": spent[0], "label": spent[1], "value": spent[2]}
+    if spent[0] in (PAUSE_WINDOW, AUTH_WINDOW):
+        # A park or a dead login is a state, not a usage window: name it, never
+        # a percentage.
+        from_tag = "%s (%s)" % (current.name, spent[1])
+    else:
+        from_tag = "%s (%s%s)" % (current.name, window_tag(current, spent[0]),
+                                  ", on %s" % current.model if current.model else "")
+    to_tag = "%s (%s)" % (nxt.name, window_tag(nxt))
+
+    point_credentials(session_dir, nxt.dir)
+    mirror_identity(session_dir, nxt.dir)
+    meta = record_move(session_dir, meta, current.name, nxt,
+                       current.five_hour, nxt.five_hour, event, accounts, threshold,
+                       trigger=trigger, from_tag=from_tag, to_tag=to_tag)
+    log_handoff("%s  %s  %s -> %s  %s" % (
+        iso_now(),
+        meta.get("pid") or os.path.basename(session_dir),
+        from_tag, to_tag, event,
+    ))
+    # Last, and only once the move is on disk. A hand-off made by the WATCHER
+    # means no hook event fired, i.e. the session may be blocked on background
+    # agents or sitting in a rate-limit countdown - and a countdown does not
+    # notice the new account until the user presses Esc and asks again.
+    by_watcher = event == WATCH_EVENT
+    if spent[0] == AUTH_WINDOW:
+        # The terminal is showing "Login expired · Please run /login", and that
+        # /login is exactly the wrong move: it signs in as whoever the browser
+        # holds (2026-10-02: it landed on Bob). Say what to do instead.
+        notify("Claude Code moved %s → %s (%s)" % (current.name, nxt.name, spent[1]),
+               "If the terminal says 'Login expired': press Esc, then type continue - "
+               "do NOT /login there. To bring %s back: %s"
+               % (current.name, login_command(current)),
+               "critical")
+        return meta
+    detail = PAUSE_LABEL if spent[0] == PAUSE_WINDOW else window_tag(current, spent[0])
+    notify("Claude Code moved %s → %s (%s)" % (current.name, nxt.name, detail),
+           NOTIFY_CONTINUE if by_watcher else "",
+           "critical" if by_watcher else "normal")
+    return meta
+
+
+def apply_heal(session_dir, meta, current, accounts, conf, event):
+    """Heal the credentials link and absorb a /login. -> (meta, current, adopted).
+
+    The hook and the heal watcher both come through here, so a repair is
+    identical whichever noticed it first; `event` only labels the log line. Both
+    callers hold the session lock and pass a `meta` read inside it.
+
+    Every branch writes its metadata BEFORE it logs: the log is the audit trail,
+    and a line claiming a move that no record backs up is worse than no line.
+    """
+    tag = meta.get("pid") or os.path.basename(session_dir)
+    note, adopted, foreign = heal_session(session_dir, current, accounts)
+    if foreign:
+        # Log it once, not on every event: nothing changes until the user acts.
+        if meta.get("foreign_login_email") != foreign:
+            meta = dict(meta)
+            meta["foreign_login_email"] = foreign
+            write_session_meta(session_dir, meta)
+            log_handoff("%s  %s  %s  %s" % (iso_now(), tag, note, event))
+        return meta, current, None
+    if adopted is not None:
+        try:
+            threshold = float(meta.get("threshold"))
+        except (TypeError, ValueError):
+            threshold = conf["threshold"]
+        meta = record_move(session_dir, meta, current.name, adopted,
+                           current.five_hour, adopted.five_hour, "login", accounts, threshold,
+                           from_tag="%s (%s)" % (current.name, window_tag(current)),
+                           to_tag="%s (%s)" % (adopted.name, window_tag(adopted)))
+        log_handoff("%s  %s  %s  %s" % (iso_now(), tag, note, event))
+        return meta, adopted, adopted
+    if meta.get("foreign_login_email"):
+        meta = dict(meta)
+        meta.pop("foreign_login_email", None)
+        write_session_meta(session_dir, meta)
+    if note:
+        log_handoff("%s  %s  %s  %s" % (iso_now(), tag, note, event))
+    return meta, current, None
+
+
+def handoff_in_session(session_dir, meta, accounts, conf, event, payload=None):
+    """The in-process hand-off: heal, decide, do, tell the model.
+
+    Everything from the metadata re-read to the last write happens under the
+    session lock, so a watcher tick can never interleave a stale
+    clx-session.json into the middle of a hand-off and undo it.
+
+    The hook calls this on UserPromptSubmit / Stop / PostToolUse; the watcher
+    calls it on a timer with WATCH_EVENT, so a session that fires no hook events
+    at all is still moved. The decision is the same one either way - `event` only
+    decides who may print, and what the desktop notice says.
+    """
+    with SessionLock(session_dir) as lock:
+        if not lock.held:
+            return 0  # the watcher holds it for a few ms; the next event retries
+        meta = read_session_meta(session_dir)  # never act on a meta read before the lock
+        if not meta:
+            return 0
+        meta = remember_transcript(session_dir, meta, payload)
+        current = session_account(session_dir, meta, accounts)
+        if current is None:
+            return 0
+        usage_from_cache(accounts, current)
+        try:
+            threshold = float(meta.get("threshold"))
+        except (TypeError, ValueError):
+            threshold = conf["threshold"]
+
+        # --- heal (shared with the watcher) ----------------------------------
+        meta, current, adopted = apply_heal(session_dir, meta, current, accounts, conf, event)
+        # A heal may just have copied fresh tokens into an account dir - an
+        # in-session /login reviving a dead account. Judge the login on THAT file,
+        # or the session would be moved straight off the login it just repaired.
+        reload_creds(accounts)
+
+        # --- decide: ANY window that binds THIS model moves this session -----
+        # A PARKED account moves it whatever the usage says: the account is lent
+        # out, so the only right place for this session is somewhere else. A
+        # DEAD login moves it too: every request on it fails ("Login expired").
+        dead = auth_problem(current)
+        parked = current.paused is not None
+        if dead:
+            spent = (AUTH_WINDOW, dead, None)
+        elif parked:
+            spent = (PAUSE_WINDOW, PAUSE_LABEL, None)
+        else:
+            spent = over_threshold(current, threshold) if known(current) else None
+        nxt = best_candidate(accounts, {current.id}, threshold)
+        if spent and nxt is None:
+            # "Nowhere to go" built on numbers nobody refreshed is a guess, and
+            # the accounts it is about are exactly the ones no session sits on.
+            # The hook stays no-network: it asks, and the next event decides on
+            # the answer. The watcher has already re-measured before getting here.
+            if event != WATCH_EVENT:
+                request_candidate_refresh(accounts, current)
+            # Measuring has now been tried by whoever could try it. Fall back to
+            # what WAS measured: an account last seen under the threshold still
+            # beats one that is spent this second. An account last seen at or
+            # over it is never offered - age does not turn a full account empty.
+            nxt = best_candidate(accounts, {current.id}, threshold, allow_stale=True)
+        # Nowhere to go, and the only thing in the way follows the model? Then no
+        # account change can help and clx must say so instead of moving. A park is
+        # not a model problem, so it never asks for a model switch.
+        block = model_block(accounts, {current.id}, threshold, current.model) \
+            if (spent and nxt is None and not parked and not dead) else None
+        last = meta.get("last_handoff_at") or 0
+
+        # --- do --------------------------------------------------------------
+        # The loop guard is for usage moves. A dead login cannot ping-pong (it is
+        # never a target), and waiting out the gap on it is ten minutes of
+        # "Login expired" - so leaving one is never deferred.
+        if spent and nxt is not None and (dead or time.time() - last >= HANDOFF_MIN_GAP):
+            meta = perform_handoff(session_dir, meta, current, nxt, accounts, threshold, event, spent)
+        elif adopted is None and event != WATCH_EVENT:
+            # Not on a watcher tick: active-account.json is "last prompt wins", and
+            # an idle session's timer claiming it every 30 s would take the record
+            # - and a fresh hand-off badge - away from the session actually typing.
+            # A hand-off the watcher DOES make still writes it, through record_move.
+            sync_active_for_session(session_dir, current, nxt, block)
+
+        # --- tell the model, exactly once per move ---------------------------
+        # The guard counts moves rather than comparing announced_at to
+        # last_handoff_at: both are whole seconds, and an announcement lands in
+        # the same second as the move it describes, so a timestamp comparison
+        # cannot tell "already announced" from "moved again just now".
+        handoffs = meta.get("handoffs") or []
+        if event == "prompt" and len(handoffs) > (meta.get("announced_handoffs") or 0):
+            recent = handoffs[-1]
+            frm = recent.get("from_tag") or "%s (%s%%)" % (recent.get("from"),
+                                                           fmt_pct(recent.get("five_hour_from")))
+            to = recent.get("to_tag") or "%s (%s%%)" % (recent.get("to"),
+                                                        fmt_pct(recent.get("five_hour_to")))
+            sys.stdout.write(
+                "[clx] this session moved from %s to %s; nothing to do, continue normally.\n"
+                % (frm, to))
+            try:
+                meta = dict(meta)
+                meta["announced_handoffs"] = len(handoffs)
+                meta["announced_at"] = int(time.time())
+                write_session_meta(session_dir, meta)
+            except Exception:
+                pass
+
+        # --- or: parked/dead with nowhere to go: say it once and stay put ----
+        # A parked account still beats no account, so this is a notice, not a move.
+        if (parked or dead) and nxt is None:
+            if event == "prompt" and not meta.get("parked_notice"):
+                if dead:
+                    sys.stdout.write(
+                        "[clx] %s, and no other account can take this session. Tell the user "
+                        "to run that command in a terminal - not /login here, which signs in as "
+                        "whoever the browser holds.\n" % login_hint(current))
+                else:
+                    sys.stdout.write(
+                        "[clx] %s is parked, but every other account is spent or parked too - "
+                        "staying here for now.\n" % current.name)
+                meta = dict(meta)
+                meta["parked_notice"] = True
+                write_session_meta(session_dir, meta)
+        elif meta.get("parked_notice"):
+            meta = dict(meta)
+            meta.pop("parked_notice", None)
+            write_session_meta(session_dir, meta)
+
+        # --- or: no account move can help, only a different model -------------
+        if block:
+            if event == "prompt" and meta.get("model_notice") != block["model"]:
+                sys.stdout.write(model_block_message(block))
+                meta = dict(meta)
+                meta["model_notice"] = block["model"]
+                write_session_meta(session_dir, meta)
+        elif meta.get("model_notice"):
+            meta = dict(meta)
+            meta.pop("model_notice", None)
+            write_session_meta(session_dir, meta)
+
+        # --- and tell the desktop when there is nowhere left to go ------------
+        # Keyed on the state, not the tick: a watcher checking every 30 s must
+        # never become a notification every 30 s.
+        stuck = stuck_notice(current, spent, nxt, block, accounts)
+        if stuck and meta.get("full_notice") != stuck[0]:
+            notify(stuck[1], stuck[2], "critical")
+            log_handoff("%s  %s  stuck: %s%s  %s"
+                        % (iso_now(), meta.get("pid") or os.path.basename(session_dir),
+                           stuck[1], " — " + stuck[2] if stuck[2] else "", event))
+            meta = dict(meta)
+            meta["full_notice"] = stuck[0]
+            # Dated, so --status can say how long this session has been stuck and
+            # so the state survives being read hours later. The notice itself is
+            # one transient popup; this is the record of it.
+            meta["full_notice_at"] = int(time.time())
+            meta["full_notice_why"] = stuck[2]
+            write_session_meta(session_dir, meta)
+        elif not stuck and meta.get("full_notice"):
+            meta = dict(meta)
+            meta.pop("full_notice", None)
+            meta.pop("full_notice_at", None)
+            meta.pop("full_notice_why", None)
+            write_session_meta(session_dir, meta)
+
+        # --- what --status reads as "next check in Ns" ------------------------
+        if event == WATCH_EVENT:
+            meta = dict(meta)
+            meta["last_decide_at"] = int(time.time())
+            # The daemon's own interval, not the reader's: --status runs in a
+            # different process with a different CC_WATCH_DECIDE, and a countdown
+            # computed from the wrong one is just a wrong number on the screen.
+            meta["decide_every"] = WATCH_DECIDE
+            write_session_meta(session_dir, meta)
+    return 0
+
+
+def cmd_refresh_one(account_ids):
+    """The detached refresh the hook forks: one or more accounts. Never forces.
+
+    It used to force, which was harmless while only the CURRENT account was ever
+    spawned for. Now that a stuck session asks for every candidate as well, a
+    forced call would ignore both the TTL and the 429 backoff and turn one hook
+    event into four /usage calls.
+    """
+    wanted = {a for a in ([account_ids] if isinstance(account_ids, str) else account_ids) if a}
+    for acct in discover():
+        if acct.id in wanted:
+            refresh([acct], force=False, only=acct.id, ttl=NEAR_TTL)
+    return 0
+
+
+# ----------------------------------------------------------------------- main
+
+
+def claude_binary():
+    override = os.environ.get("CC_CLAUDE_BIN")
+    if override:
+        return override
+    found = shutil.which("claude")
+    # python never sees the `claude` shell function, so this cannot loop through
+    # the alias - but it CAN loop if someone puts clx on PATH under the name
+    # `claude`, so refuse to exec ourselves.
+    if found and os.path.realpath(found) == os.path.realpath(os.path.abspath(__file__)):
+        found = None
+        for entry in (os.environ.get("PATH") or "").split(os.pathsep):
+            cand = os.path.join(entry, "claude")
+            if os.access(cand, os.X_OK) and os.path.isfile(cand) \
+                    and os.path.realpath(cand) != os.path.realpath(os.path.abspath(__file__)):
+                found = cand
+                break
+    if not found:
+        warn("clx: `claude` is not on PATH")
+        sys.exit(127)
+    return found
+
+
+# ------------------------------------------------------------- argv analysis
+# Tables taken from `claude --help` (Claude Code 2.1.259) so that an option's
+# VALUE is never mistaken for the prompt or for a subcommand.
+
+CLAUDE_SUBCOMMANDS = {
+    "agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import",
+    "install", "kill", "logs", "mcp", "plugin", "plugins", "project",
+    "respawn", "rm", "setup-token", "stop", "ultrareview", "update", "upgrade",
+}
+
+# Flags that mean "this is not a foreground REPL on this terminal".
+NON_REPL_FLAGS = {
+    "-p", "--print", "-v", "--version", "-h", "--help", "--bare",
+    "--bg", "--background", "--cloud", "--teleport",
+}
+
+# Options taking exactly one value.
+VALUE_FLAGS = {
+    "--agent", "--agents", "--append-system-prompt", "--append-system-prompt-file",
+    "--autocompact", "--debug-file", "--effort", "--environment", "--fallback-model",
+    "--input-format", "--json-schema", "--max-budget-usd", "--model", "-n", "--name",
+    "--output-format", "--permission-mode", "--permission-prompts", "--plugin-dir",
+    "--plugin-url", "--remote-control-session-name-prefix", "--session-id",
+    "--setting-sources", "--settings", "--system-prompt", "--system-prompt-file",
+    "--system-prompt-snapshot",
+}
+
+# Options taking one OPTIONAL value (consume the next token only if it is not a flag).
+OPTIONAL_VALUE_FLAGS = {
+    "-r", "--resume", "-d", "--debug", "--cloud", "--from-pr",
+    "--prompt-suggestions", "--remote-control", "--teleport", "-w", "--worktree",
+}
+
+# Options taking one or more values.
+VARIADIC_FLAGS = {
+    "--add-dir", "--allowedTools", "--allowed-tools", "--betas",
+    "--disallowedTools", "--disallowed-tools", "--file", "--mcp-config", "--tools",
+}
+
+# clx's own flags: these keep working inside a session, they are never claude's.
+# `--resume` is deliberately NOT here: it is claude's own flag inside a session
+# (`clx --resume <session>`), and `--unpause` names the same clx action anywhere.
+CLX_OWN_FLAGS = {
+    "--status", "--sync", "--init", "--use", "--threshold",
+    "--handoff-check", "--refresh-one", "--heal-watch",
+    "--pause", "--unpause", "--days", "--until", "--reason",
+}
+
+
+def scan_argv(argv):
+    """-> (positional indexes, {index: 'flag'|'value'}).
+
+    One parser, two users: deciding whether this invocation is a REPL, and
+    rebuilding the argv for a resumed launch.
+    """
+    positional = []
+    kinds = {}
+    i = 0
+    literal = False
+    while i < len(argv):
+        arg = argv[i]
+        if literal:
+            positional.append(i)
+            kinds[i] = "value"
+            i += 1
+            continue
+        if arg == "--":
+            kinds[i] = "flag"
+            literal = True
+            i += 1
+            continue
+        if arg.startswith("-") and arg != "-":
+            name = arg.split("=", 1)[0]
+            kinds[i] = "flag"
+            i += 1
+            if "=" in arg:
+                continue
+            if name in VARIADIC_FLAGS:
+                while i < len(argv) and not argv[i].startswith("-"):
+                    kinds[i] = "value"
+                    i += 1
+            elif name in VALUE_FLAGS:
+                if i < len(argv):
+                    kinds[i] = "value"
+                    i += 1
+            elif name in OPTIONAL_VALUE_FLAGS:
+                if i < len(argv) and not argv[i].startswith("-"):
+                    kinds[i] = "value"
+                    i += 1
+            continue
+        positional.append(i)
+        kinds[i] = "value"
+        i += 1
+    return positional, kinds
+
+
+def wants_session(passthrough):
+    """True only for an interactive REPL launch on this terminal.
+
+    Everything else - subcommands, -p, --version, a pipe instead of a tty - keeps
+    the plain exec into the account dir: there is no session to hand over.
+    """
+    if os.environ.get(INSIDE_ENV) or os.environ.get(NO_SESSION_ENV):
+        return False
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+    except Exception:
+        return False
+    positional, kinds = scan_argv(passthrough)
+    for i, arg in enumerate(passthrough):
+        if kinds.get(i) != "flag":
+            continue
+        if arg.split("=", 1)[0] in NON_REPL_FLAGS:
+            return False
+    # A subcommand is the first positional; a prompt positional is fine.
+    if positional and passthrough[positional[0]] in CLAUDE_SUBCOMMANDS:
+        return False
+    return True
+
+
+def main(argv):
+    # Recursion guard for the `claude` shell function. The function calls clx and
+    # clx resolves the real binary with shutil.which (which never sees shell
+    # functions), so a loop needs something else - clx on PATH under the name
+    # `claude`, or a nested session inheriting our env. Either way: hand the argv
+    # straight to the real binary, on the account this session is already using.
+    # clx's own flags still work inside a session, so `clx --status` in the Bash
+    # tool keeps answering.
+    if os.environ.get(INSIDE_ENV) and not any(a in CLX_OWN_FLAGS or a.split("=", 1)[0] in CLX_OWN_FLAGS
+                                              for a in argv):
+        binary = claude_binary()
+        os.execve(binary, [binary] + argv, dict(os.environ))
+
+    do_status = do_sync = do_init = False
+    forced_name = None
+    threshold_override = None
+    # --pause / --resume (alias --unpause). pause_at is where the flag sat, so an
+    # unmatched `--resume <something>` can be handed back to claude untouched.
+    pause_verb = pause_flag = pause_name = None
+    pause_days = pause_until = pause_reason = None
+    pause_at = 0
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--handoff-check":
+            event = "prompt"
+            for j in range(i + 1, len(argv)):
+                if argv[j] == "--event" and j + 1 < len(argv):
+                    event = argv[j + 1]
+                elif argv[j].startswith("--event="):
+                    event = argv[j].split("=", 1)[1]
+            return cmd_handoff_check(event if event in HOOK_EVENTS else "prompt")
+        if arg == "--heal-watch":
+            return cmd_heal_watch(argv[i + 1] if i + 1 < len(argv) else "")
+        if arg == "--refresh-one":
+            return cmd_refresh_one(argv[i + 1:])
+        if arg == "--status":
+            do_status = True
+        elif arg == "--sync":
+            do_sync = True
+        elif arg == "--init":
+            do_init = True
+        elif arg == "--use":
+            forced_name = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif arg.startswith("--use="):
+            forced_name = arg.split("=", 1)[1]
+        elif arg == "--threshold":
+            threshold_override = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif arg.startswith("--threshold="):
+            threshold_override = arg.split("=", 1)[1]
+        elif arg in ("--pause", "--resume", "--unpause"):
+            pause_flag, pause_at = arg, i
+            pause_verb = "pause" if arg == "--pause" else "resume"
+            # A value is only taken when it looks like a name: bare `--resume`
+            # stays claude's session picker.
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                pause_name = argv[i + 1]
+                i += 1
+            else:
+                pause_name = ""
+        elif arg.startswith("--pause=") or arg.startswith("--resume=") \
+                or arg.startswith("--unpause="):
+            pause_flag, pause_at = arg.split("=", 1)[0], i
+            pause_verb = "pause" if pause_flag == "--pause" else "resume"
+            pause_name = arg.split("=", 1)[1]
+        elif arg == "--days":
+            pause_days = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif arg.startswith("--days="):
+            pause_days = arg.split("=", 1)[1]
+        elif arg == "--until":
+            pause_until = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif arg.startswith("--until="):
+            pause_until = arg.split("=", 1)[1]
+        elif arg == "--reason":
+            pause_reason = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        elif arg.startswith("--reason="):
+            pause_reason = arg.split("=", 1)[1]
+        elif arg == "--":
+            i += 1
+            break
+        else:
+            break  # first non-clx flag: everything from here is claude's
+        i += 1
+    passthrough = argv[i:]
+
+    conf = load_conf()
+    if threshold_override is not None:
+        try:
+            conf["threshold"] = float(threshold_override)
+        except ValueError:
+            warn("clx: --threshold needs a number, got %r" % threshold_override)
+            return 2
+
+    if pause_verb is None and (pause_days or pause_until or pause_reason):
+        warn("clx: --days/--until/--reason only mean something with --pause")
+        return 2
+
+    if do_init:
+        return cmd_init()
+
+    accounts = discover()
+    if not accounts:
+        warn("clx: no logged-in account dirs found - run: cm-login <name>")
+        return 1
+    accounts, dup_notes = dedupe(accounts, conf["primary"].strip().lower())
+    for note in dup_notes:
+        warn(note)
+
+    # --pause / --resume: cc.json only. No network, no account-dir writes, and
+    # nothing anywhere near a credential file.
+    if pause_verb is not None:
+        target = match_account(accounts, pause_name) if pause_name else None
+        if target is None and pause_flag == "--resume":
+            # Not an account name: this is claude's own --resume. Hand it back.
+            passthrough = argv[pause_at:]
+            pause_verb = None
+        elif target is None:
+            warn("clx: unknown account %r (have: %s)"
+                 % (pause_name, ", ".join(a.name for a in accounts)))
+            return 2
+        elif pause_verb == "pause":
+            return cmd_pause(target, pause_days, pause_until, pause_reason)
+        else:
+            return cmd_resume(target)
+
+    auto_init(accounts)
+    calls = refresh(accounts, force=do_sync)
+    apply_model(accounts, session_model())  # no transcript out here: env / settings pin
+    apply_pauses(accounts, conf)
+
+    forced = None
+    if forced_name is not None:
+        forced = match_account(accounts, forced_name)
+        if forced is None:
+            warn("clx: unknown account %r (have: %s)" % (forced_name, ", ".join(a.name for a in accounts)))
+            return 2
+        if forced.paused:
+            # --use is explicit, but a parked account is lent out: refuse loudly
+            # rather than launch on it behind the owner's back.
+            left = pause_left(forced.paused)
+            warn("clx: %s is parked%s - run: clx --resume %s  to use it again"
+                 % (forced.name, "" if left is None else " for another " + fmt_span(left),
+                    forced.id))
+            return 2
+        if auth_problem(forced):
+            # Launching would open straight onto "Login expired"; and a /login
+            # typed in there signs in as whoever the browser holds, not this one.
+            warn("clx: %s" % login_hint(forced))
+            return 2
+
+    if do_status or (do_sync and not passthrough):
+        return cmd_status(conf, accounts, calls)
+
+    chosen, nxt, reason, notes = select(accounts, conf, forced=forced)
+    binary = claude_binary()  # fail before anything is created
+
+    # Interactive REPL: run it inside ~/.clx-sessions/<pid>, whose
+    # .credentials.json is a symlink into the chosen account. The hooks hand the
+    # session to another account by re-pointing that symlink - the process, its
+    # subagents and its background tasks never stop.
+    session_dir = None
+    if wants_session(passthrough):
+        gc_sessions(keep=os.getpid())
+        try:
+            session_dir = create_session(chosen, conf["threshold"])
+        except Exception as exc:
+            warn("clx: could not create a session dir (%s) - hand-off disabled for this run" % exc)
+            session_dir = None
+
+    record = active_payload(chosen, nxt, reason)
+    if session_dir:
+        record["session_dir"] = session_dir
+    try:
+        write_json_atomic(ACTIVE_FILE, record)
+    except Exception as exc:
+        warn("clx: could not write %s (%s)" % (ACTIVE_FILE, exc))
+
+    if reason == "forced":
+        head = "clx → %s (%s) · forced" % (chosen.name, launch_tag(chosen))
+    elif "≥ %g" % conf["threshold"] in reason:
+        head = "clx → %s (%s)" % (chosen.name, reason)
+    else:
+        head = "clx → %s (%s)" % (chosen.name, launch_tag(chosen))
+        if nxt is not None:
+            head += " · next: %s (%s)" % (nxt.name, launch_tag(nxt, bare=True))
+    if notes:
+        head += " · " + "; ".join(n.replace("clx: ", "") for n in notes)
+    warn(head)
+
+    env = dict(os.environ)
+    env[INSIDE_ENV] = "1"  # a nested `claude` goes straight to the real binary
+    if session_dir:
+        env["CLAUDE_CONFIG_DIR"] = session_dir
+    elif chosen.is_default:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = chosen.dir
+    os.execve(binary, [binary] + passthrough, env)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]) or 0)
+    except KeyboardInterrupt:
+        sys.exit(130)
