@@ -75,6 +75,9 @@ jobs:
           python3 -I clx/test/test-move.py
           python3 -I clx/test/test-launch.py
           python3 -I clx/test/test-security.py
+          python3 -I clx/test/test-failed-turn.py
+          python3 -I clx/test/test-dead-default.py
+          python3 -I clx/test/test-openclaw.py
           bash clx/test/test-install.sh
 
   # A pull request proves the build. Only main publishes one.
