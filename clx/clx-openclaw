@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """clx-openclaw - run an OpenClaw gateway's Claude CLI turns through clx.
 
-    clx-openclaw setup  [--dry-run] [--unit NAME] [--with-skill] [--no-link]
+    clx-openclaw setup  [--dry-run] [--unit NAME] [--with-skill] [--link DIR]
                         [--claude PATH] [--state-dir DIR]
     clx-openclaw status [--unit NAME]
     clx-openclaw doctor [--unit NAME]
@@ -10,14 +10,20 @@
 How the gateway reaches clx (verified on OpenClaw 2026.11.3 only): the bundled
 Claude CLI backend launches the command `claude`, resolved through the gateway's
 PATH. setup writes a small shim and makes it the FIRST `claude` on that PATH:
-  * a link named `claude` in a directory of yours that the gateway's PATH lists
-    before every other `claude` (it then also routes your shells and cron jobs
-    that share that directory through clx), or, when there is no such directory
-    or --no-link says so,
-  * a systemd user drop-in for the gateway unit with a literal
-    Environment=PATH=<shim dir>:<the unit's PATH>.
+  * by default, a systemd user drop-in for the gateway unit with a literal
+    Environment=PATH=<shim dir>:<the unit's PATH>, repeated in an environment
+    file of its own so that it also wins over a PATH from the unit's own file;
+  * with --link DIR, a link named `claude` in DIR instead. DIR must be a
+    directory of yours that the gateway's PATH lists before every other
+    `claude`; shells and cron jobs that share it then run clx too.
 The drop-in also sets CLAUDE_CODE_EXECUTABLE to the shim, for launches through
 the Agent SDK or an ACP adapter, which read that variable instead of PATH.
+
+A `claude` somebody wrote by hand that hands over to a clx counts as going
+through clx: status and doctor say so, and setup takes the real CLI from
+behind it (its CC_CLAUDE_BIN, else the next `claude` on the PATH). setup
+never makes a shim whose CLI is a clx or a clx shim: that would be clx inside
+clx.
 
 The shim execs clx with CLX_DROP_INJECTED_TOKEN=1 (clx chooses the login, not a
 token the gateway forwards) and CLX_NO_NOTIFY=1 (no desktop). When the caller
@@ -124,6 +130,120 @@ def is_clx(path):
         return os.path.realpath(path) == os.path.realpath(CLX)
     except OSError:
         return False
+
+
+# Every clx, whatever its copy or lineage, opens with this docstring line.
+CLX_HEAD = b'"""clx - auto-switching Claude Code launcher'
+
+
+def is_clx_file(path):
+    """Is this file a clx - the one setup uses, or any other copy of it?"""
+    if is_clx(path):
+        return True
+    try:
+        with open(path, "rb") as fh:
+            return CLX_HEAD in fh.read(1024)
+    except OSError:
+        return False
+
+
+def clx_features(path):
+    """(gives stream-json launches a session, reads failed turns) - what OpenClaw needs."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return (False, False)
+    return ("def long_lived_stdio(" in text, "def watch_failed_turns_once(" in text)
+
+
+def script_text(path, limit=16384):
+    """The start of a small script (it opens with #!), or None for anything else."""
+    try:
+        with open(path, "rb") as fh:
+            blob = fh.read(limit)
+    except OSError:
+        return None
+    if not blob.startswith(b"#!") or b"\0" in blob:
+        return None
+    return blob.decode("utf-8", "replace")
+
+
+ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+WITH_DEFAULT = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?-(.*)\}$")
+VARIABLE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+
+
+def first_word(text):
+    try:
+        words = shlex.split(text, comments=True)
+    except ValueError:
+        return None
+    return with_home(words[0]) if words else None
+
+
+def with_home(word):
+    for spelling in ("${HOME}", "$HOME"):
+        if word.startswith(spelling):
+            return HOME + word[len(spelling):]  # the gateway runs as this user: same home
+    return word
+
+
+def foreign_shim(path):
+    """A `claude` that is a script handing over to a clx, written by somebody else.
+
+    -> {"path", "clx": the clx it execs, "pinned": its CC_CLAUDE_BIN or None} or None.
+    Only plain assignments and `exec` lines are read; nothing in it is run.
+    """
+    if is_our_claude(path):
+        return None
+    text = script_text(os.path.realpath(path))
+    if text is None:
+        return None
+    values, target = {}, None
+    for line in text.splitlines():
+        found = ASSIGNMENT.match(line)
+        if found:
+            word = first_word(found.group(2))
+            if word is not None:
+                default = WITH_DEFAULT.match(word)
+                values[found.group(1)] = with_home(default.group(2)) if default else word
+            continue
+        found = re.match(r"^\s*exec\s+(.*)$", line)
+        if not found:
+            continue
+        word = first_word(found.group(1))
+        named = VARIABLE.match(word or "")
+        if named:
+            word = values.get(named.group(1))
+        if word and os.path.isabs(word) and is_clx_file(word):
+            target = word
+    if target is None:
+        return None
+    pinned = values.get("CC_CLAUDE_BIN")
+    return {"path": path, "clx": target,
+            "pinned": pinned if pinned and os.path.isabs(pinned) else None}
+
+
+def claude_kind(path):
+    """"ours", "foreign" (a hand-made clx shim), "clx" (clx under that name) or None."""
+    if is_our_claude(path):
+        return "ours"
+    if is_clx_file(path):
+        return "clx"
+    if foreign_shim(path) is not None:
+        return "foreign"
+    return None
+
+
+def is_clx_or_shim(path):
+    """Never the CLI a shim may run: it would be clx inside clx."""
+    return claude_kind(path) is not None
+
+
+def usable_cli(path):
+    return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK) \
+        and not is_clx_or_shim(path)
 
 
 def path_entries(value):
@@ -545,49 +665,82 @@ def gateway_path_for_setup(unit, info):
 
 
 def choose_real_cli(explicit, gateway_path):
-    """The Claude Code CLI the shim runs. -> (path, why)"""
+    """The Claude Code CLI the shim runs. -> (path, why, hand-made shims seen on the way)
+
+    Never a clx and never a clx shim, ours or a hand-made one. Behind a hand-made
+    shim the real CLI is its CC_CLAUDE_BIN, when that is there and is a real CLI,
+    else the next `claude` on the PATH.
+    """
     if explicit:
         path = os.path.abspath(explicit)
         if not (os.path.isfile(path) and os.access(path, os.X_OK)):
             raise Refused("--claude %s is not an executable file" % explicit)
-        if is_our_claude(path) or is_clx(path):
-            raise Refused("--claude %s is clx or its shim, not the Claude Code CLI" % explicit)
-        return path, "given with --claude"
-    for cand in claudes_on(gateway_path or ""):
-        if not is_our_claude(cand) and not is_clx(cand):
-            return cand, "the first `claude` on the gateway's PATH"
+        if is_clx_or_shim(path):
+            raise Refused("--claude %s is a clx or a clx shim, not the Claude Code CLI: the shim "
+                          "would run clx inside clx" % explicit)
+        return path, "given with --claude", []
+    seen = []
+
+    def scan(value, where):
+        for cand in claudes_on(value or ""):
+            kind = claude_kind(cand)
+            if kind == "foreign":
+                shim = foreign_shim(cand)
+                seen.append(shim)
+                if usable_cli(shim["pinned"]):
+                    return shim["pinned"], "the CC_CLAUDE_BIN of the hand-made clx shim %s" % cand
+                continue  # nothing usable behind it: the next `claude`
+            if kind is None:
+                return cand, "the first `claude` on %s that is not a clx shim" % where
+        return None
+
+    found = scan(gateway_path, "the gateway's PATH")
+    if found:
+        return found + (seen,)
     recorded, _ = shim_targets()
-    if recorded and os.path.isfile(recorded) and not is_our_claude(recorded):
-        return recorded, "the CLI the existing shim runs"
-    for cand in claudes_on(os.environ.get("PATH", "")):
-        if not is_our_claude(cand) and not is_clx(cand):
-            return cand, "the first `claude` on this shell's PATH (the gateway's was unknown)"
+    if usable_cli(recorded):
+        return recorded, "the CLI the existing shim runs", seen
+    found = scan(os.environ.get("PATH", ""), "this shell's PATH")
+    if found:
+        return found + (seen,)
+    if seen:
+        pinned = seen[0]["pinned"]
+        raise Refused("%s is a clx shim clx-openclaw did not write, and there is no Claude Code "
+                      "CLI behind it: its CC_CLAUDE_BIN %s, and every other `claude` on the PATH "
+                      "is a clx or a shim too. Pass the real CLI with --claude PATH"
+                      % (seen[0]["path"], "is not set" if not pinned
+                         else "%s is missing or is itself a clx" % pinned))
     raise Refused("no Claude Code CLI found - install it, or pass --claude PATH")
 
 
-def link_route(gateway_path):
-    """Where a `claude` link would win on the gateway's PATH.
-
-    -> ("present", dir) when our link or shim already comes first,
-       ("link", dir) for the first directory of yours before any other `claude`,
-       (None, first other claude or None) when there is no such directory.
-    Only directories under your home that you can write are used, never a
-    directory that already holds something named `claude`.
-    """
-    candidate = None
+def link_route(link_dir, gateway_path):
+    """Check --link DIR. -> ("link" | "present", dir), or Refused saying why not."""
+    if gateway_path is None:
+        raise Refused("--link needs the gateway's PATH, which could not be read: start the "
+                      "gateway once, then run setup again")
+    want = os.path.realpath(os.path.abspath(link_dir))
+    if want not in [os.path.realpath(e) for e in path_entries(gateway_path)]:
+        raise Refused("--link %s is not on the gateway's PATH" % link_dir)
     for entry in path_entries(gateway_path):
         cand = os.path.join(entry, "claude")
-        if os.path.lexists(cand):
-            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        if os.path.realpath(entry) == want:
+            if os.path.lexists(cand):
                 if is_our_claude(cand):
                     return "present", entry
-                return ("link", candidate) if candidate else (None, cand)
-            continue  # a dangling link or a directory: not ours to touch, not a CLI
-        if (candidate is None and os.path.isdir(entry) and under_home(entry)
-                and os.access(entry, os.W_OK | os.X_OK)
-                and os.path.realpath(entry) != os.path.realpath(SHIM_DIR)):
-            candidate = entry
-    return ("link", candidate) if candidate else (None, None)
+                raise Refused("--link %s: that directory already holds a `claude` that is not "
+                              "clx-openclaw's, and it is never replaced" % link_dir)
+            if not os.path.isdir(entry):
+                raise Refused("--link %s is not a directory" % link_dir)
+            if not under_home(entry):
+                raise Refused("--link %s is outside your home dir: clx-openclaw writes no "
+                              "system directory" % link_dir)
+            if not os.access(entry, os.W_OK | os.X_OK):
+                raise Refused("--link %s: you cannot write to that directory" % link_dir)
+            return "link", entry
+        if os.path.isfile(cand) and os.access(cand, os.X_OK) and not is_our_claude(cand):
+            raise Refused("--link %s comes after %s on the gateway's PATH: a link there would "
+                          "never be the `claude` the gateway runs" % (link_dir, cand))
+    raise Refused("--link %s is not on the gateway's PATH" % link_dir)  # not reached
 
 
 def cmd_setup(args):
@@ -600,12 +753,18 @@ def cmd_setup(args):
     if not os.path.isfile(CLX):
         raise Refused("clx is not at %s - run install.sh first (or set CLX_OPENCLAW_CLX)" % CLX)
     version = clx_version()
-    if version is not None and version < CLX_MIN:
+    if (version is not None and version < CLX_MIN) or not all(clx_features(CLX)):
         raise Refused("clx at %s is %s; OpenClaw support needs %s or newer - run install.sh"
-                      % (CLX, ".".join(map(str, version)), ".".join(map(str, CLX_MIN))))
+                      % (CLX, ".".join(map(str, version)) if version else "an older clx",
+                         ".".join(map(str, CLX_MIN))))
 
     gateway_path, path_from = gateway_path_for_setup(unit, info)
-    real, real_why = choose_real_cli(args.claude, gateway_path)
+    real, real_why, hand_made = choose_real_cli(args.claude, gateway_path)
+    # The hard rule, whatever chose it: the shim's CLI is never a clx or a clx
+    # shim, or every launch would run clx inside clx.
+    if is_clx_or_shim(real):
+        raise Refused("%s is a clx or a clx shim, not the Claude Code CLI - pass the real CLI "
+                      "with --claude PATH" % real)
     if not safe_path(real):
         raise Refused("the CLI path %r holds a control character" % real)
 
@@ -613,8 +772,8 @@ def cmd_setup(args):
     if os.path.lexists(SHIM) and not has_marker(SHIM):
         raise Refused("%s exists and is not clx-openclaw's - move it away first" % SHIM)
     route, where = (None, None)
-    if gateway_path is not None and not args.no_link:
-        route, where = link_route(gateway_path)
+    if args.link:
+        route, where = link_route(args.link, gateway_path)
     link = os.path.join(where, "claude") if route == "link" else None
     use_path = route is None
     dropin = dropin_path(unit) if systemd else None
@@ -649,23 +808,30 @@ def cmd_setup(args):
     say("  gateway PATH   %s" % ("read from " + path_from if gateway_path is not None
                                  else "unknown (%s)" % path_from))
     say("  Claude CLI     %s (%s)" % (real, real_why))
+    for shim in hand_made:
+        say("  found          %s: a clx shim clx-openclaw did not write. It is left as it is;"
+            % shim["path"])
+        say("                 the managed shim comes before it on the gateway's PATH.")
+    if "%sversions%s" % (os.sep, os.sep) in real:
+        say("  note           that CLI path names one Claude Code version: after an update, run")
+        say("                 setup again (with --claude PATH when there is a stable one).")
     if not args.dry_run:
         write_private(SHIM, shim_text(real, CLX), 0o755)
     say("  %-14s %s (the shim: clx %s, CLI %s)" % (verb, SHIM, CLX, real))
 
     if route == "present":
-        say("  route          %s already resolves `claude` to the shim first" % where)
+        say("  route          the `claude` link in %s already resolves to the shim (--link)" % where)
     elif route == "link":
         if not args.dry_run:
             os.symlink(SHIM, link)
         say("  %-14s %s -> %s" % ("would link" if args.dry_run else "linked", link, SHIM))
-        say("  route          %s comes before every other `claude` on the gateway's PATH." % where)
-        say("                 Shells and cron jobs with %s on their PATH now run `claude`" % where)
-        say("                 through clx too (`clx-openclaw setup --no-link` avoids that).")
+        say("  route          a link in %s (--link), which comes before every other `claude` on"
+            % where)
+        say("                 the gateway's PATH. Shells and cron jobs with %s on their PATH" % where)
+        say("                 now run `claude` through clx too.")
     elif systemd:
-        say("  route          no directory of yours comes before %s on the gateway's PATH,"
-            % (where or "the first `claude`"))
-        say("                 so the drop-in puts %s first on the unit's PATH" % SHIM_DIR)
+        say("  route          the drop-in puts %s first on the unit's PATH" % SHIM_DIR)
+        say("                 (--link DIR puts a `claude` link in a directory of yours instead)")
 
     if systemd:
         if not args.dry_run:
@@ -796,14 +962,40 @@ def gateway_view(unit):
     """What status and doctor both look at, gathered once."""
     pid, how, info = find_gateway(unit)
     view = {"unit": unit, "pid": pid, "how": how, "info": info, "values": None,
-            "present": set(), "claudes": [], "first_is_shim": False}
+            "present": set(), "claudes": [], "first_is_shim": False, "first_kind": None}
     if pid is not None:
         values, present = read_environ(pid)
         view["values"], view["present"] = values, present or set()
         if values is not None:
             view["claudes"] = claudes_on(values.get("PATH"))
-            view["first_is_shim"] = bool(view["claudes"]) and is_our_claude(view["claudes"][0])
+            if view["claudes"]:
+                view["first_kind"] = claude_kind(view["claudes"][0])
+            view["first_is_shim"] = view["first_kind"] == "ours"
     return view
+
+
+KIND_TAGS = {"ours": "   <- the clx shim", "foreign": "   <- a clx shim clx-openclaw did not write",
+             "clx": "   <- clx itself, under the name claude"}
+
+
+def hand_made_lines(path):
+    """What status and doctor say about a hand-made clx shim, and its real trouble if any."""
+    shim = foreign_shim(path) or {}
+    notes, trouble = [], []
+    pinned = shim.get("pinned")
+    if pinned and not usable_cli(pinned):
+        trouble.append("the hand-made shim %s runs the CLI %s, which %s: its turns fail"
+                       % (path, pinned, "is not there" if not os.path.exists(pinned)
+                          else "is a clx or a shim itself"))
+    elif pinned:
+        notes.append("it pins the CLI %s; a Claude Code update can leave that path behind"
+                     % pinned)
+    its_clx = shim.get("clx")
+    if its_clx and not all(clx_features(its_clx)):
+        trouble.append("the clx that %s runs (%s) gives stream-json launches no session or "
+                       "reads no failed turns. Run install.sh, then clx-openclaw setup"
+                       % (path, its_clx))
+    return shim, notes, trouble
 
 
 def describe_gateway(view):
@@ -865,13 +1057,24 @@ def cmd_status(args):
         if not view["claudes"]:
             say("            (no `claude` at all)")
         for index, path in enumerate(view["claudes"], 1):
-            say("            %d. %s%s" % (index, path, "   <- the clx shim" if is_our_claude(path)
-                                         else ""))
-        say("          %s" % ("ok: its Claude CLI turns go through clx" if view["first_is_shim"]
-                              else "NOT through clx: the first `claude` is not the shim"))
+            say("            %d. %s%s" % (index, path, KIND_TAGS.get(claude_kind(path), "")))
+        kind = view["first_kind"]
+        if kind == "ours":
+            say("          ok: its Claude CLI turns go through clx")
+        elif kind in ("foreign", "clx"):
+            shim, notes, trouble = hand_made_lines(view["claudes"][0])
+            say("          ok: its Claude CLI turns go through clx, by %s clx-openclaw did not "
+                "write" % ("a shim" if kind == "foreign" else "clx itself, which"))
+            say("          (`clx-openclaw setup` can replace it with a managed shim)")
+            for text in notes + trouble:
+                say("          " + text)
+        else:
+            say("          NOT through clx: the first `claude` is not a clx shim")
         exe = (view["values"] or {}).get("CLAUDE_CODE_EXECUTABLE")
+        exe_kind = claude_kind(exe) if exe else None
         say("sdk/acp   CLAUDE_CODE_EXECUTABLE %s"
-            % ("points at the shim" if exe and is_our_claude(exe)
+            % ("points at the shim" if exe_kind == "ours"
+               else "points at a clx shim clx-openclaw did not write" if exe_kind
                else "is not set" if not exe else "points somewhere else"))
     real, clx_path = shim_targets()
     if os.path.isfile(SHIM):
@@ -898,7 +1101,7 @@ def cmd_status(args):
 def cmd_doctor(args):
     unit = unit_name(args.unit)
     view = gateway_view(unit)
-    problems, warnings, passed = [], [], []
+    problems, warnings, notes, passed = [], [], [], []
     say("clx-openclaw doctor  (unit %s)" % unit)
     say("gateway   %s" % describe_gateway(view))
     systemd = view["info"] is not None and view["info"].get("LoadState") != "not-found"
@@ -909,25 +1112,29 @@ def cmd_doctor(args):
     if not os.path.isfile(CLX):
         problems.append("clx is not at %s, so the shim runs the CLI without it. Run install.sh."
                         % CLX)
-    elif version is not None and version < CLX_MIN:
+    elif (version is not None and version < CLX_MIN) or not all(clx_features(CLX)):
         problems.append("clx at %s is %s: it gives the gateway's launches no session and reads "
                         "no failed turns. Run install.sh (%s or newer)."
-                        % (CLX, ".".join(map(str, version)), ".".join(map(str, CLX_MIN))))
+                        % (CLX, ".".join(map(str, version)) if version else "an older clx",
+                           ".".join(map(str, CLX_MIN))))
     else:
         passed.append("clx is installed")
 
     # 2. The shim: there, runnable, and pointing at things that exist.
     real, clx_path = shim_targets()
-    if not os.path.lexists(SHIM):
+    by_hand = view["first_kind"] in ("foreign", "clx")
+    if not os.path.lexists(SHIM) and by_hand:
+        pass  # the gateway goes through clx by a shim of its own: said below
+    elif not os.path.lexists(SHIM):
         problems.append("the shim %s is missing. Run: clx-openclaw setup.%s" % (SHIM, apply_hint))
     elif not os.access(SHIM, os.X_OK):
         problems.append("the shim %s is not executable. Run: clx-openclaw setup." % SHIM)
     elif not real or not (os.path.isfile(real) and os.access(real, os.X_OK)):
         problems.append("the shim runs the Claude CLI %s, which is not there any more. Run: "
                         "clx-openclaw setup (or pass --claude PATH)." % (real or "(none named)"))
-    elif is_our_claude(real):
-        problems.append("the shim's Claude CLI %s is the shim itself: it would loop. Run: "
-                        "clx-openclaw setup --claude PATH." % real)
+    elif is_clx_or_shim(real):
+        problems.append("the shim's Claude CLI %s is a clx or a clx shim: every launch would run "
+                        "clx inside clx. Run: clx-openclaw setup --claude PATH." % real)
     elif clx_path and not os.path.isfile(clx_path):
         problems.append("the shim hands launches to %s, which is not there: they skip clx. "
                         "Run: clx-openclaw setup." % clx_path)
@@ -955,6 +1162,17 @@ def cmd_doctor(args):
         if not claudes:
             problems.append("the running gateway's PATH has no `claude` at all: its Claude CLI "
                             "backend cannot start. Run: clx-openclaw setup.%s" % apply_hint)
+        elif by_hand:
+            shim, more, trouble = hand_made_lines(claudes[0])
+            notes.append("the running gateway's first `claude` is %s, %s clx-openclaw did not "
+                         "write: its Claude CLI turns go through clx. `clx-openclaw setup` can "
+                         "replace it with a managed shim.%s"
+                         % (claudes[0], "a clx shim" if view["first_kind"] == "foreign"
+                            else "clx itself, which", "".join(" " + m[:1].upper() + m[1:] + "."
+                                                             for m in more)))
+            problems.extend(t + "." for t in trouble)
+            if not trouble:
+                passed.append("the running gateway's turns go through clx")
         elif not view["first_is_shim"]:
             pending = systemd and os.path.isfile(dropin_path(unit)) \
                 and dropin_sets_path(dropin_path(unit))
@@ -970,7 +1188,7 @@ def cmd_doctor(args):
         else:
             passed.append("the running gateway's first `claude` is the shim")
         exe = view["values"].get("CLAUDE_CODE_EXECUTABLE")
-        if not (exe and is_our_claude(exe)):
+        if not (exe and is_clx_or_shim(exe)):
             warnings.append("CLAUDE_CODE_EXECUTABLE in the running gateway %s: launches through "
                             "the Agent SDK or an ACP adapter skip clx. Run: clx-openclaw setup.%s"
                             % ("is not set" if not exe else "points somewhere else", apply_hint))
@@ -993,7 +1211,7 @@ def cmd_doctor(args):
                         % (ENV_FILE, apply_hint))
 
     # 4. Another CLI where system services and cron look first.
-    stray = [c for c in claudes_on(SYSTEM_PATH) if not is_our_claude(c) and not is_clx(c)]
+    stray = [c for c in claudes_on(SYSTEM_PATH) if not is_clx_or_shim(c)]
     for path in stray:
         problems.append("%s is on the PATH that system services and cron use (%s): a cron job "
                         "or service that runs `claude` reaches it, not clx. Call %s by its full "
@@ -1040,6 +1258,8 @@ def cmd_doctor(args):
         say("PROBLEM  " + text)
     for text in warnings:
         say("WARN     " + text)
+    for text in notes:
+        say("NOTE     " + text)
     for text in passed:
         say("ok       " + text)
     say("")
@@ -1063,8 +1283,11 @@ def main(argv):
     p_setup.add_argument("--unit", default=DEFAULT_UNIT, help="the gateway's systemd user unit")
     p_setup.add_argument("--with-skill", action="store_true",
                          help="also install the clx-accounts skill for the agents")
+    p_setup.add_argument("--link", metavar="DIR",
+                         help="put a `claude` link in DIR instead of the drop-in's PATH; DIR must "
+                              "come before every other `claude` on the gateway's PATH")
     p_setup.add_argument("--no-link", action="store_true",
-                         help="never put a `claude` link on the PATH: use the drop-in's PATH only")
+                         help="accepted for compatibility: the drop-in is the default route")
     p_setup.add_argument("--claude", help="the Claude Code CLI the shim runs")
     p_setup.add_argument("--state-dir", help="the OpenClaw state dir (default ~/.openclaw)")
     for name, text in (("status", "is the gateway going through clx, and its sessions"),

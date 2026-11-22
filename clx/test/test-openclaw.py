@@ -83,11 +83,27 @@ echo "STUB-CLAUDE %(tag)s dir=${CLAUDE_CONFIG_DIR:-<none>} args=$*"
 """
 
 STUB_CLX = """#!%(python)s -I
+\"\"\"clx - auto-switching Claude Code launcher (a stub for the tests)\"\"\"
 CLX_VERSION = "1.1.0"
+# what clx-openclaw looks for: def long_lived_stdio( and def watch_failed_turns_once(
 import os, sys
 print("STUB-CLX bin=%%s drop=%%s quiet=%%s args=%%s" %% (
     os.environ.get("CC_CLAUDE_BIN"), os.environ.get("CLX_DROP_INJECTED_TOKEN"),
     os.environ.get("CLX_NO_NOTIFY"), " ".join(sys.argv[1:])))
+"""
+
+
+HAND_MADE_SHIM = """#!/bin/sh
+# claude -> clx shim, written by hand: every Claude Code launch picks the account with room.
+export CC_CLAUDE_BIN="${CC_CLAUDE_BIN:-%(pinned)s}"
+# The caller already chose the account and handed its credential in: go straight to Claude Code.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  exec "$CC_CLAUDE_BIN" "$@"
+fi
+echo "HAND-MADE-SHIM ran" >&2
+export CLX_DROP_INJECTED_TOKEN=1
+export CLX_NO_NOTIFY=1
+exec '%(clx)s' "$@"
 """
 
 
@@ -250,6 +266,18 @@ class Box(object):
         found = re.search(r'^%s="((?:[^"\\]|\\.)*)"$' % name, text, re.M)
         return re.sub(r"\\(.)", r"\1", found.group(1)) if found else None
 
+    def shim_real(self):
+        found = re.search(r"^CLX_OPENCLAW_REAL='(.*)'$", open(self.shim).read(), re.M)
+        return found.group(1) if found else None
+
+    def hand_made(self, where, pinned, clx):
+        """A hand-made shim at `where` (through a link, like the reference host's)."""
+        script = os.path.join(self.home, "bin-shims", "claude-via-clx")
+        self.write(script, HAND_MADE_SHIM % {"pinned": pinned, "clx": clx}, 0o755)
+        os.makedirs(os.path.dirname(where), exist_ok=True)
+        os.symlink(script, where)
+        return where
+
     def systemctl_calls(self):
         return open(self.log).read().splitlines()
 
@@ -303,18 +331,22 @@ def t_link_route(src):
               "first `claude` is %s, not the clx shim" % real in out, out[-900:])
 
         rc, out = box.run("setup", "--dry-run")
-        check("dry run: exit 0 and the plan is printed", rc == 0 and "would link" in out, out[-400:])
+        check("default: the drop-in, not a link, even where a link would win",
+              rc == 0 and "would link" not in out and "the drop-in puts" in out
+              and "(PATH and CLAUDE_CODE_EXECUTABLE)" in out, out[-500:])
+        rc, out = box.run("setup", "--dry-run", "--link", local)
+        check("dry run --link: exit 0 and the plan is printed", rc == 0 and "would link" in out, out[-400:])
         check("dry run: nothing is written",
               not os.path.lexists(box.shim) and not os.path.lexists(os.path.join(local, "claude"))
               and not os.path.lexists(box.dropin), os.listdir(local))
 
-        rc, out = box.run("setup")
+        rc, out = box.run("setup", "--link", local)
         link = os.path.join(local, "claude")
         check("setup: exit 0", rc == 0, out[-600:])
-        check("setup: a link named claude in the first dir of yours on the gateway's PATH",
+        check("setup --link: a link named claude in the directory asked for",
               os.path.islink(link) and os.path.realpath(link) == os.path.realpath(box.shim), out[-400:])
         check("setup: the shim is executable and names the real CLI",
-              os.access(box.shim, os.X_OK) and ("CLX_OPENCLAW_REAL='%s'" % real) in open(box.shim).read())
+              os.access(box.shim, os.X_OK) and box.shim_real() == real, box.shim_real())
         check("setup: the real CLI is left exactly where it was",
               open(real).read().startswith("#!/bin/sh") and not os.path.islink(real))
         check("setup: the drop-in sets CLAUDE_CODE_EXECUTABLE to the shim and leaves PATH alone",
@@ -365,9 +397,9 @@ def t_link_route(src):
         check("doctor: always says what clx does not cover",
               "Not covered:" in out and "auth profile" in out and "API key" in out, out[-600:])
 
-        rc, out = box.run("setup")
-        check("setup again: nothing doubles up",
-              rc == 0 and "already resolves `claude` to the shim first" in out
+        rc, out = box.run("setup", "--link", local)
+        check("setup --link again: nothing doubles up",
+              rc == 0 and "already resolves to the shim (--link)" in out
               and len([n for n in os.listdir(local) if n == "claude"]) == 1, out[-500:])
 
         rc, out = box.run("remove")
@@ -435,7 +467,8 @@ def t_path_route(src):
               rc == 0 and box.dropin_value("PATH") == want, box.dropin_value("PATH"))
 
         rc, out = box.run("setup", "--no-link")
-        check("--no-link: still the drop-in route", rc == 0 and box.dropin_value("PATH") == want)
+        check("--no-link is still accepted (the drop-in is the default)",
+              rc == 0 and box.dropin_value("PATH") == want)
         no_restart(box, "path route")
         no_secret(box, "path route")
 
@@ -446,10 +479,165 @@ def t_path_route(src):
         gw_path = "%s:%s" % (local, npm)
         box.unit(path=gw_path)
         box.gateway(gw_path)
-        rc, out = box.run("setup", "--no-link")
-        check("--no-link: no link even where one would win, PATH in the drop-in instead",
+        rc, out = box.run("setup")
+        check("default: no link even where one would win, PATH in the drop-in instead",
               rc == 0 and not os.path.lexists(os.path.join(local, "claude"))
               and (box.dropin_value("PATH") or "").startswith(os.path.dirname(box.shim) + ":"), out[-400:])
+
+
+def t_link_refusals(src):
+    with sandbox(src) as box:
+        local = os.path.join(box.home, ".local", "bin")
+        npm = os.path.join(box.home, ".npm-global", "bin")
+        late = os.path.join(box.home, "late-bin")
+        os.makedirs(late)
+        box.cli(os.path.join(npm, "claude"))
+        system = os.path.join(box.root, "opt-bin")
+        os.makedirs(system)
+        gw_path = "%s:%s:%s:%s" % (system, local, npm, late)
+        box.unit(path=gw_path)
+        box.gateway(gw_path)
+        cases = [
+            ("a directory that is not on the gateway's PATH", os.path.join(box.home, "elsewhere"),
+             "is not on the gateway's PATH"),
+            ("a directory after the first `claude`", late, "comes after %s" % os.path.join(npm, "claude")),
+            ("a directory that already holds a real `claude`", npm, "already holds a `claude`"),
+            ("a directory outside your home", system, "outside your home dir"),
+        ]
+        for name, where, why in cases:
+            rc, out = box.run("setup", "--link", where)
+            check("--link refuses %s, and says why" % name, rc == 1 and why in out, out[-300:])
+        check("--link refusals: nothing was written",
+              not os.path.lexists(box.shim) and not os.path.lexists(box.dropin)
+              and not os.path.lexists(os.path.join(local, "claude")))
+        rc, out = box.run("setup", "--link", local)
+        check("--link to a good directory still works", rc == 0 and os.path.islink(os.path.join(local, "claude")),
+              out[-300:])
+
+
+def t_hand_made_shim(src):
+    """The first `claude` is a shim somebody wrote by hand that hands over to a clx."""
+    with sandbox(src) as box:
+        local = os.path.join(box.home, ".local", "bin")
+        nvm = os.path.join(box.home, ".nvm", "versions", "node", "v24.0.0", "bin")
+        os.makedirs(nvm)
+        clx = os.path.join(local, "clx")
+        shutil.copy(box.clx, clx)
+        box.clx = clx
+        pinned = box.cli(os.path.join(box.home, ".local", "share", "claude", "versions", "2.1.321"),
+                         tag="pinned")
+        stray = box.cli(os.path.join(box.sysbin, "claude"), tag="system")
+        hand = box.hand_made(os.path.join(local, "claude"), pinned, clx)
+        box.login(os.path.join(box.home, ".claude"), "alive", "solo@example.test")
+        gw_path = "%s:%s:%s" % (nvm, local, box.sysbin)
+        box.unit(path=gw_path)
+        box.gateway(gw_path)
+
+        rc, out = box.run("status")
+        check("hand-made: status says the turns go through clx, by a shim it did not write",
+              rc == 0 and "go through clx, by a shim clx-openclaw did not write" in out
+              and "NOT through clx" not in out and "setup` can replace it" in out, out)
+        check("hand-made: status names it in the list", "%s   <- a clx shim clx-openclaw did not write" % hand in out, out)
+        check("hand-made: status says it pins a CLI", "it pins the CLI %s" % pinned in out, out)
+        rc, out = box.run("doctor")
+        check("hand-made: doctor never claims a bypass for it",
+              "bypass clx" not in out and "first `claude` is %s, a clx shim clx-openclaw did not write" % hand in out,
+              out)
+        check("hand-made: doctor does not want the managed shim while it is there",
+              "the shim %s is missing" % box.shim not in out, out)
+        check("hand-made: the system-wide copy is still named (that one does bypass clx)",
+              "%s is on the PATH that system services and cron use" % stray in out, out)
+
+        rc, out = box.run("setup", "--dry-run")
+        check("hand-made: setup --dry-run takes the real CLI from behind the shim (its CC_CLAUDE_BIN)",
+              rc == 0 and "Claude CLI     %s (the CC_CLAUDE_BIN of the hand-made clx shim %s)" % (pinned, hand) in out,
+              out)
+        check("hand-made: setup --dry-run proposes the drop-in, never a link in a Node version's bin",
+              "would link" not in out and "the drop-in puts" in out and nvm not in out.split("route")[1][:200], out)
+        check("hand-made: setup --dry-run names the hand-made shim and leaves it", "found          %s" % hand in out, out)
+        check("hand-made: setup --dry-run warns that a versioned CLI path goes stale", "names one Claude Code version" in out, out)
+        check("hand-made: the dry run wrote nothing", not os.path.lexists(box.shim) and not os.path.lexists(box.dropin))
+
+        rc, out = box.run("setup")
+        check("hand-made: setup writes a shim whose CLI is the real one, never a clx or a shim",
+              rc == 0 and box.shim_real() == pinned, (box.shim_real(), out[-300:]))
+        check("hand-made: the hand-made shim and its link are left exactly as they were",
+              os.path.islink(hand) and "HAND-MADE-SHIM" in open(os.path.realpath(hand)).read())
+        check("hand-made: nothing was put in the Node version's bin", os.listdir(nvm) == [])
+        want = "%s:%s" % (os.path.dirname(box.shim), gw_path)
+        check("hand-made: the drop-in puts the managed shim first", box.dropin_value("PATH") == want,
+              box.dropin_value("PATH"))
+
+        # After the restart: the managed shim first, the hand-made one second.
+        box.gateway(want, CLAUDE_CODE_EXECUTABLE=box.shim)
+        rc, out = box.run("status")
+        check("hand-made: after the restart status lists the managed shim, then the hand-made one",
+              re.search(r"1\. %s\s+<- the clx shim\n\s+2\. %s\s+<- a clx shim clx-openclaw did not write"
+                        % (re.escape(box.shim), re.escape(hand)), out)
+              and "ok: its Claude CLI turns go through clx\n" in out, out)
+        done = subprocess.run([box.shim, "-p", "--input-format", "stream-json"], env=box.env(),
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=120)
+        ran = done.stdout.decode("utf-8", "replace")
+        check("hand-made: a launch runs clx once and reaches the pinned CLI (no clx inside clx)",
+              "STUB-CLAUDE pinned dir=%s/" % os.path.join(box.home, ".clx-sessions") in ran
+              and "HAND-MADE-SHIM" not in ran, ran[-500:])
+        no_restart(box, "hand-made")
+        no_secret(box, "hand-made")
+
+    # Its CC_CLAUDE_BIN is gone: the next `claude` on the PATH that is neither a clx nor a shim.
+    with sandbox(src) as box:
+        local = os.path.join(box.home, ".local", "bin")
+        stray = box.cli(os.path.join(box.sysbin, "claude"), tag="system")
+        hand = box.hand_made(os.path.join(local, "claude"), "/nonexistent/claude/versions/9", box.clx)
+        gw_path = "%s:%s" % (local, box.sysbin)
+        box.unit(path=gw_path)
+        box.gateway(gw_path)
+        rc, out = box.run("status")
+        check("hand-made, pinned CLI gone: status says its turns fail", "which is not there" in out, out)
+        rc, out = box.run("setup")
+        check("hand-made, pinned CLI gone: setup takes the next real `claude` on the PATH",
+              rc == 0 and box.shim_real() == stray, (box.shim_real(), out[-300:]))
+
+    # Nothing real anywhere: every `claude` is a clx or a shim. Refuse, never wrap clx in clx.
+    with sandbox(src) as box:
+        local = os.path.join(box.home, ".local", "bin")
+        other = os.path.join(box.home, "other-bin")
+        hand = box.hand_made(os.path.join(local, "claude"), box.clx, box.clx)  # pins clx itself
+        os.makedirs(other)
+        os.symlink(box.clx, os.path.join(other, "claude"))                     # clx named claude
+        gw_path = "%s:%s" % (local, other)
+        box.unit(path=gw_path)
+        box.gateway(gw_path)
+        rc, out = box.run("setup", PATH=box.stub)
+        check("only clx and shims on the PATH: setup refuses with a clear sentence",
+              rc == 1 and "no Claude Code CLI behind it" in out and "--claude PATH" in out, out)
+        check("...and writes nothing", not os.path.lexists(box.shim) and not os.path.lexists(box.dropin))
+
+
+def t_never_clx_inside_clx(src):
+    """The hard rule, with --claude too: the shim's CLI is never a clx or any clx shim."""
+    with sandbox(src) as box:
+        local = os.path.join(box.home, ".local", "bin")
+        npm = os.path.join(box.home, ".npm-global", "bin")
+        real = box.cli(os.path.join(npm, "claude"))
+        hand = box.hand_made(os.path.join(box.home, "shims", "claude"), real, box.clx)
+        gw_path = "%s:%s" % (local, npm)
+        box.unit(path=gw_path)
+        box.gateway(gw_path)
+        clx_copy = os.path.join(box.root, "clx-copy")
+        shutil.copy(box.clx, clx_copy)
+        for name, path in (("clx itself", box.clx), ("another copy of clx", clx_copy),
+                           ("a hand-made clx shim", os.path.realpath(hand)),
+                           ("a link to a hand-made clx shim", hand)):
+            rc, out = box.run("setup", "--claude", path)
+            check("--claude refuses %s" % name, rc == 1 and "clx inside clx" in out, out[-300:])
+        check("--claude refusals wrote nothing", not os.path.lexists(box.shim))
+        rc, out = box.run("setup")
+        check("a normal setup still works", rc == 0 and box.shim_real() == real, out[-300:])
+        rc, out = box.run("setup", "--claude", box.shim)
+        check("--claude refuses the managed shim itself", rc == 1 and "clx inside clx" in out, out[-300:])
+        check("...and the shim it wrote before keeps the real CLI", box.shim_real() == real)
 
 
 def t_refusals(src):
@@ -527,12 +715,14 @@ def t_no_systemd(src):
         box.cli(os.path.join(npm, "claude"))
         box.gateway("%s:%s" % (local, npm))
         rc, out = box.run("setup")
-        check("no unit, a running gateway process: its PATH is used and the link route taken",
+        check("no unit, a running gateway process: its PATH is read, no link, the lines to add",
+              rc == 0 and not os.path.lexists(os.path.join(local, "claude"))
+              and "running gateway (pid %d)" % GATEWAY_PID in out
+              and "PATH=%s:$PATH" % os.path.dirname(box.shim) in out, out)
+        rc, out = box.run("setup", "--link", local)
+        check("no unit, --link: the link, and only CLAUDE_CODE_EXECUTABLE left to add",
               rc == 0 and os.path.islink(os.path.join(local, "claude"))
-              and "running gateway (pid %d)" % GATEWAY_PID in out, out)
-        check("...and only CLAUDE_CODE_EXECUTABLE is left to add by hand",
-              "CLAUDE_CODE_EXECUTABLE=%s" % box.shim in out and "PATH=" not in out.split("by hand")[-1]
-              and "$PATH" not in out, out)
+              and "CLAUDE_CODE_EXECUTABLE=%s" % box.shim in out and "$PATH" not in out, out)
         no_secret(box, "no systemd")
 
 
@@ -545,7 +735,7 @@ def t_doctor_problems(src):
         gw_path = "%s:%s:%s" % (local, npm, box.sysbin)
         box.unit(path=gw_path)
         box.gateway(gw_path)
-        rc, out = box.run("setup")
+        rc, out = box.run("setup", "--link", local)
         # The gateway restarted - with the watcher switched off in its environment.
         box.gateway(gw_path, CLAUDE_CODE_EXECUTABLE=box.shim, CLX_NO_FAIL_SCAN="1",
                     ANTHROPIC_API_KEY="sk-" + SECRET)
@@ -684,8 +874,8 @@ def main():
     args = ap.parse_args()
     VERBOSE = args.verbose
     SRC = os.path.abspath(args.dir)
-    for case in (t_usage, t_link_route, t_path_route, t_refusals, t_no_systemd,
-                 t_doctor_problems, t_shim, t_skill):
+    for case in (t_usage, t_link_route, t_path_route, t_link_refusals, t_hand_made_shim,
+                 t_never_clx_inside_clx, t_refusals, t_no_systemd, t_doctor_problems, t_shim, t_skill):
         try:
             case(SRC)
         except Exception as exc:

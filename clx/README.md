@@ -78,9 +78,9 @@ clx-openclaw doctor               # names every problem; `clx-openclaw status` s
 ```
 
 - **The route.** The gateway starts the first `claude` on its PATH. `setup` makes a small shim that `claude`.
-  - It puts a `claude` link in a directory of yours that comes before every other `claude` on that PATH. Your shells and cron jobs that use that directory go through clx too.
-  - Otherwise, or with `--no-link`, a systemd user drop-in puts the shim's directory first on the unit's PATH. The same value goes in an environment file of clx's, so it wins wherever the unit sets its own PATH.
-  - It never replaces a real `claude`.
+  - By default, a systemd user drop-in puts the shim's directory first on the unit's PATH. The same value goes in an environment file of clx's, so it wins wherever the unit sets its own PATH.
+  - `--link DIR` puts a `claude` link in DIR instead. DIR must come before every other `claude` on the gateway's PATH. Your shells and cron jobs that use DIR then go through clx too.
+  - It never replaces a real `claude`. A hand-written `claude` shim that hands over to a clx counts as going through clx; `setup` takes the real CLI from behind it and never makes a shim that runs clx inside clx.
   - The drop-in also sets `CLAUDE_CODE_EXECUTABLE`, for Agent SDK and ACP launches.
   - Verified with OpenClaw 2026.11.3 only.
 - **Failed turns.** The gateway switches every hook off. So the watcher reads failed requests from the session's transcript and moves the session at once. It does that in every clx session, terminal ones included.

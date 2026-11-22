@@ -7,8 +7,8 @@ description: Which Claude account your Claude CLI turns run on, what happens at 
 # Claude accounts through clx
 
 On this host the OpenClaw gateway runs its Claude CLI through **clx**. The gateway starts `claude`
-from its PATH, and the first `claude` there is clx's shim. That route was verified on OpenClaw
-2026.11.3 only. clx starts each CLI session on the account with the most room, and it moves a
+from its PATH, and the first `claude` there is a clx shim (clx-openclaw's, or one written by hand).
+That route was verified on OpenClaw 2026.11.3 only. clx starts each CLI session on the account with the most room, and it moves a
 running session to another account when its account runs out. You never have to switch accounts
 yourself.
 
