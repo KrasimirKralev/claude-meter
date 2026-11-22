@@ -8,6 +8,10 @@ SRC="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/clx-stranger-XXXX")"
 # A space in HOME: the hook command registered in settings.json must be quoted.
 export HOME="$T/my home" CLX_NO_NOTIFY=1 CLX_NO_WATCH=1
+# clx-openclaw must never reach this machine's own systemd or processes from here.
+mkdir -p "$T/proc"
+export CLX_OPENCLAW_SYSTEMCTL="$T/no-systemctl" CLX_OPENCLAW_PROC="$T/proc"
+unset XDG_DATA_HOME XDG_CONFIG_HOME OPENCLAW_STATE_DIR
 export HTTPS_PROXY=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 NO_PROXY= no_proxy=
 unset CLAUDE_CONFIG_DIR CLX_INSIDE CLAUDECODE
 mkdir -p "$HOME/.claude" "$T/bin"
@@ -39,7 +43,9 @@ EOF
 echo "== install"
 bash "$SRC/install.sh" >"$T/install.out" 2>&1; rc=$?
 chk "install exits 0 (rc=$rc)" '[ $rc = 0 ]'
-for f in clx clx-move cm-login; do chk "$f installed and executable" "[ -x '$HOME/.local/bin/$f' ]"; done
+for f in clx clx-move cm-login clx-openclaw; do chk "$f installed and executable" "[ -x '$HOME/.local/bin/$f' ]"; done
+SKILL="$HOME/.local/share/clx/openclaw/skills/clx-accounts/SKILL.md"
+chk "the OpenClaw skill is installed beside clx-openclaw" "cmp -s '$SRC/openclaw/skills/clx-accounts/SKILL.md' '$SKILL'"
 chk "hook installed" "[ -x '$HOME/.claude/hooks/cc-handoff.sh' ]"
 hooks() { python3 -c "
 import json,sys;s=json.load(open('$HOME/.claude/settings.json'))
@@ -98,10 +104,21 @@ chk "cm-login status in a repo with json.py runs none of its code" "[ ! -e '$HOM
 "$HOME/.local/bin/cm-login" 'Bad Name' >/dev/null 2>&1; rc=$?
 chk "cm-login refuses a bad name" '[ $rc = 1 ]'
 
+echo "== clx-openclaw (no systemd, no gateway: the sandbox has neither)"
+mkdir -p "$HOME/.openclaw"
+"$HOME/.local/bin/clx-openclaw" setup --with-skill --claude "$T/bin/claude" >"$T/oc-setup.out" 2>&1; rc=$?
+SHIM="$HOME/.local/share/clx/openclaw/bin/claude"
+chk "clx-openclaw setup exits 0 from the install (rc=$rc)" '[ $rc = 0 ]'
+chk "it writes the shim and prints the lines to add" "[ -x '$SHIM' ] && grep -q 'CLAUDE_CODE_EXECUTABLE=' '$T/oc-setup.out'"
+chk "it finds the installed skill and copies it" "cmp -s '$SKILL' '$HOME/.openclaw/skills/clx-accounts/SKILL.md'"
+printf '' | "$SHIM" -p --input-format stream-json >"$T/oc-shim.out" 2>&1
+chk "the shim reaches the CLI through clx, in a session dir" "grep -q 'STUB-CLAUDE dir=$HOME/.clx-sessions/' '$T/oc-shim.out'"
+
 echo "== uninstall"
 bash "$SRC/install.sh" --uninstall >"$T/uninstall.out" 2>&1; rc=$?
 chk "uninstall exits 0 (rc=$rc)" '[ $rc = 0 ]'
-chk "programs gone" "[ ! -e '$HOME/.local/bin/clx' ] && [ ! -e '$HOME/.local/bin/clx-move' ] && [ ! -e '$HOME/.local/bin/cm-login' ]"
+chk "programs gone" "[ ! -e '$HOME/.local/bin/clx' ] && [ ! -e '$HOME/.local/bin/clx-move' ] && [ ! -e '$HOME/.local/bin/cm-login' ] && [ ! -e '$HOME/.local/bin/clx-openclaw' ]"
+chk "the OpenClaw shim and both skill copies are gone" "[ ! -e '$SHIM' ] && [ ! -e '$SKILL' ] && [ ! -e '$HOME/.openclaw/skills/clx-accounts/SKILL.md' ]"
 chk "hook entries gone, the rest kept" "[ \"\$(hooks)\" = '0 opus 1' ]"
 chk "alias removed, the rest of .bashrc kept" "grep -qx 'export FOO=1' '$HOME/.bashrc' && ! grep -q 'clx claude alias' '$HOME/.bashrc'"
 chk "logins untouched" "[ -f '$HOME/.claude-work/.credentials.json' ] && [ -f '$HOME/.claude/.credentials.json' ]"

@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # Install clx: the multi-account launcher for Claude Code (Linux).
 #
-#   ./install.sh              install or update clx, clx-move, cm-login and the hand-off hook
+#   ./install.sh              install or update clx, clx-move, cm-login, clx-openclaw and the hand-off hook
 #   ./install.sh --alias      also make a plain `claude` go through clx (adds a block to ~/.bashrc)
 #   ./install.sh --uninstall  remove all of it again (account dirs and logins are left alone)
 #
 # What it touches, and nothing else:
-#   ~/.local/bin/{clx,clx-move,cm-login}   the programs (Claude Meter looks for clx-move here)
+#   ~/.local/bin/{clx,clx-move,cm-login,clx-openclaw}   the programs (Claude Meter looks for clx-move here)
+#   ~/.local/share/clx/openclaw/skills/                 the skill `clx-openclaw setup --with-skill` installs
 #   ~/.claude/hooks/cc-handoff.sh          the hook that moves a running session
 #   ~/.claude/settings.json                three hook entries (backed up first)
 #   ~/.bashrc                              only with --alias, between marker lines
+# An OpenClaw gateway is never touched here: `clx-openclaw setup` does that, and says what it did.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HOME/.local/bin"
 HOOK="$HOME/.claude/hooks/cc-handoff.sh"
+SKILLS="${XDG_DATA_HOME:-$HOME/.local/share}/clx/openclaw/skills"
+PROGRAMS="clx clx-move cm-login clx-openclaw"
 SETTINGS="$HOME/.claude/settings.json"
 BASHRC="$HOME/.bashrc"
 MARK_BEGIN="# >>> clx claude alias >>>"
@@ -130,7 +134,13 @@ PY
 
 if [ "${1:-}" = --uninstall ]; then
   say ">> Removing clx"
-  for f in clx clx-move cm-login; do rm -f "$BIN/$f"; done
+  if [ -x "$BIN/clx-openclaw" ] && [ -e "${XDG_DATA_HOME:-$HOME/.local/share}/clx/openclaw/bin/claude" ]; then
+    # Its own remove: it deletes only files that carry its marker, and restarts nothing.
+    "$BIN/clx-openclaw" remove || say "!! clx-openclaw remove failed - its shim keeps running the Claude CLI directly without clx"
+  fi
+  for f in $PROGRAMS; do rm -f "$BIN/$f"; done
+  rm -f "$SKILLS/clx-accounts/SKILL.md"
+  rmdir "$SKILLS/clx-accounts" "$SKILLS" 2>/dev/null || true
   if [ -f "$SETTINGS" ]; then
     backup_settings
     r=$(edit_settings remove) || die "could not edit $SETTINGS (is it valid JSON?)"
@@ -147,7 +157,7 @@ command -v claude >/dev/null || say "!! claude is not on PATH yet - install Clau
 
 say ">> Installing clx into $BIN"
 mkdir -p "$BIN" "$(dirname "$HOOK")"
-for f in clx clx-move cm-login; do
+for f in $PROGRAMS; do
   if [ -f "$BIN/$f" ] && ! cmp -s "$HERE/$f" "$BIN/$f"; then
     cp -p "$BIN/$f" "$BIN/$f.bak-$STAMP"
     say "   kept the old $f as $BIN/$f.bak-$STAMP"
@@ -158,6 +168,11 @@ for f in clx clx-move cm-login; do
 done
 install -m 755 "$HERE/cc-handoff.sh" "$(dirname "$HOOK")/.cc-handoff.sh.new" || die "could not copy the hook"
 mv -f "$(dirname "$HOOK")/.cc-handoff.sh.new" "$HOOK" || die "could not replace $HOOK"
+# The agents' skill: clx-openclaw copies it into an OpenClaw state dir only when asked.
+mkdir -p -m 700 "$SKILLS/clx-accounts"
+install -m 644 "$HERE/openclaw/skills/clx-accounts/SKILL.md" "$SKILLS/clx-accounts/.SKILL.md.new" \
+  || die "could not copy the OpenClaw skill"
+mv -f "$SKILLS/clx-accounts/.SKILL.md.new" "$SKILLS/clx-accounts/SKILL.md" || die "could not replace the OpenClaw skill"
 
 say ">> Registering the hand-off hook in $SETTINGS"
 backup_settings
@@ -190,3 +205,4 @@ say "Done. Next:"
 say "  cm-login work you@example.com    log a second account into ~/.claude-work"
 say "  clx --status                     see every account and which one clx would pick"
 say "  clx                              start Claude Code on the account with the most room"
+say "  clx-openclaw setup               run an OpenClaw gateway's Claude CLI turns through clx"

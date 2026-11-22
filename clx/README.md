@@ -52,6 +52,7 @@ Every other argument goes straight to `claude`, so `clx -p "…"`, `clx --model 
 | `clx --init` | Link your shared settings, `CLAUDE.md`, skills, agents, plugins, hooks and project history into every `~/.claude-*` dir, so each account behaves the same. `clx` also does this by itself for a new account. Anything it replaces is moved aside as `*.pre-clx`. |
 | `cm-login <name> [email]` | Log an account into `~/.claude-<name>`. If your browser is already signed in to another account, open the login link in a private window. |
 | `cm-login status` | Who is logged in to which dir. |
+| `clx-openclaw setup` / `status` / `doctor` / `remove` | Run an OpenClaw gateway's Claude CLI turns through clx. See [OpenClaw agents](#openclaw-agents). |
 
 ### Settings
 
@@ -64,7 +65,31 @@ Every other argument goes straight to `claude`, so `clx -p "…"`, `clx --model 
 - `threshold`: the usage % at which a session moves on.
 - `primary`: the account to prefer while it is under the threshold. With no primary, clx starts on the account with the most room.
 
-`CC_THRESHOLD` and `CC_PRIMARY` override them for one run. `CLX_NO_NOTIFY=1` turns off the desktop popup that a move shows.
+`CC_THRESHOLD` and `CC_PRIMARY` override them for one run. `CLX_NO_NOTIFY=1` turns off the desktop popup that a move shows. `CLX_NO_FAIL_SCAN=1` stops the watcher from reading failed turns out of the transcript. `CLX_DROP_INJECTED_TOKEN=1` makes clx choose the account even when a caller hands Claude Code a token on a file descriptor. Without it, clx then runs the CLI on the caller's choice.
+
+## OpenClaw agents
+
+An OpenClaw gateway can run its agents' turns through Claude Code, with the Claude CLI backend. `clx-openclaw` puts clx on that route. Each CLI session the gateway starts then runs on the account with the most room. When a turn fails on a usage limit or a refused login, the session moves to another account and the next turn answers there.
+
+```bash
+clx-openclaw setup --with-skill   # write the shim and the gateway's drop-in; it restarts nothing
+systemctl --user daemon-reload && systemctl --user restart openclaw-gateway.service   # setup prints this line
+clx-openclaw doctor               # names every problem; `clx-openclaw status` shows sessions and moves
+```
+
+- **The route.** The gateway starts the first `claude` on its PATH. `setup` makes a small shim that `claude`.
+  - It puts a `claude` link in a directory of yours that comes before every other `claude` on that PATH. Your shells and cron jobs that use that directory go through clx too.
+  - Otherwise, or with `--no-link`, a systemd user drop-in puts the shim's directory first on the unit's PATH. The same value goes in an environment file of clx's, so it wins wherever the unit sets its own PATH.
+  - It never replaces a real `claude`.
+  - The drop-in also sets `CLAUDE_CODE_EXECUTABLE`, for Agent SDK and ACP launches.
+  - Verified with OpenClaw 2026.11.3 only.
+- **Failed turns.** The gateway switches every hook off. So the watcher reads failed requests from the session's transcript and moves the session at once. It does that in every clx session, terminal ones included.
+- **The agents' skill.** `--with-skill` installs the `clx-accounts` skill in the shared skills folder (`~/.openclaw/skills/`).
+- **Not covered.** An agent whose model runs on OpenClaw's own runtime, with an API key or an auth profile, never starts the CLI, so clx never rotates it. Nor does a launch that carries its own `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`.
+- **Cron and system services have their own PATH**, usually `/usr/local/bin:/usr/bin:/bin`. A `claude` there bypasses clx; `clx-openclaw doctor` names it.
+- **The drop-in's PATH is a copy.** Run `setup` again when the unit's own PATH changes.
+
+The full description is in the [clx README](https://github.com/KrasimirKralev/clx#openclaw-agents).
 
 ## With Claude Meter
 
@@ -91,6 +116,9 @@ python3 clx/test/test-no-5h.py       # decisions when the server reports no 5-ho
 python3 clx/test/test-move.py        # clx-move, the meter's click
 python3 clx/test/test-launch.py      # which account a launch picks when every one is spent
 python3 clx/test/test-security.py    # one check per fixed security finding
+python3 clx/test/test-failed-turn.py # a turn that failed on a limit or a refused login moves the session
+python3 clx/test/test-dead-default.py # a dead or login-less dir never wins over a live login of the same account
+python3 clx/test/test-openclaw.py    # clx-openclaw setup, status, doctor and remove (fake systemd, fake /proc)
 bash    clx/test/test-install.sh     # install, first launch, second account, folder trust, uninstall
 ```
 

@@ -16,6 +16,12 @@ another account - no restart, no --continue, subagents and background tasks keep
 going. `clx --handoff-check` (the hook) does exactly that when the account this
 session runs on has spent its 5-hour limit.
 
+Long-lived launches without a terminal (`--input-format stream-json`, which is how
+the OpenClaw gateway drives its Claude CLI backend) get a session dir as well.
+Their hooks are switched off, so the per-session watcher also reads failed
+requests out of the session's transcript: a turn that ended on a usage limit or a
+refused login moves the session at once (see watch_failed_turns_once).
+
 Why not a token: CLAUDE_CODE_OAUTH_TOKEN / apiKeyHelper were tested and are static
 or hang. CLAUDE_CONFIG_DIR keeps Claude Code's own login and token refresh.
 
@@ -24,7 +30,7 @@ Files it owns (all 0600):
     ~/.claude/cc-usage-cache.json   per-account /usage snapshot, 180 s TTL
     ~/.claude/active-account.json   what the last launch chose, read by the statusline
     ~/.claude/clx-handoff.log       one line per in-process hand-off and heal
-    ~/.clx-sessions/<pid>/          one live REPL's CLAUDE_CONFIG_DIR (0700)
+    ~/.clx-sessions/<pid>/          one live session's CLAUDE_CONFIG_DIR (0700)
 
 No third-party dependencies: stdlib only.
 """
@@ -62,6 +68,14 @@ SESSION_LOCK = ".clx.lock"          # one writer per session at a time
 GC_LEFTOVER = re.compile(r"^\d+\.gc-\d+$")  # a session dir renamed aside for removal
 INSIDE_ENV = "CLX_INSIDE"          # recursion guard for the `claude` shell function
 NO_SESSION_ENV = "CLX_NO_SESSION"  # kill switch: exec into the account dir as before
+# A caller that already chose a login can hand Claude Code its token on a file
+# descriptor (the OpenClaw gateway does this for a saved subscription token).
+# Claude Code prefers that token over .credentials.json, so clx's choice - and
+# every later hand-off - would be silently ignored. By default clx therefore
+# steps aside and runs the CLI on the caller's choice; CLX_DROP_INJECTED_TOKEN=1
+# makes clx choose instead and removes the variable from the CLI's environment.
+INJECTED_TOKEN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",)
+DROP_TOKEN_ENV = "CLX_DROP_INJECTED_TOKEN"
 
 # Loop guard: at most one hand-off per this many seconds. The same window is how
 # long the model is told "this session moved" and how long the statusline shows it.
@@ -74,9 +88,18 @@ HOOK_EVENTS = ("prompt", "stop", "post-tool")
 # Deliberately not in HOOK_EVENTS: --event may never ask for it, it is what the
 # heal watcher passes in-process (finding-blocked-session.md, item 1).
 WATCH_EVENT = "watch"
+# The words Claude Code uses when a request fails because the ACCOUNT is out of
+# usage ("You've hit your weekly limit", "You've reached your Fable limit"). A
+# plain API rate limit or an overload is not the account's fault and is not here.
+LIMIT_TEXT = re.compile(
+    r"hit your (?:[\w-]+ )?limit|reached your (?:[\w-]+ )?limit|usage limit|weekly limit"
+    r"|session limit|5-hour limit|out of (?:extra )?usage", re.I)
+# How long a limit error counts as evidence when /usage gives no reset time and
+# no newer measurement has arrived: the length of the window it named.
+LIMIT_HIT_TTL = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-CLX_VERSION = "1.0.1"
+CLX_VERSION = "1.1.0"
 # Say who is asking: clx is not Claude Code, and the usage endpoint answers either way.
 USER_AGENT = "clx/%s (+https://github.com/KrasimirKralev/clx)" % CLX_VERSION
 
@@ -465,15 +488,25 @@ def creds_facts(directory):
 
     Presence flags and timestamps only: a token value never leaves this
     function. None ("could not read it") is NOT evidence of a dead login - a
-    damaged or half-written file must never take an account out of service.
+    damaged, unreadable or half-written file must never take an account out of
+    service.
+
+    A file that reads fine and holds no login block at all is different: Claude
+    Code keeps its MCP sign-ins in the same file, and started without a login it
+    writes only those. Nothing in such a file can answer a request, so it has
+    the facts of "logged out" rather than passing for a login.
     """
     path = os.path.join(directory, ".credentials.json")
     try:
         mtime = os.stat(path).st_mtime
     except OSError:
         return None
-    doc = read_json(path, {})
-    oauth = doc.get("claudeAiOauth") if isinstance(doc, dict) else None
+    doc = read_json(path, False)
+    if not isinstance(doc, dict):
+        return None  # unreadable, half-written or not an object: never evidence
+    oauth = doc.get("claudeAiOauth")
+    if oauth is None:
+        oauth = {}  # readable, and no Claude login in it
     if not isinstance(oauth, dict):
         return None
 
@@ -554,6 +587,13 @@ def dedupe(accounts, primary_key):
     refresh token, so the loser's credentials go stale and its next launch fails.
     Prefer the named ~/.claude-<name> dir; for the primary prefer the default dir,
     so a bare `claude` and `clx` agree on which login is primary.
+
+    A dir whose login is DEAD (logged out, login-less, or expired past its
+    refresh token) never wins over a dir of the same account that can still
+    answer: a blank ~/.claude/.credentials.json coming back was chosen over the
+    live named dir by the primary rule, the account dropped out of rotation and
+    a running session was re-linked to the blank file. Only the file's own facts
+    are judged here; with every dir alive, or every dir dead, nothing changes.
     """
     groups = {}
     order = []
@@ -571,14 +611,21 @@ def dedupe(accounts, primary_key):
             kept.append(group[0])
             continue
         is_primary = any(primary_key in a.keys() for a in group)
-        named = [a for a in group if not a.is_default]
-        default = [a for a in group if a.is_default]
+        alive = [a for a in group if not auth_problem(a)]
+        usable = alive if alive and len(alive) < len(group) else group
+        named = [a for a in usable if not a.is_default]
+        default = [a for a in usable if a.is_default]
         if is_primary and default:
             winner = default[0]
         else:
             winner = (named or default)[0]
         losers = [a for a in group if a is not winner]
         kept.append(winner)
+        if usable is not group:
+            notes.append(
+                "clx: %s is logged in to %d dirs - using %s, ignoring %s (dead login there)"
+                % (group[0].email or key, len(group), winner.dir, ", ".join(a.dir for a in losers)))
+            continue
         notes.append(
             "clx: %s is logged in to %d dirs - using %s, ignoring %s (two dirs refreshing one "
             "account fight over the rotated refresh token)"
@@ -704,6 +751,79 @@ def derive_windows(entry):
     if isinstance(entry.get("seven_day"), (int, float)):
         windows["seven_day"] = {"utilization": entry["seven_day"], "resets_at": None, "label": "7d"}
     return windows
+
+
+# ------------------------------------------------------------ limit evidence
+# A request that FAILED on a usage limit says more than any /usage number, and
+# says it sooner: the account itself has just answered that it cannot take a
+# request. The watcher records such a failure in the cache entry as limitHit,
+# and every decision reads it as 100 % on the window the message named.
+
+
+def with_limit_hit(windows, entry, now=None):
+    """The windows a decision should see: the measured ones plus a live limitHit.
+
+    A recorded limit error counts as 100 % on the window it named until a NEWER
+    good measurement arrives, that window resets, or LIMIT_HIT_TTL runs out.
+    """
+    hit = (entry or {}).get("limitHit")
+    now = time.time() if now is None else now
+    if not isinstance(hit, dict) or not limit_hit_live(hit, entry, windows or {}, now):
+        return windows
+    out = dict(windows or {})
+    key = hit.get("window") or "five_hour"
+    win = dict(out.get(key) or {"label": WINDOW_LABELS.get(key) or window_header(key),
+                                 "resets_at": None})
+    value = win.get("utilization")
+    win["utilization"] = max(100, value if isinstance(value, (int, float)) else 0)
+    win["limit_hit"] = True
+    out[key] = win
+    return out
+
+
+def limit_hit_live(hit, entry, windows, now):
+    """Is a recorded limit error still the best evidence about this account?"""
+    at = hit.get("at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return False
+    if (entry.get("fetchedAt") or 0) > at and entry.get("status") == "ok":
+        return False  # measured since: the number wins
+    key = hit.get("window") or "five_hour"
+    reset = (windows.get(key) or {}).get("resets_at")
+    if isinstance(reset, (int, float)) and reset and reset > at:
+        return now < reset
+    return now - at < LIMIT_HIT_TTL.get(key, LIMIT_HIT_TTL["seven_day"])
+
+
+def limit_window_of(text):
+    """The window a usage-limit message names.
+
+    "You've reached your Fable limit" is that model's own weekly cap: recorded as
+    weekly_fable it stops only sessions on that model. Otherwise weekly ->
+    seven_day, else five_hour.
+    """
+    named = re.search(r"(?:hit|reached) your ([a-z]+) limit", text or "", re.I)
+    if named and named.group(1).lower() in MODEL_FAMILIES:
+        return "weekly_" + named.group(1).lower()
+    return "seven_day" if re.search(r"week|7-day|7 day", text or "", re.I) else "five_hour"
+
+
+def record_limit_hit(acct, text, now=None):
+    """Remember in the cache that `acct` just answered with a usage-limit error.
+
+    Never touches credentials; the message is trimmed before it is stored.
+    """
+    now = int(time.time() if now is None else now)
+    key = limit_window_of(text)
+    cache = read_json(CACHE_FILE, {}) or {}
+    entry = dict(cache.get(acct.id) or {})
+    entry["limitHit"] = {"window": key, "label": WINDOW_LABELS.get(key, key), "at": now,
+                         "text": re.sub(r"\s+", " ", text or "")[:160]}
+    entry.setdefault("email", acct.email)
+    entry.setdefault("dir", acct.dir)
+    cache[acct.id] = entry
+    write_json_atomic(CACHE_FILE, cache)
+    return key
 
 
 def window_keys(accounts):
@@ -884,11 +1004,14 @@ def refresh(accounts, force=False, only=None, ttl=None):
                     entry["dir"] = acct.dir
                     cache[acct.id] = entry
                     updated.add(acct.id)
-        acct.five_hour = entry.get("five_hour")
-        acct.seven_day = entry.get("seven_day")
         acct.resets_at = entry.get("resets_at")
         # Old cache entries predate `windows`; derive them from the two flat fields.
-        acct.windows = entry.get("windows") or derive_windows(entry)
+        # A limit a real request just ran into counts on top (with_limit_hit).
+        acct.windows = with_limit_hit(entry.get("windows") or derive_windows(entry), entry)
+        five = (acct.windows.get("five_hour") or {}).get("utilization")
+        seven = (acct.windows.get("seven_day") or {}).get("utilization")
+        acct.five_hour = five if isinstance(five, (int, float)) else entry.get("five_hour")
+        acct.seven_day = seven if isinstance(seven, (int, float)) else entry.get("seven_day")
         acct.fetched_at = entry.get("fetchedAt") or 0
         acct.status = entry.get("status") or "unknown"
         acct.creds_checked = entry.get("credsMtime")
@@ -899,6 +1022,12 @@ def refresh(accounts, force=False, only=None, ttl=None):
     if calls:
         # Re-read before writing: a background --refresh-one may have landed.
         merged = read_json(CACHE_FILE, {}) or {}
+        for key in updated:
+            # A limit the watcher recorded while this call was in flight must not
+            # be written away: limit_hit_live() alone decides when it stops counting.
+            landed = (merged.get(key) or {}).get("limitHit")
+            if isinstance(landed, dict) and "limitHit" not in cache[key]:
+                cache[key] = dict(cache[key], limitHit=landed)
         merged.update({k: v for k, v in cache.items() if k in updated})
         meta = merged.get(META_KEY) or {}
         meta["usageCalls"] = (meta.get("usageCalls") or 0) + calls
@@ -942,6 +1071,7 @@ def spawn_refresh(account_id, *more):
 MODEL_TAIL = int(os.environ.get("CC_MODEL_TAIL") or 65536)
 # What to suggest when a model's own cap is what is blocking everything.
 MODEL_ALTERNATIVE = {"fable": "opus", "opus": "sonnet", "sonnet": "opus", "haiku": "opus"}
+MODEL_FAMILIES = tuple(MODEL_ALTERNATIVE)  # the model names a limit message can carry
 _MODEL_MEMO = {}
 
 
@@ -2046,6 +2176,14 @@ def create_session(chosen, threshold):
         "handoffs": [],
         "last_handoff_at": 0,
     })
+    foreign = foreign_auth_env()
+    if foreign:
+        # Claude Code will authenticate with what it was handed, not with this
+        # account's login: a failed request in this session is not the account's
+        # (watch_failed_turns_once reads this before it charges anybody).
+        stamped = read_session_meta(path) or {}
+        stamped["foreign_auth"] = foreign
+        write_session_meta(path, stamped)
     # Start the heal watcher BEFORE Claude Code does: the first token refresh can
     # land seconds after launch, and until it is healed the account dir holds a
     # rotated, dead refresh token that the widget may replay.
@@ -2442,17 +2580,350 @@ def watch_decide_once(session_dir):
     return "decided"
 
 
+# ------------------------------------------------- failed turns in the transcript
+# The hand-off decision runs on /usage numbers. A request that FAILS says more,
+# and says it sooner: "You've hit your weekly limit" and "OAuth token revoked"
+# are the account itself answering that it cannot take this session. The hooks
+# never see that in a session whose hooks are switched off - and the OpenClaw
+# gateway launches every one of its Claude CLI sessions with
+# --settings {"disableAllHooks":true}. Such a session stayed where it was until
+# the next /usage number agreed, and while /usage itself was failing, for as
+# long as it failed.
+#
+# So the watcher reads what a hook would have been told: Claude Code writes
+# every failed request into the session's transcript as a synthetic assistant
+# line carrying isApiErrorMessage. No network and no token are involved, and
+# nothing is parsed unless the transcript has grown.
+FAILSCAN_OFF_ENV = "CLX_NO_FAIL_SCAN"   # kill switch
+FAILSCAN_BYTES = 262144                 # how far back the FIRST look reads
+FAILSCAN_MAX = 8 * 1048576              # never read more than this in one look
+FAILSCAN_RESOLVE = 30                   # seconds between checks that the transcript is still the one
+FAILSCAN_SEARCH = 6                     # ...and between searches while there is none yet
+FAILSCAN_RETRIES = 5                    # decision retries after a tick the hook locked out
+# A request already in flight when a hand-off lands still fails on the OLD
+# account a moment later. That failure must not be charged to the new one.
+FAILSCAN_GRACE = 15
+# With any of these in its environment Claude Code does not authenticate with
+# the account's login at all, so a failed request says nothing about the account.
+# An injected file-descriptor token is not here: clx either steps aside before a
+# session exists, or drops it (CLX_DROP_INJECTED_TOKEN).
+FOREIGN_AUTH_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+
+
+def foreign_auth_env(env=None):
+    """The foreign credentials this launch hands on to Claude Code (names only)."""
+    env = os.environ if env is None else env
+    return sorted(name for name in FOREIGN_AUTH_ENV if env.get(name))
+
+
+def transcript_epoch(value):
+    """A transcript `timestamp` ("2026-01-15T08:30:00.123Z") as float epoch, or None."""
+    if isinstance(value, bool) or not value:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.timestamp()
+
+
+def failed_turn_of(line):
+    """(epoch, kind, text, status) when a transcript line is a failed request clx can act on.
+
+    kind "limit": a usage limit - the account cannot answer until a window
+    resets. kind "auth": the login itself was refused. Everything else an API
+    error line can be (an overload, a timeout, a plain API rate limit, a bad
+    request) is not the account's fault and moving the session would not cure it.
+    """
+    try:
+        entry = json.loads(line.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    if not isinstance(entry, dict) or entry.get("isApiErrorMessage") is not True \
+            or entry.get("type") != "assistant":
+        return None
+    at = transcript_epoch(entry.get("timestamp"))
+    if at is None:
+        return None
+    message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content
+    else:
+        text = " ".join(part["text"] for part in (content or [])
+                        if isinstance(part, dict) and isinstance(part.get("text"), str))
+    error = str(entry.get("error") or "")
+    status = entry.get("apiErrorStatus")
+    if error in ("rate_limit", "billing_error", "unknown", "") and LIMIT_TEXT.search(text):
+        return (at, "limit", text, status)
+    if error == "authentication_failed" or status == 401:
+        return (at, "auth", text, status)
+    return None
+
+
+def scan_failed_turns(path, pos=None):
+    """The failed requests a transcript gained since `pos`. -> (next_pos, [events])
+
+    `pos` is where the last look ended; None is a first look, which reads at
+    most the last FAILSCAN_BYTES. Only whole lines are consumed, so a line
+    Claude Code is still writing is read by the next look - and the caller
+    stores next_pos only once it has dealt with the events.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return pos, []
+    if pos is None or pos > size or size - pos > FAILSCAN_MAX:
+        start = max(0, size - FAILSCAN_BYTES)  # a first look, a replaced file, or far behind
+        partial = start > 0
+    else:
+        start, partial = pos, False
+    if start >= size:
+        return size, []
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            blob = fh.read(size - start)
+    except OSError:
+        return pos, []
+    if partial:
+        cut = blob.find(b"\n")
+        if cut < 0:
+            return start, []
+        start += cut + 1
+        blob = blob[cut + 1:]
+    end = blob.rfind(b"\n")
+    if end < 0:
+        return start, []  # no whole line yet
+    events = []
+    for line in blob[:end].split(b"\n"):
+        if b'"isApiErrorMessage"' not in line:
+            continue
+        found = failed_turn_of(line)
+        if found:
+            events.append(found)
+    return start + end + 1, events
+
+
+def session_transcript(session_dir, meta=None):
+    """The transcript of the session living in `session_dir`, or None.
+
+    A hook payload names it (clx-session.json "transcript_path"). A session that
+    never sends one is found the way Claude Code files it: its own registry entry
+    sessions/<pid>.json holds the live sessionId and cwd, and the transcript is
+    projects/<cwd, every other character a dash>/<sessionId>.jsonl.
+    """
+    path = (meta or {}).get("transcript_path")
+    if isinstance(path, str) and path and os.path.isfile(path):
+        return path
+    pid = os.path.basename(os.path.abspath(session_dir))
+    entry = read_json(os.path.join(session_dir, "sessions", "%s.json" % pid), {})
+    entry = entry if isinstance(entry, dict) else {}
+    sid, cwd = entry.get("sessionId"), entry.get("cwd")
+    if not isinstance(sid, str) or not sid:
+        # No registry entry (an older Claude Code): the launcher's own argv.
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as fh:
+                argv = fh.read().decode("utf-8", "replace").split("\0")
+        except OSError:
+            argv = []
+        for flag in ("--session-id", "--resume"):
+            if flag in argv[:-1]:
+                sid = argv[argv.index(flag) + 1]
+                break
+        try:
+            cwd = os.readlink("/proc/%s/cwd" % pid)
+        except OSError:
+            cwd = None
+    if not isinstance(sid, str) or not re.match(r"^[A-Za-z0-9-]{8,64}$", sid):
+        return None
+    projects = os.path.join(session_dir, "projects")
+    if isinstance(cwd, str) and cwd:
+        direct = os.path.join(projects, re.sub(r"[^A-Za-z0-9]", "-", cwd), sid + ".jsonl")
+        if os.path.isfile(direct):
+            return direct
+    try:
+        names = os.listdir(projects)
+    except OSError:
+        return None
+    for name in names:
+        candidate = os.path.join(projects, name, sid + ".jsonl")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def record_auth_failure(acct, at, status=None):
+    """Remember that a real request on `acct` was refused as unauthenticated. -> bool
+
+    Stored exactly as a 401 from /usage is - the status plus the credentials
+    file it was measured against - so auth_problem() needs no second rule, a
+    re-login clears it at once and the next good /usage answer clears it too.
+    Never recorded against a credentials file written AFTER the request failed:
+    that file holds tokens the failure says nothing about.
+    """
+    facts = creds_facts(acct.dir)
+    if not facts or facts["mtime"] > at:
+        return False
+    cache = read_json(CACHE_FILE, {}) or {}
+    entry = dict(cache.get(acct.id) or {})
+    entry["status"] = "http-403" if status == 403 else "http-401"
+    entry["checkedAt"] = int(time.time())
+    entry["credsMtime"] = facts["mtime"]
+    entry.setdefault("email", acct.email)
+    entry.setdefault("dir", acct.dir)
+    cache[acct.id] = entry
+    write_json_atomic(CACHE_FILE, cache)
+    return True
+
+
+def watch_failed_turns_once(session_dir, state, final=False):
+    """Act on a failed request in this session's transcript. -> a one-word outcome.
+
+    `state` is the watcher's own memory between ticks. A failure is recorded
+    against the account - a usage limit as limitHit, a refused login as the
+    status a 401 from /usage leaves - and the ordinary hand-off decision runs at
+    once. The decision, the lock and the records are handoff_in_session's;
+    nothing in here chooses an account.
+
+    `final` is the last look at a session whose process has just gone: there is
+    nothing left to move, but the evidence still keeps the NEXT launch off an
+    account that cannot answer.
+    """
+    if os.environ.get(FAILSCAN_OFF_ENV):
+        return "off"
+    if state.get("off"):
+        return "foreign-auth"
+    clock = time.monotonic()
+    path = state.get("path")
+    if final or clock >= (state.get("look_at") or 0):
+        # The file appears with the first message and changes on /clear.
+        found = session_transcript(session_dir, read_session_meta(session_dir))
+        if found is None and path and os.path.isfile(path):
+            found = path  # the registry entry goes with the process; the file stays
+        state["look_at"] = clock + (FAILSCAN_RESOLVE if found else FAILSCAN_SEARCH)
+        if found != path:
+            state.update(path=found, pos=None, sig=None)
+            path = found
+    pending = state.get("pending")
+    sig, changed, events, pos = None, False, [], state.get("pos")
+    if path:
+        try:
+            st = os.stat(path)
+            sig = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            sig = None
+        changed = sig is not None and sig != state.get("sig")
+        if changed:
+            pos, events = scan_failed_turns(path, state.get("pos"))
+    if not events and not pending:
+        if not path or sig is None:
+            return "no-transcript"
+        if not changed:
+            return "unchanged"
+        state.update(pos=pos, sig=sig)
+        return "clean"
+
+    conf = load_conf()
+    accounts = discover()
+    if not accounts:
+        return "no-accounts"
+    accounts, _ = dedupe(accounts, conf["primary"].strip().lower())
+    refresh(accounts, force=False, only="__none__")  # cache only: no HTTP, no fork
+    kind = pending
+    with SessionLock(session_dir) as lock:
+        if not lock.held:
+            return "busy"  # nothing stored: the next tick reads the same lines again
+        meta = read_session_meta(session_dir)  # never act on a meta read before the lock
+        if not meta:
+            return "no-meta"
+        if meta.get("foreign_auth"):
+            state["off"] = True  # not this account's login: never charge it
+            return "foreign-auth"
+        apply_model(accounts, session_model({"transcript_path": path}))
+        apply_pauses(accounts, conf)
+        current = session_account(session_dir, meta, accounts)
+        tag = meta.get("pid") or os.path.basename(session_dir)
+        started = meta.get("started_at") or 0
+        moved_at = meta.get("last_handoff_at") or 0
+        # Only what THIS process did on its CURRENT account, and only once: an
+        # older line belongs to an earlier process of a resumed transcript, to
+        # the account this session has already left, or to a tick that acted.
+        fresh = [e for e in events
+                 if e[0] >= started
+                 and (not moved_at or e[0] > moved_at + FAILSCAN_GRACE)
+                 and e[0] > (meta.get("failed_turn_at") or 0)]
+        if fresh and current is not None:
+            at, kind, text, status = fresh[-1]
+            if kind == "limit":
+                record_limit_hit(current, text, now=at)
+            else:
+                record_auth_failure(current, at, status)
+            meta = dict(meta)
+            meta["failed_turn_at"] = at
+            meta["failed_turn_kind"] = kind
+            write_session_meta(session_dir, meta)
+            log_handoff("%s  %s  failed turn on %s (%s): %s  watch"
+                        % (iso_now(), tag, current.name, kind,
+                           re.sub(r"\s+", " ", text or "")[:100]))
+    if changed:
+        state.update(pos=pos, sig=sig)  # the lines are dealt with: never read them again
+    if current is None:
+        state.pop("pending", None)
+        return "no-account"
+    if not kind:
+        return "stale"
+    if final:
+        state.pop("pending", None)
+        return "recorded"
+    try:
+        threshold = float(meta.get("threshold"))
+    except (TypeError, ValueError):
+        threshold = conf["threshold"]
+    # The decision reads the cache, which now holds the evidence. Like the
+    # periodic tick, "nowhere to go" is only an answer once it was measured.
+    refresh(accounts, force=False, only="__none__")
+    if best_candidate(accounts, {current.id}, threshold) is None:
+        watch_refresh_candidates(accounts, current, threshold)  # outside the lock
+    before = current.id
+    floor = int(time.time())
+    handoff_in_session(session_dir, meta, accounts, conf, WATCH_EVENT,
+                       limit_hit=(kind == "limit"))
+    after = read_session_meta(session_dir) or {}
+    if (after.get("last_decide_at") or 0) < floor:
+        # The hook held the lock for those few ms: decide again on the next
+        # ticks. Bounded, so a session that can never decide costs nothing.
+        tries = (state.get("pending_tries") or 0) + 1
+        if tries <= FAILSCAN_RETRIES:
+            state.update(pending=kind, pending_tries=tries)
+            return "busy"
+    state.pop("pending", None)
+    state.pop("pending_tries", None)
+    return "moved" if after.get("account_id") != before else "recorded"
+
+
 def heal_watch_loop(session_dir):
     """One lstat per tick; nothing is parsed until the link actually changes.
 
     On top of that, every WATCH_DECIDE seconds the hand-off decision runs here
     too - see watch_decide_once(). The clock is measured from the END of the last
     decision, so a decision that had to fetch can never shorten the next gap.
+    Every tick also stats the session's transcript, and reads what it gained
+    only when it grew - see watch_failed_turns_once().
     """
     link = os.path.join(session_dir, ".credentials.json")
     session_pid = os.path.basename(session_dir)
     signature = "start"  # never equal to a real stat tuple, so the first tick checks
     last_decide = time.monotonic()  # the launcher just chose: first decision in 30 s
+    failscan = {}  # watch_failed_turns_once()'s memory between ticks
 
     def look():
         try:
@@ -2483,6 +2954,12 @@ def heal_watch_loop(session_dir):
         if not os.path.isdir(session_dir):
             return
         if not pid_alive(session_pid):
+            try:
+                # A turn that failed as the process went down still names an
+                # account that cannot answer: the next launch must not pick it.
+                watch_failed_turns_once(session_dir, failscan, final=True)
+            except Exception:
+                pass
             finish()
             return
         seen = look()
@@ -2492,6 +2969,11 @@ def heal_watch_loop(session_dir):
             except Exception:
                 pass
             signature = look()  # the heal moves the link itself, so re-read after it
+        try:
+            if watch_failed_turns_once(session_dir, failscan) == "moved":
+                signature = look()  # a hand-off moves the link: do not "heal" it next tick
+        except Exception:
+            pass
         if time.monotonic() - last_decide >= WATCH_DECIDE:
             try:
                 watch_decide_once(session_dir)
@@ -2822,6 +3304,17 @@ def cmd_status(conf, accounts, calls):
     dead = [a for a in accounts if auth_problem(a)]
     for acct in dead:
         print(paint("login: %s (never launched on or handed to until then)" % login_hint(acct)))
+    cache = read_json(CACHE_FILE, {}) or {}
+    for acct in accounts:
+        if not any(isinstance(w, dict) and w.get("limit_hit") for w in (acct.windows or {}).values()):
+            continue
+        hit = (cache.get(acct.id) or {}).get("limitHit") or {}
+        at = hit.get("at")
+        print("limit hit: %s answered \"%s\"%s - counted as 100%% on %s until it resets or "
+              "/usage measures it again"
+              % (acct.name, hit.get("text") or "usage limit",
+                 " %s ago" % fmt_age(now - at) if isinstance(at, (int, float)) else "",
+                 hit.get("label") or hit.get("window") or "that window"))
     for acct in accounts:
         left = renewal_due(acct)
         if left is not None:
@@ -3213,7 +3706,7 @@ def apply_heal(session_dir, meta, current, accounts, conf, event):
     return meta, current, None
 
 
-def handoff_in_session(session_dir, meta, accounts, conf, event, payload=None):
+def handoff_in_session(session_dir, meta, accounts, conf, event, payload=None, limit_hit=False):
     """The in-process hand-off: heal, decide, do, tell the model.
 
     Everything from the metadata re-read to the last write happens under the
@@ -3224,6 +3717,9 @@ def handoff_in_session(session_dir, meta, accounts, conf, event, payload=None):
     calls it on a timer with WATCH_EVENT, so a session that fires no hook events
     at all is still moved. The decision is the same one either way - `event` only
     decides who may print, and what the desktop notice says.
+
+    `limit_hit` says a request on this session's account has just FAILED on a
+    usage limit (watch_failed_turns_once): the move skips the loop guard.
     """
     with SessionLock(session_dir) as lock:
         if not lock.held:
@@ -3284,7 +3780,10 @@ def handoff_in_session(session_dir, meta, accounts, conf, event, payload=None):
         # The loop guard is for usage moves. A dead login cannot ping-pong (it is
         # never a target), and waiting out the gap on it is ten minutes of
         # "Login expired" - so leaving one is never deferred.
-        if spent and nxt is not None and (dead or time.time() - last >= HANDOFF_MIN_GAP):
+        # A request that just FAILED on a usage limit skips the guard too: the
+        # account has proven it cannot answer, and the next turn must not wait.
+        if spent and nxt is not None and (dead or limit_hit
+                                          or time.time() - last >= HANDOFF_MIN_GAP):
             meta = perform_handoff(session_dir, meta, current, nxt, accounts, threshold, event, spent)
         elif adopted is None and event != WATCH_EVENT:
             # Not on a watcher tick: active-account.json is "last prompt wins", and
@@ -3521,28 +4020,43 @@ def scan_argv(argv):
     return positional, kinds
 
 
-def wants_session(passthrough):
-    """True only for an interactive REPL launch on this terminal.
+def long_lived_stdio(passthrough):
+    """`--input-format stream-json`: a driver feeds turns over stdin for hours."""
+    for i, arg in enumerate(passthrough):
+        if arg == "--input-format" and i + 1 < len(passthrough) \
+                and passthrough[i + 1] == "stream-json":
+            return True
+        if arg == "--input-format=stream-json":
+            return True
+    return False
 
-    Everything else - subcommands, -p, --version, a pipe instead of a tty - keeps
-    the plain exec into the account dir: there is no session to hand over.
+
+def wants_session(passthrough):
+    """True for an interactive REPL on this terminal, and for a long-lived driver.
+
+    The OpenClaw gateway's Claude CLI backend (and anything else built on the
+    stream-json protocol) has no tty, but its process lives for hours and takes
+    turn after turn on stdin - exactly what a session dir is for. Everything else
+    - subcommands, a one-shot -p, --version, a pipe instead of a tty - keeps the
+    plain exec into the account dir: there is no session to hand over.
     """
     if os.environ.get(INSIDE_ENV) or os.environ.get(NO_SESSION_ENV):
         return False
+    positional, kinds = scan_argv(passthrough)
+    if positional and passthrough[positional[0]] in CLAUDE_SUBCOMMANDS:
+        return False
+    if long_lived_stdio(passthrough):
+        return True
     try:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return False
     except Exception:
         return False
-    positional, kinds = scan_argv(passthrough)
     for i, arg in enumerate(passthrough):
         if kinds.get(i) != "flag":
             continue
         if arg.split("=", 1)[0] in NON_REPL_FLAGS:
             return False
-    # A subcommand is the first positional; a prompt positional is fine.
-    if positional and passthrough[positional[0]] in CLAUDE_SUBCOMMANDS:
-        return False
     return True
 
 
@@ -3636,6 +4150,22 @@ def main(argv):
         i += 1
     passthrough = argv[i:]
 
+    # The caller already chose a login and handed its token in on a file
+    # descriptor. Claude Code would answer on that token whatever clx chose, so
+    # pretending to choose would only make every record wrong: run on the
+    # caller's choice, before any account of clx's own is looked at. clx's own
+    # commands (--status, --pause, ...) still answer.
+    injected = [name for name in INJECTED_TOKEN_ENV if os.environ.get(name)]
+    own_action = (do_status or do_sync or do_init or forced_name is not None
+                  or threshold_override is not None or pause_verb is not None)
+    if injected and not own_action and not os.environ.get(DROP_TOKEN_ENV):
+        warn("clx: %s is set - running on the login the caller chose, not choosing an "
+             "account (%s=1 lets clx choose)" % ("/".join(injected), DROP_TOKEN_ENV))
+        binary = claude_binary()
+        env = dict(os.environ)
+        env[INSIDE_ENV] = "1"  # a nested `claude` goes straight to the real binary
+        os.execve(binary, [binary] + passthrough, env)
+
     conf = load_conf()
     if threshold_override is not None:
         try:
@@ -3707,7 +4237,7 @@ def main(argv):
     chosen, nxt, reason, notes = select(accounts, conf, forced=forced)
     binary = claude_binary()  # fail before anything is created
 
-    # Interactive REPL: run it inside ~/.clx-sessions/<pid>, whose
+    # Interactive REPL or long-lived driver: run it inside ~/.clx-sessions/<pid>, whose
     # .credentials.json is a symlink into the chosen account. The hooks hand the
     # session to another account by re-pointing that symlink - the process, its
     # subagents and its background tasks never stop.
@@ -3742,6 +4272,13 @@ def main(argv):
 
     env = dict(os.environ)
     env[INSIDE_ENV] = "1"  # a nested `claude` goes straight to the real binary
+    # Reached with an injected token only under CLX_DROP_INJECTED_TOKEN: that
+    # token would beat .credentials.json, so with it set clx's choice - and every
+    # later hand-off - is ignored. Only the variable is dropped; the descriptor
+    # itself is never read.
+    dropped = [name for name in INJECTED_TOKEN_ENV if env.pop(name, None) is not None]
+    if dropped:
+        warn("clx: ignoring the injected %s, using %s's login" % ("/".join(dropped), chosen.name))
     if session_dir:
         env["CLAUDE_CONFIG_DIR"] = session_dir
     elif chosen.is_default:
